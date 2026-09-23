@@ -105,7 +105,7 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: ${REGISTRY}/deerflow-gov:v2
+          image: ${REGISTRY}/deerflow-gov:v3
           imagePullPolicy: IfNotPresent
           ports: [{containerPort: 8001}]
           env:

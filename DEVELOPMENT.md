@@ -135,3 +135,27 @@ DEER_FLOW_CONFIG_PATH=<cfg> DEER_FLOW_AUTH_DISABLED=1 PYTHONPATH=<治理包目�
 - AEP 临时密码 ≥12 字符（PASSWORD_POLICY_VIOLATION）。
 - k3s 系统 Pod 拉不动 docker.io：registries.yaml 镜像源或 `docker save \| k3s ctr
   images import`；pause 要精确 `3.10.2`。
+
+## 8. 记忆栈（memory-system 命名空间）
+
+数字员工长期记忆 = OpenViking（跨会话记忆/知识/技能）；会话线程状态仍走
+DeerFlow 实例自身。部署 `k3s/memory-stack.yaml`（占位符）→ 生成
+`memory-stack.local.yaml`（gitignored）→ apply：
+
+- **embed-server**（`zhiyuan/embed-server:0.1.0`）：llama.cpp b11125 +
+  bge-small-zh-v1.5-f16 GGUF（HF 镜像 CompendiumLabs/bge-small-zh-v1.5-gguf），
+  OpenAI 兼容 `/v1/embeddings`，512 维。模型打进镜像，开箱即用。
+- **openviking**（`zhiyuan/openviking:0.4.21`，volces 镜像仓拉取后 export/import
+  拍平入库）：ov.conf 里 embedding 指向 embed-server Service，VLM 指向 GLM
+  网关（**目标态：两者都走 Higress 模型路由**，AEP 管凭证，用户可自主配模型）。
+  不要给容器传 args（entrypoint 自带启动+健康门，传参会 `exec: --host`）。
+- 账号开通：root key（local manifest 生成时随机）→
+  `POST /api/v1/admin/accounts {"account_id":"zhiyuan","admin_user_id":"deerflow"}`
+  → 响应里的 `user_key` 填入 DeerFlow secrets `OPENVIKING_API_KEY`。
+- DeerFlow 侧：config.yaml `memory.manager_class: openviking`，
+  `owner_user_id: default`（auth-disabled 单用户下的固定搭配；key 换用户时
+  manager 会拒绝共享凭证）。**langchain-openviking 0.1.0 的
+  `viking://user/memories` 拼写在服务端 ≥0.4 被拒（400）**——DeerFlow 本地
+  补丁已改 `viking://~/`，镜像 deerflow-gov:v3 起携带。
+- 验证路径：告知事实 → OpenViking 出现 `memories/entities/…` → 删 Pod 重建
+  → **全新会话**仍能答出 → `search/find` 应为 200。

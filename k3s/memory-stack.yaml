@@ -1,0 +1,161 @@
+# Memory stack on k3s: embedding server + OpenViking.
+# Real credentials go in memory-stack.local.yaml (gitignored); this template
+# uses placeholders. Apply order: create the local copy, then kubectl apply -f.
+#
+# NOTE (architecture): the VLM/embedding api_base below uses direct endpoints
+# for validation only. Target state routes both through the Higress model
+# gateway (AEP-managed credentials + routes) so users can self-configure
+# model providers — never ship direct provider IPs in production config.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: memory-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed-server
+  namespace: memory-system
+  labels: {app: embed-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embed-server}
+  template:
+    metadata:
+      labels: {app: embed-server}
+    spec:
+      containers:
+        - name: embed-server
+          image: 172.18.5.251:8081/zhiyuan/embed-server:0.1.0
+          args: ["--port", "8080", "-m", "/opt/models/bge-small-zh-v1.5-f16.gguf"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed-server
+  namespace: memory-system
+spec:
+  selector: {app: embed-server}
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openviking-data
+  namespace: memory-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# ov.conf rendered from this ConfigMap; secrets referenced below are created
+# in memory-stack.local.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openviking-config
+  namespace: memory-system
+data:
+  ov.conf: |
+    {
+      "storage": {
+        "workspace": "/app/.openviking/openviking_workspace",
+        "vectordb": {"name": "context", "backend": "local"},
+        "agfs": {"backend": "local"}
+      },
+      "log": {"level": "INFO", "output": "stdout"},
+      "server": {
+        "host": "0.0.0.0",
+        "port": 1933,
+        "root_api_key": "__OPENVIKING_ROOT_API_KEY__"
+      },
+      "embedding": {
+        "dense": {
+          "api_base": "http://embed-server:8080/v1",
+          "api_key": "none",
+          "provider": "openai",
+          "dimension": 512,
+          "model": "bge-small-zh-v1.5"
+        }
+      },
+      "vlm": {
+        "api_base": "__VLM_API_BASE__",
+        "api_key": "__VLM_API_KEY__",
+        "provider": "openai",
+        "model": "__VLM_MODEL__"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openviking
+  namespace: memory-system
+  labels: {app: openviking}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: openviking}
+  template:
+    metadata:
+      labels: {app: openviking}
+    spec:
+      containers:
+        - name: openviking
+          image: 172.18.5.251:8081/zhiyuan/openviking:0.4.21
+          # No args: the image entrypoint starts openviking-server itself and
+          # appends a health gate. Passing flags here breaks it (exec: --host).
+          ports:
+            - containerPort: 1933
+          volumeMounts:
+            - name: data
+              mountPath: /app/.openviking
+            - name: config
+              mountPath: /app/.openviking/ov.conf
+              subPath: ov.conf
+          readinessProbe:
+            httpGet: {path: /ready, port: 1933}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 1933}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 4Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openviking-data
+        - name: config
+          configMap:
+            name: openviking-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openviking
+  namespace: memory-system
+spec:
+  selector: {app: openviking}
+  ports:
+    - port: 1933
+      targetPort: 1933
