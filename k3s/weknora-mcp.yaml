@@ -1,0 +1,57 @@
+# WeKnora MCP bridge: exposes WeKnora knowledge search to digital employees
+# over MCP (http transport, bearer-gated). WeKnora v0.8.0 has no in-app MCP
+# endpoint yet (lands upstream after v0.8.0); this uses the official PyPI
+# package tencent-weknora-mcp 1.1.1. When WeKnora ships built-in endpoints
+# (/mcp/{endpoint_id}), replace this deployment with an endpoint created via
+# the WeKnora admin API and update the DeerFlow extensions URL.
+#
+# Real values (WEKNORA_API_KEY bearer + MCP token) go in weknora-mcp.local.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weknora-mcp
+  namespace: weknora
+  labels: {app: weknora-mcp}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: weknora-mcp}
+  template:
+    metadata:
+      labels: {app: weknora-mcp}
+    spec:
+      containers:
+        - name: mcp
+          image: 172.18.5.251:8081/zhiyuan/weknora-mcp:0.1.0
+          env:
+            - {name: WEKNORA_BASE_URL, value: "http://app.weknora.svc.cluster.local:8080/api/v1"}
+            # retrieve-scoped WeKnora tenant API key, KB-whitelisted
+            - {name: WEKNORA_API_KEY, value: "__WEKNORA_API_KEY__"}
+            - {name: MCP_TRANSPORT, value: "http"}
+            - {name: MCP_HOST, value: "0.0.0.0"}
+            - {name: MCP_PORT, value: "8830"}
+            # bearer gate DeerFlow authenticates with (X-MCP-Auth-Token)
+            - {name: MCP_SERVER_AUTH_TOKEN, value: "__MCP_SERVER_AUTH_TOKEN__"}
+          ports:
+            - containerPort: 8830
+          # MCP endpoint returns 401 to unauthenticated probes by design;
+          # probe at the TCP level instead.
+          readinessProbe:
+            tcpSocket: {port: 8830}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: 8830}
+            initialDelaySeconds: 20
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weknora-mcp
+  namespace: weknora
+spec:
+  selector: {app: weknora-mcp}
+  ports:
+    - port: 8830
+      targetPort: 8830

@@ -81,3 +81,10 @@ GOV_SERVICE_PASSWORD / GOV_DEFAULT_AEP_USER_ID
 - G1-G4（直连：允许/跨部门拒绝/异用户允许/质量）
 - P1-P3（IM：映射+范围内 / 映射+范围外 / 未映射 fail-closed）
 - 对话端 adapter 五用例（chat-runtime-adapter 仓）
+
+## 文档
+
+平台全量文档（产品设计、白皮书、需求、技术方案、架构图、API、实施、开发指南）在私有文档仓：
+**[rongxinzy/zhiyuan-docs](https://github.com/rongxinzy/zhiyuan-docs)** —— 部署细节以其中
+[07-deployment/k3s-bringup.md](https://github.com/rongxinzy/zhiyuan-docs/blob/main/07-deployment/k3s-bringup.md)
+为准；本仓 DEVELOPMENT.md 保留为运维快查。

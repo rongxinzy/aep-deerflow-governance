@@ -14,6 +14,7 @@ metadata:
   namespace: digital-employees
 type: Opaque
 stringData:
+  WEKNORA_MCP_BEARER: __WEKNORA_MCP_BEARER__
   DEER_BENCH_API_KEY: ${GLM_API_KEY}
   GOV_SERVICE_USERNAME: gov-agent-im
   GOV_SERVICE_PASSWORD: ${GOV_SERVICE_PASSWORD}
@@ -90,6 +91,34 @@ data:
       }
     }
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deerflow-gov-extensions
+  namespace: digital-employees
+data:
+  extensions_config.json: |
+    {
+      "mcpServers": {
+        "benchdept": {
+          "enabled": true,
+          "type": "stdio",
+          "command": "/app/backend/.venv/bin/python",
+          "args": [
+            "/opt/governance/mcp_dept.py"
+          ]
+        },
+        "weknora": {
+          "enabled": true,
+          "type": "http",
+          "url": "http://weknora-mcp.weknora.svc.cluster.local:8830/mcp",
+          "headers": {
+            "X-MCP-Auth-Token": "$WEKNORA_MCP_BEARER"
+          }
+        }
+      }
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -111,11 +140,13 @@ spec:
           env:
             - {name: DEER_FLOW_AUTH_DISABLED, value: "1"}
             - {name: DEER_FLOW_CONFIG_PATH, value: /app/config.yaml}
+            - {name: DEER_FLOW_EXTENSIONS_CONFIG_PATH, value: /app/extensions-config/extensions_config.json}
             - {name: DEER_FLOW_HOME, value: /var/lib/deerflow}
           envFrom:
             - secretRef: {name: deerflow-gov-secrets}
           volumeMounts:
             - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: extensions, mountPath: /app/extensions-config}
             - {name: home, mountPath: /var/lib/deerflow}
           readinessProbe:
             httpGet: {path: /health, port: 8001}
@@ -127,6 +158,8 @@ spec:
       volumes:
         - name: config
           configMap: {name: deerflow-gov-config}
+        - name: extensions
+          configMap: {name: deerflow-gov-extensions}
         - name: home
           emptyDir: {}
 ---

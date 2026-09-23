@@ -1,0 +1,69 @@
+# Platform embedding route through Higress.
+#
+# ai-proxy 2.0.1's openaiCustomUrl only rewrites headers, not the envoy route,
+# so the upstream is carried by a no-selector Service + Endpoints pointing at
+# the embed-server Service ClusterIP (stable across pod restarts) — the same
+# pattern as aep-model-gateway for GLM.
+#
+# Path note: this ingress claims /v1/embeddings (longest-prefix win over the
+# model-gateway's /v1) so embeddings land here while /v1/chat/completions keeps
+# routing to the GLM gateway. Wire model name: bench-embed -> bge-small-zh-v1.5.
+#
+# Endpoints points at __EMBED_SERVER_CLUSTER_IP__ (fill from
+# `kubectl get svc embed-server -n memory-system -o jsonpath='{.spec.clusterIP}'`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: aep-embed-gateway
+  namespace: higress-system
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: aep-embed-gateway
+  namespace: higress-system
+subsets:
+  - addresses:
+      - ip: __EMBED_SERVER_CLUSTER_IP__
+    ports:
+      - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aep-embed-gateway
+  namespace: higress-system
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - path: /v1/embeddings
+            pathType: Prefix
+            backend:
+              service:
+                name: aep-embed-gateway
+                port:
+                  number: 80
+---
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: aep-ai-proxy-embed
+  namespace: higress-system
+spec:
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-proxy:2.0.1
+  failStrategy: FAIL_CLOSE
+  defaultConfigDisable: true
+  matchRules:
+    - config:
+        provider:
+          type: openai
+          modelMapping:
+            bench-embed: bge-small-zh-v1.5
+      ingress:
+        - aep-embed-gateway

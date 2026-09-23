@@ -87,6 +87,7 @@ data:
         "root_api_key": "__OPENVIKING_ROOT_API_KEY__"
       },
       "embedding": {
+        "allow_metadata_override": true,
         "dense": {
           "api_base": "http://embed-server:8080/v1",
           "api_key": "none",
