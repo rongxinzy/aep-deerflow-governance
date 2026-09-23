@@ -25,6 +25,9 @@ spec:
     defaultAEPUser: <aep-user-uuid>
     governedTools: [benchdept__dept_revenue, benchdept__dept_headcount]
     teamNames: {gov-rd: 研发部, gov-sales3: 销售三部}
+  a2a:                          # 可选：暴露 A2A 委托端点（operator 渲染专属实例）
+    image: 172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0
+    maxDepth: 3
   credentials:
     name: de-platform-creds     # DEER_BENCH_API_KEY/GOV_*/WEKNORA_MCP_BEARER/OPENVIKING_ROOT_API_KEY
   nodePort: 30102

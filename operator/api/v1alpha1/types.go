@@ -80,6 +80,8 @@ type DigitalEmployeeSpec struct {
 	Replicas    int32          `json:"replicas,omitempty"`
 	// NodePort exposes the runtime; 0 means ClusterIP only.
 	NodePort int32 `json:"nodePort,omitempty"`
+	// A2A optionally exposes this employee over the A2A delegation contract.
+	A2A *A2ASpec `json:"a2a,omitempty"`
 }
 
 type DigitalEmployeePhase string

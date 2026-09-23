@@ -94,6 +94,10 @@ func (in *DigitalEmployeeSpec) DeepCopyInto(out *DigitalEmployeeSpec) {
 	}
 	in.Governance.DeepCopyInto(&out.Governance)
 	out.Credentials = *in.Credentials.DeepCopy()
+	if in.A2A != nil {
+		out.A2A = new(A2ASpec)
+		in.A2A.DeepCopyInto(out.A2A)
+	}
 }
 
 func (in *DigitalEmployeeSpec) DeepCopy() *DigitalEmployeeSpec {
@@ -162,4 +166,17 @@ func (in *DigitalEmployeeList) DeepCopy() *DigitalEmployeeList {
 
 func (in *DigitalEmployeeList) DeepCopyObject() runtime.Object {
 	return in.DeepCopy()
+}
+
+func (in *A2ASpec) DeepCopyInto(out *A2ASpec) {
+	*out = *in
+}
+
+func (in *A2ASpec) DeepCopy() *A2ASpec {
+	if in == nil {
+		return nil
+	}
+	out := new(A2ASpec)
+	in.DeepCopyInto(out)
+	return out
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -210,6 +211,23 @@ func (r *EmployeeReconciler) ensureChildren(ctx context.Context, employee *v1alp
 	}
 	if err := safeCreateOrUpdate(ctx, r.Client, service); err != nil {
 		return fmt.Errorf("service: %w", err)
+	}
+
+	if employee.Spec.A2A != nil {
+		a2aDeployment := renderA2ADeployment(employee)
+		if err := controllerutil.SetControllerReference(employee, a2aDeployment, r.Scheme); err != nil {
+			return err
+		}
+		if err := safeCreateOrUpdate(ctx, r.Client, a2aDeployment); err != nil {
+			return fmt.Errorf("a2a deployment: %w", err)
+		}
+		a2aService := renderA2AService(employee)
+		if err := controllerutil.SetControllerReference(employee, a2aService, r.Scheme); err != nil {
+			return err
+		}
+		if err := safeCreateOrUpdate(ctx, r.Client, a2aService); err != nil {
+			return fmt.Errorf("a2a service: %w", err)
+		}
 	}
 	return nil
 }
@@ -461,6 +479,8 @@ func memkeySecretName(employee *v1alpha1.DigitalEmployee) string {
 }
 
 func intstrFromInt(v int32) intstr.IntOrString { return intstr.FromInt32(v) }
+
+func int32String(v int32) string { return strconv.FormatInt(int64(v), 10) }
 
 func labels(employee *v1alpha1.DigitalEmployee) map[string]string {
 	return map[string]string{"app": "de-" + employee.Name, "digitalemployee.zhiyuan.io/name": employee.Name}

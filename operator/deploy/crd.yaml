@@ -124,6 +124,22 @@ spec:
                   format: int32
                   minimum: 30000
                   maximum: 32767
+                a2a:
+                  type: object
+                  required: [image]
+                  properties:
+                    image:
+                      type: string
+                    maxDepth:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 10
+                    nodePort:
+                      type: integer
+                      format: int32
+                      minimum: 30000
+                      maximum: 32767
             status:
               type: object
               properties:
