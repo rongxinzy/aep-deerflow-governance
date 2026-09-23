@@ -98,6 +98,8 @@ data:
       },
       "vlm": {
         "api_base": "__VLM_API_BASE__",
+        "timeout": 120,
+        "thinking": false,
         "api_key": "__VLM_API_KEY__",
         "provider": "openai",
         "model": "__VLM_MODEL__"

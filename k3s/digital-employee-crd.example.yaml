@@ -1,0 +1,30 @@
+# Example DigitalEmployee: apply after the CRD + operator are installed
+# (operator/deploy/) and the platform credentials secret exists.
+apiVersion: digitalemployee.zhiyuan.io/v1alpha1
+kind: DigitalEmployee
+metadata:
+  name: sales-helper
+  namespace: digital-employees
+spec:
+  displayName: 销售助理
+  runtime:
+    type: deerflow
+    image: 172.18.5.251:8081/zhiyuan/deerflow-gov:v5
+    model: bench-glm            # wire model id routed by Higress
+  memory:
+    type: openviking
+    serverURL: http://openviking.memory-system.svc.cluster.local:1933
+    accountID: zhiyuan
+    singleTenantInstance: true  # per-employee memory user (auth-disabled runtime)
+  knowledge:
+    type: weknora
+    mcpURL: http://weknora-mcp.weknora.svc.cluster.local:8830/mcp
+  governance:
+    aepBaseURL: http://aep-control-service.aep-system.svc:8080
+    deploymentID: demo
+    defaultAEPUser: <aep-user-uuid>
+    governedTools: [benchdept__dept_revenue, benchdept__dept_headcount]
+    teamNames: {gov-rd: 研发部, gov-sales3: 销售三部}
+  credentials:
+    name: de-platform-creds     # DEER_BENCH_API_KEY/GOV_*/WEKNORA_MCP_BEARER/OPENVIKING_ROOT_API_KEY
+  nodePort: 30102

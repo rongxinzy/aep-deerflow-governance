@@ -1,0 +1,72 @@
+# Operator deployment: the operator always holds full rights over
+# DigitalEmployee CRs and its child resources in the watched namespace.
+# Whether a user may create a digital employee is business-layer policy.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: de-operator
+  namespace: digital-employees
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: de-operator
+  namespace: digital-employees
+rules:
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["digitalemployees"]
+    verbs: ["*"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["digitalemployees/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "pods", "events"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: de-operator
+  namespace: digital-employees
+subjects:
+  - kind: ServiceAccount
+    name: de-operator
+    namespace: digital-employees
+roleRef:
+  kind: Role
+  name: de-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-operator
+  namespace: digital-employees
+  labels: {app: de-operator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-operator}
+  template:
+    metadata:
+      labels: {app: de-operator}
+    spec:
+      serviceAccountName: de-operator
+      containers:
+        - name: operator
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.1.0
+          args: ["--namespace", "digital-employees"]
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8081}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8081}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
