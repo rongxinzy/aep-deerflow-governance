@@ -1,0 +1,142 @@
+# Template: substitute ${...} placeholders (see README) before applying.
+# Keep the real deployment (deployment.local.yaml) out of version control.
+# Digital-employee runtime on k3s: governed DeerFlow gateway.
+# Apply order: secret.yaml, configmap.yaml, deployment.yaml, service.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: digital-employees
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deerflow-gov-secrets
+  namespace: digital-employees
+type: Opaque
+stringData:
+  DEER_BENCH_API_KEY: ${GLM_API_KEY}
+  GOV_SERVICE_USERNAME: gov-agent-im
+  GOV_SERVICE_PASSWORD: ${GOV_SERVICE_PASSWORD}
+  # Phase-1 fixture: zhang (销售三部)
+  GOV_DEFAULT_AEP_USER: ${GOV_DEFAULT_AEP_USER_ID}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deerflow-gov-config
+  namespace: digital-employees
+data:
+  config.yaml: |
+    {
+      "config_version": 46,
+      "log_level": "info",
+      "models": [
+        {
+          "name": "glm-flash",
+          "display_name": "GLM-5.3-Flash",
+          "use": "langchain_openai:ChatOpenAI",
+          "model": "GLM-5.3-Flash",
+          "api_key": "$DEER_BENCH_API_KEY",
+          "base_url": "http://${GLM_GATEWAY}/v1",
+          "request_timeout": 300.0,
+          "max_retries": 2,
+          "supports_vision": false,
+          "supports_thinking": false
+        }
+      ],
+      "sandbox": {
+        "use": "deerflow.sandbox.local:LocalSandboxProvider",
+        "allow_host_bash": false
+      },
+      "subagents": {
+        "max_total_per_run": 6
+      },
+      "channels": {
+        "langgraph_url": "http://127.0.0.1:8001/api",
+        "gateway_url": "http://127.0.0.1:8001",
+        "feishu": {
+          "enabled": true,
+          "app_id": "cli_gov",
+          "app_secret": "gov-secret",
+          "domain": "http://${NODE_IP}:18086"
+        }
+      },
+      "extensions": {
+        "middlewares": [
+          {
+            "class": "aep_deerflow_governance:AepGovernanceMiddleware",
+            "kwargs": {
+              "aep_base_url": "http://${NODE_IP}:18080",
+              "deployment_id": "demo",
+              "service_username": "$GOV_SERVICE_USERNAME",
+              "service_password": "$GOV_SERVICE_PASSWORD",
+              "default_aep_user": "$GOV_DEFAULT_AEP_USER",
+              "identity_source_id": "gov-feishu",
+              "governed_tools": [
+                "benchdept__dept_revenue",
+                "benchdept__dept_headcount",
+                "dept_revenue",
+                "dept_headcount"
+              ],
+              "team_names": {
+                "gov-rd": "研发部",
+                "gov-sales3": "销售三部",
+                "gov-hr": "人力资源部"
+              },
+              "scope_cache_seconds": 30
+            }
+          }
+        ]
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflow-gateway
+  namespace: digital-employees
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: deerflow-gateway}
+  template:
+    metadata:
+      labels: {app: deerflow-gateway}
+    spec:
+      containers:
+        - name: gateway
+          image: ${REGISTRY}/deerflow-gov:v2
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8001}]
+          env:
+            - {name: DEER_FLOW_AUTH_DISABLED, value: "1"}
+            - {name: DEER_FLOW_CONFIG_PATH, value: /app/config.yaml}
+            - {name: DEER_FLOW_HOME, value: /var/lib/deerflow}
+          envFrom:
+            - secretRef: {name: deerflow-gov-secrets}
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: home, mountPath: /var/lib/deerflow}
+          readinessProbe:
+            httpGet: {path: /health, port: 8001}
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: config
+          configMap: {name: deerflow-gov-config}
+        - name: home
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflow-gateway
+  namespace: digital-employees
+spec:
+  type: NodePort
+  selector: {app: deerflow-gateway}
+  ports:
+    - {port: 8001, targetPort: 8001, nodePort: 30101}

@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+k3s/deployment.local.yaml
