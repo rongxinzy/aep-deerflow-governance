@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 k3s/*.local.yaml
+portal/de-portal
+portal/portal
+operator/de-operator
+operator/image/
