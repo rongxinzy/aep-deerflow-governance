@@ -77,6 +77,11 @@ type DigitalEmployeeSpec struct {
 	Governance  GovernanceSpec `json:"governance"`
 	// Credentials references the shared platform secret.
 	Credentials CredentialsRef `json:"credentials"`
+	// Owner is the AEP user id of the employee's owner (set by the business
+	// layer; the operator never interprets it).
+	Owner string `json:"owner,omitempty"`
+	// OwnerName is the owner's AEP username for display.
+	OwnerName string `json:"ownerName,omitempty"`
 	Replicas    int32          `json:"replicas,omitempty"`
 	// NodePort exposes the runtime; 0 means ClusterIP only.
 	NodePort int32 `json:"nodePort,omitempty"`

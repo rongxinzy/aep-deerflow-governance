@@ -1,0 +1,85 @@
+# de-portal: business layer for digital employees. It is the only writer
+# of DigitalEmployee CRs besides platform admins — end users authenticate
+# with AEP tokens and never touch Kubernetes. Operator keeps full CR
+# rights; this Role scopes the portal to exactly what its API needs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: de-portal
+  namespace: digital-employees
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: de-portal
+  namespace: digital-employees
+rules:
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["digitalemployees"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: de-portal
+  namespace: digital-employees
+subjects:
+  - kind: ServiceAccount
+    name: de-portal
+    namespace: digital-employees
+roleRef:
+  kind: Role
+  name: de-portal
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-portal
+  namespace: digital-employees
+  labels: {app: de-portal}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-portal}
+  template:
+    metadata:
+      labels: {app: de-portal}
+    spec:
+      serviceAccountName: de-portal
+      containers:
+        - name: portal
+          image: 172.18.5.251:8081/zhiyuan/de-portal:0.1.0
+          env:
+            - {name: PORTAL_POLICY_MODE, value: approval}
+            - {name: PORTAL_QUOTA_PER_USER, value: "2"}
+            - {name: PORTAL_ADMIN_USERS, value: "admin"}
+            - {name: PORTAL_ADMIN_ROLES, value: "admin,platform-admin"}
+          envFrom:
+            - secretRef: {name: de-portal-db}
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8090}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8090}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: de-portal
+  namespace: digital-employees
+spec:
+  type: NodePort
+  selector: {app: de-portal}
+  ports:
+    - port: 8090
+      targetPort: 8090
+      nodePort: 30190

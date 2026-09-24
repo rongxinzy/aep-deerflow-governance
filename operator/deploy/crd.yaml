@@ -114,6 +114,10 @@ spec:
                   properties:
                     name:
                       type: string
+                owner:
+                  type: string
+                ownerName:
+                  type: string
                 replicas:
                   type: integer
                   format: int32
