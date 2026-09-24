@@ -165,13 +165,22 @@ class AepGovernanceMiddleware(AgentMiddleware):
         self.cache_seconds = scope_cache_seconds
         self.identities = _IdentityResolver(self.client, identity_source_id, max(scope_cache_seconds, 30)) if identity_source_id else None
         self._scope_cache: dict[str, tuple[float, frozenset[str]]] = {}
+        self._aep_user_cache: dict[str, tuple[float, bool]] = {}
         self._cache_lock = threading.Lock()
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:
-        """Identity chain: IM platform sender -> DeerFlow user map -> default.
+        """Identity chain: IM platform sender -> DeerFlow user map -> runtime user -> default.
 
         Returns None for an unmapped IM sender (fail closed everywhere).
+
+        The runtime-user branch covers the web-chat path: the portal proxies
+        browser sessions to the employee runtime with
+        ``X-DeerFlow-Owner-User-Id`` set to the caller's AEP user id, so the
+        runtime ``user_context`` id IS an AEP user id. It is validated against
+        the AEP data-scope API (positive cache, TTL-bounded) before being
+        trusted — a stale or fabricated id falls back to ``default_aep_user``
+        instead of gaining its (nonexistent) scope.
         """
         context = getattr(runtime, "context", None) if runtime is not None else None
         if isinstance(context, dict) and context.get("channel_user_id"):
@@ -182,11 +191,31 @@ class AepGovernanceMiddleware(AgentMiddleware):
         try:
             from deerflow.runtime.user_context import get_current_user
             user = get_current_user()
-            if user is not None and getattr(user, "id", None) in self.user_map:
-                return self.user_map[user.id]
+            user_id = str(getattr(user, "id", "") or "") if user is not None else ""
         except Exception:
-            pass
+            user_id = ""
+        if user_id:
+            if user_id in self.user_map:
+                return self.user_map[user_id]
+            if self._is_aep_user(user_id):
+                return user_id
         return self.default_aep_user
+
+    def _is_aep_user(self, user_id: str) -> bool:
+        """Positive-cache check that *user_id* resolves in AEP (data-scope API)."""
+        now = time.time()
+        with self._cache_lock:
+            hit = self._aep_user_cache.get(user_id)
+            if hit is not None and now - hit[0] < self.cache_seconds:
+                return hit[1]
+        try:
+            self.client.data_scope(user_id)
+            ok = True
+        except Exception:
+            ok = False
+        with self._cache_lock:
+            self._aep_user_cache[user_id] = (now, ok)
+        return ok
 
     # ------------------------------------------------------------ scope
     def visible_teams(self, aep_user: str | None) -> frozenset[str]:
