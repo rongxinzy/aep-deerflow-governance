@@ -117,10 +117,42 @@ DEER_FLOW_CONFIG_PATH=<cfg> DEER_FLOW_AUTH_DISABLED=1 PYTHONPATH=<治理包目�
 |---|---|
 | 30101 | k3s NodePort → deerflow-gateway |
 | 30180 | k3s NodePort → AEP control-service |
+| 30190 | k3s NodePort → de-portal（业务层 + 网页对话代理） |
 | 8090(svc) / 8091(svc) | authorizer / reconciler（集群内） |
 | 18086/18087 | mockfeishu http/ws（宿主） |
 | 18080 | AEP compose 栈的宿主转发（socat，供旧脚本） |
 | 8101-8107 | 本地调试 DeerFlow 实例（退役中） |
+
+## 6.5 网页对话与身份对齐（portal 0.3.1+）
+
+**链路**：浏览器持 AEP token → `POST /api/v1/employees/{name}/chat/{rest...}`
+→ portal 校验 owner/admin + Ready 相位 → 反代到运行时
+`/api/{rest...}`，盖 `X-DeerFlow-Internal-Token`（来自
+`de-<name>-memkey` Secret）与 `X-DeerFlow-Owner-User-Id`（调用者 AEP
+user id）。浏览器永不接触内部 token / 模型凭证 / 集群网络。
+
+**治理身份链**（middleware `resolve_aep_user`）：IM `channel_user_id`
+→ `user_map` → 运行时 user_context id（经 AEP data-scope API 正缓存
+校验后才信任）→ `default_aep_user`。网页路径靠第三级：portal 传来的
+AEP id 即运行时用户 id。离线自测：`python3 scripts/test_identity_chain.py`。
+
+**第三方渠道对齐**（企业微信/飞书）：AEP identity mappings
+（`/aep/v1/admin/identity-sources/{id}/mappings`，PUT 建、DELETE 撤、
+GET 列）。无法自动对齐时管理员手动建映射：externalId = 渠道用户 ID
+（企微 userid / 飞书 open_id），localSubjectId = AEP user id。
+Admin Console「身份对齐」页提供 UI。
+
+**E2E 快验**：
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:30180/aep/v1/auth/password/login \
+  -H 'Content-Type: application/json' -H 'X-AEP-Protocol-Version: 1.0' \
+  -d '{"deploymentId":"demo","sessionId":"t","username":"admin","password":"..."}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])')
+curl -s -X POST "http://127.0.0.1:30190/api/v1/employees/sales-helper/chat/runs/wait" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"assistant_id":"lead_agent","input":{"messages":[{"role":"user","content":"你好"}]}}'
+```
+非 owner → 403；employee 非 Ready → 409；Secret 缺失 → 503。
 
 ## 7. 坑速查
 
