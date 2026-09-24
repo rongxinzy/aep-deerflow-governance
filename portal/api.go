@@ -42,7 +42,8 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/requests/{id}/approve", p.auth(p.adminOnly(p.decideRequest("approved"))))
 	mux.HandleFunc("POST /api/v1/requests/{id}/reject", p.auth(p.adminOnly(p.decideRequest("rejected"))))
 	// Web chat: browser (AEP session) -> portal -> employee runtime.
-	mux.HandleFunc("/api/v1/employees/{name}/chat/", p.auth(p.handleChat))
+	// {rest...} subtree wildcard maps onto the runtime's /api/{rest...}.
+	mux.HandleFunc("/api/v1/employees/{name}/chat/{rest...}", p.auth(p.handleChat))
 	mux.HandleFunc("/api/v1/employees/{name}/chat", p.auth(p.handleChat))
 	return mux
 }
