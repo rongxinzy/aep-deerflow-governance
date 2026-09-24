@@ -25,6 +25,8 @@ type portal struct {
 	k8s    client.Client
 	aep    *aepAuthenticator
 	logger *slog.Logger
+	// chatBaseOverride is test-only: replaces the in-cluster runtime URL.
+	chatBaseOverride string
 }
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
@@ -39,6 +41,9 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))
 	mux.HandleFunc("POST /api/v1/requests/{id}/approve", p.auth(p.adminOnly(p.decideRequest("approved"))))
 	mux.HandleFunc("POST /api/v1/requests/{id}/reject", p.auth(p.adminOnly(p.decideRequest("rejected"))))
+	// Web chat: browser (AEP session) -> portal -> employee runtime.
+	mux.HandleFunc("/api/v1/employees/{name}/chat/", p.auth(p.handleChat))
+	mux.HandleFunc("/api/v1/employees/{name}/chat", p.auth(p.handleChat))
 	return mux
 }
 
