@@ -17,6 +17,15 @@ rules:
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # Web-chat proxy: read the per-employee runtime credentials Secret
+  # (DEER_FLOW_INTERNAL_AUTH_TOKEN). Secret values never leave the portal
+  # process — only stamped onto the proxied request server-side. RBAC
+  # resourceNames cannot wildcard, and per-employee Secrets are created
+  # dynamically by the operator, so the grant is namespace-wide; the
+  # namespace's blast radius is the employee workload set.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -49,7 +58,7 @@ spec:
       serviceAccountName: de-portal
       containers:
         - name: portal
-          image: 172.18.5.251:8081/zhiyuan/de-portal:0.1.0
+          image: 172.18.5.251:8081/zhiyuan/de-portal:0.3.1
           env:
             - {name: PORTAL_POLICY_MODE, value: approval}
             - {name: PORTAL_QUOTA_PER_USER, value: "2"}
