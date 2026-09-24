@@ -49,7 +49,7 @@ func loadConfig() config {
 		quotaPerUser: envInt("PORTAL_QUOTA_PER_USER", 2),
 		namespace:   env("PORTAL_NAMESPACE", "digital-employees"),
 
-		runtimeImage:      env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v8"),
+		runtimeImage:      env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v10"),
 		model:             env("PORTAL_MODEL", "bench-glm"),
 		memoryServer:      env("PORTAL_MEMORY_SERVER", "http://openviking.memory-system.svc.cluster.local:1933"),
 		memoryAccount:     env("PORTAL_MEMORY_ACCOUNT", "zhiyuan"),
