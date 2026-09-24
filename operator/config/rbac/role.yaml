@@ -1,0 +1,42 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - events
+  - pods
+  - secrets
+  - services
+  verbs:
+  - '*'
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - '*'
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees
+  verbs:
+  - '*'
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees/status
+  verbs:
+  - get
+  - patch
+  - update

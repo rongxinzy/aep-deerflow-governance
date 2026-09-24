@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- digitalemployee_v1alpha1_digitalemployee.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

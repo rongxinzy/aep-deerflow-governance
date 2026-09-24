@@ -9,176 +9,19 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
-	ovclient "github.com/rongxinzy/aep-deerflow-governance/operator/openviking"
 )
 
-const (
-	// memkeySecretKey is the OpenViking USER key handed to the runtime.
-	memkeySecretKey = "OPENVIKING_API_KEY"
-	// memoryFinalizer guards the OpenViking user lifecycle.
-	memoryFinalizer = "digitalemployee.zhiyuan.io/memory-user"
-
-	// defaultModelBaseURL is the in-cluster Higress model gateway.
-	defaultModelBaseURL = "http://higress-gateway.higress-system.svc.cluster.local/v1"
-)
-
-type EmployeeReconciler struct {
-	client.Client
-	Scheme   *runtime.Scheme
-	OVRootFn func(ctx context.Context, c client.Client, namespace, secretName string) (string, error)
-}
-
-func (r *EmployeeReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	var employee v1alpha1.DigitalEmployee
-	if err := r.Get(ctx, request.NamespacedName, &employee); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
-	}
-	if !employee.DeletionTimestamp.IsZero() {
-		return r.finalize(ctx, &employee)
-	}
-
-	if employee.Generation == employee.Status.ObservedGeneration && employee.Status.Phase == v1alpha1.PhaseReady {
-		return ctrl.Result{}, nil
-	}
-
-	// 1. Memory user + key (idempotent; key persisted in a child Secret).
-	if err := r.ensureMemorySecret(ctx, &employee); err != nil {
-		return ctrl.Result{}, r.fail(ctx, &employee, err)
-	}
-
-	// 2. Child resources.
-	if err := r.ensureChildren(ctx, &employee); err != nil {
-		return ctrl.Result{}, r.fail(ctx, &employee, err)
-	}
-
-	// 3. Wait for availability.
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(&employee)}, deployment); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		return ctrl.Result{}, r.fail(ctx, &employee, err)
-	}
-	available := deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.ReadyReplicas == *deployment.Spec.Replicas
-	if !available {
-		if err := r.setStatus(ctx, &employee, v1alpha1.PhasePending, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
-	employee.Status.Phase = v1alpha1.PhaseReady
-	employee.Status.ObservedGeneration = employee.Generation
-	employee.Status.Message = ""
-	if err := r.Status().Update(ctx, &employee); err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.Info("digital employee ready", "replicas", deployment.Status.ReadyReplicas)
-	return ctrl.Result{}, nil
-}
-
-func (r *EmployeeReconciler) fail(ctx context.Context, employee *v1alpha1.DigitalEmployee, err error) error {
-	logger := log.FromContext(ctx)
-	logger.Error(err, "reconcile failed", "employee", employee.Name)
-	if statusErr := r.setStatus(ctx, employee, v1alpha1.PhaseError, err.Error()); statusErr != nil {
-		return statusErr
-	}
-	return err
-}
-
-func (r *EmployeeReconciler) setStatus(ctx context.Context, employee *v1alpha1.DigitalEmployee, phase v1alpha1.DigitalEmployeePhase, message string) error {
-	if employee.Status.Phase == phase && employee.Status.Message == message && (phase != v1alpha1.PhaseReady) {
-		return nil
-	}
-	employee.Status.Phase = phase
-	employee.Status.Message = message
-	return r.Status().Update(ctx, employee)
-}
-
-// ensureMemorySecret registers an OpenViking user for the employee and
-// persists its key. Once the Secret exists it is authoritative — the key is
-// only minted once.
-func (r *EmployeeReconciler) ensureMemorySecret(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
-	if employee.Spec.Memory == nil {
-		return nil
-	}
-	// Memory user cleanup needs the OpenViking admin API after the CR is
-	// gone, so guard the whole lifecycle with a finalizer.
-	if !controllerutil.ContainsFinalizer(employee, memoryFinalizer) {
-		controllerutil.AddFinalizer(employee, memoryFinalizer)
-		if err := r.Update(ctx, employee); err != nil {
-			return err
-		}
-	}
-	name := memkeySecretName(employee)
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: employee.Namespace}}
-	err := r.Get(ctx, client.ObjectKeyFromObject(secret), secret)
-	if err == nil {
-		if len(secret.Data[memkeySecretKey]) > 0 {
-			employee.Status.MemoryUser = employee.Name
-			return nil
-		}
-	} else if !errors.IsNotFound(err) {
-		return err
-	}
-
-	rootKey, err := r.ovRootKey(ctx, employee)
-	if err != nil {
-		return fmt.Errorf("openviking root key: %w", err)
-	}
-	ov := ovclient.New(employee.Spec.Memory.ServerURL, rootKey)
-	key, found, err := ov.RegisterUser(ctx, employee.Spec.Memory.AccountID, employee.Name)
-	if err != nil {
-		return fmt.Errorf("register memory user: %w", err)
-	}
-	if found || key == "" {
-		key, err = ov.RegenerateKey(ctx, employee.Spec.Memory.AccountID, employee.Name)
-		if err != nil {
-			return fmt.Errorf("regenerate memory user key: %w", err)
-		}
-	}
-	secret = &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: employee.Namespace},
-		StringData: map[string]string{memkeySecretKey: key},
-	}
-	if err := controllerutil.SetControllerReference(employee, secret, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("persist memory key: %w", err)
-	}
-	employee.Status.MemoryUser = employee.Name
-	return nil
-}
-
-func (r *EmployeeReconciler) ovRootKey(ctx context.Context, employee *v1alpha1.DigitalEmployee) (string, error) {
-	if r.OVRootFn == nil {
-		return "", fmt.Errorf("no openviking root key source configured")
-	}
-	return r.OVRootFn(ctx, r.Client, employee.Namespace, employee.Spec.Credentials.Name)
-}
-
-func (r *EmployeeReconciler) ensureChildren(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
+func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configName(employee), Namespace: employee.Namespace}}
 	configMap.Data = map[string]string{"config.yaml": renderConfig(employee)}
 	if err := controllerutil.SetControllerReference(employee, configMap, r.Scheme); err != nil {
@@ -371,8 +214,10 @@ func renderDeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment {
 	if replicas <= 0 {
 		replicas = 1
 	}
+	// No DEER_FLOW_AUTH_DISABLED: authentication is ON. The access path is
+	// the per-employee internal token (DEER_FLOW_INTERNAL_AUTH_TOKEN arrives
+	// via envFrom from the memkey secret); unauthenticated callers get 401.
 	environment := []corev1.EnvVar{
-		{Name: "DEER_FLOW_AUTH_DISABLED", Value: "1"},
 		{Name: "DEER_FLOW_CONFIG_PATH", Value: "/app/config.yaml"},
 		{Name: "DEER_FLOW_EXTENSIONS_CONFIG_PATH", Value: "/app/extensions-config/extensions_config.json"},
 		{Name: "DEER_FLOW_HOME", Value: "/var/lib/deerflow"},
@@ -451,23 +296,6 @@ func renderService(employee *v1alpha1.DigitalEmployee) *corev1.Service {
 	}
 }
 
-func (r *EmployeeReconciler) finalize(ctx context.Context, employee *v1alpha1.DigitalEmployee) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(employee, memoryFinalizer) {
-		return ctrl.Result{}, nil
-	}
-	if employee.Spec.Memory != nil {
-		rootKey, err := r.ovRootKey(ctx, employee)
-		if err == nil {
-			_ = ovclient.New(employee.Spec.Memory.ServerURL, rootKey).DeleteUser(ctx, employee.Spec.Memory.AccountID, employee.Name)
-		}
-	}
-	controllerutil.RemoveFinalizer(employee, memoryFinalizer)
-	if err := r.Update(ctx, employee); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
 func deploymentName(employee *v1alpha1.DigitalEmployee) string { return "de-" + employee.Name }
 func serviceName(employee *v1alpha1.DigitalEmployee) string    { return "de-" + employee.Name }
 func configName(employee *v1alpha1.DigitalEmployee) string     { return "de-" + employee.Name + "-config" }
@@ -484,15 +312,4 @@ func int32String(v int32) string { return strconv.FormatInt(int64(v), 10) }
 
 func labels(employee *v1alpha1.DigitalEmployee) map[string]string {
 	return map[string]string{"app": "de-" + employee.Name, "digitalemployee.zhiyuan.io/name": employee.Name}
-}
-
-// SetupWithManager registers the reconciler for DigitalEmployee resources.
-func (r *EmployeeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.DigitalEmployee{}).
-		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.ConfigMap{}).
-		Owns(&corev1.Secret{}).
-		Owns(&corev1.Service{}).
-		Complete(r)
 }

@@ -1,0 +1,31 @@
+# AGENTS.md — de-operator
+
+Agent guidance for the `operator/` kubebuilder project. See `README.md` for layout.
+
+## Testing discipline (mandatory)
+
+Tests use **Ginkgo + Gomega** specs with the fake client + httptest OpenViking
+stub (see `internal/controller/digitalemployee_controller_test.go`). Do not
+introduce plain `testing`-style table tests here.
+
+Run: `go test ./...` from `operator/`.
+
+## Regeneration
+
+After changing `api/v1alpha1/digitalemployee_types.go`:
+
+1. `make manifests generate` (CRD + deepcopy; float fields need
+   `crd:allowDangerousTypes=true`, already set in the Makefile target)
+2. Copy `config/crd/bases/*.yaml` → `deploy/crd.yaml`
+3. Rebuild + redeploy the operator image — a typed client drops unknown
+   fields, so CRD and operator must ship together.
+
+## Conventions
+
+- Reconcile logic lives in `internal/controller/`: lifecycle/finalizer/
+  secrets in `digitalemployee_controller.go`, child rendering in
+  `employee_reconcile.go` and `a2a_render.go`.
+- Secret writes use `Data` (not `StringData`) so the fake client used by the
+  specs behaves like the reconciler's own idempotency read-back.
+- The operator is namespace-scoped (`--namespace`), blast radius matches the
+  employee workload namespace.

@@ -19,6 +19,9 @@ rules:
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees/status"]
     verbs: ["get", "patch", "update"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["digitalemployees/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["*"]
@@ -57,8 +60,8 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: 172.18.5.251:8081/zhiyuan/de-operator:0.1.0
-          args: ["--namespace", "digital-employees"]
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.3.0
+          args: ["--namespace", "digital-employees", "--leader-elect", "--metrics-secure=false"]
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}
             initialDelaySeconds: 3

@@ -1,6 +1,9 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
   name: digitalemployees.digitalemployee.zhiyuan.io
 spec:
   group: digitalemployee.zhiyuan.io
@@ -8,152 +11,253 @@ spec:
     kind: DigitalEmployee
     listKind: DigitalEmployeeList
     plural: digitalemployees
+    shortNames:
+    - de
     singular: digitalemployee
-    shortNames: [de]
   scope: Namespaced
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: Runtime
-          type: string
-          jsonPath: .spec.runtime.type
-        - name: Model
-          type: string
-          jsonPath: .spec.runtime.model
-        - name: MemoryUser
-          type: string
-          jsonPath: .status.memoryUser
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required: [runtime, governance, credentials]
-              properties:
-                displayName:
-                  type: string
-                runtime:
-                  type: object
-                  required: [type, image, model]
-                  properties:
-                    type:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.runtime.type
+      name: Runtime
+      type: string
+    - jsonPath: .spec.runtime.model
+      name: Model
+      type: string
+    - jsonPath: .status.memoryUser
+      name: MemoryUser
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DigitalEmployee is one governed agent instance; the CR name is the
+          business ID that memory and knowledge bind to.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DigitalEmployeeSpec defines the desired state of a digital
+              employee.
+            properties:
+              a2a:
+                description: A2A optionally exposes this employee over the A2A delegation
+                  contract.
+                properties:
+                  image:
+                    description: Image of the a2a-adapter container.
+                    type: string
+                  maxDepth:
+                    description: MaxDepth is the delegation chain depth limit (default
+                      3).
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  nodePort:
+                    description: NodePort exposes the adapter; 0 means ClusterIP only.
+                    format: int32
+                    maximum: 32767
+                    minimum: 30000
+                    type: integer
+                required:
+                - image
+                type: object
+              credentials:
+                description: Credentials references the shared platform secret.
+                properties:
+                  name:
+                    description: Name of the Secret in the employee namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              displayName:
+                type: string
+              governance:
+                description: GovernanceSpec carries AEP governance middleware parameters.
+                properties:
+                  aepBaseURL:
+                    type: string
+                  apiServiceCreds:
+                    type: string
+                  defaultAEPUser:
+                    type: string
+                  deploymentID:
+                    type: string
+                  governedTools:
+                    items:
                       type: string
-                      enum: [deerflow]
-                    image:
+                    type: array
+                  identitySource:
+                    type: string
+                  teamNames:
+                    additionalProperties:
                       type: string
-                    model:
-                      type: string
-                    modelBaseURL:
-                      type: string
-                memory:
-                  type: object
-                  required: [type, serverURL, accountID]
-                  properties:
-                    type:
-                      type: string
-                      enum: [openviking]
-                    serverURL:
-                      type: string
-                    accountID:
-                      type: string
-                    singleTenantInstance:
-                      type: boolean
-                    topK:
-                      type: integer
-                      format: int32
-                    scoreThreshold:
-                      type: number
-                    maxInjectionChars:
-                      type: integer
-                      format: int32
-                knowledge:
-                  type: object
-                  required: [type, mcpURL]
-                  properties:
-                    type:
-                      type: string
-                      enum: [weknora]
-                    mcpURL:
-                      type: string
-                governance:
-                  type: object
-                  required: [aepBaseURL, deploymentID, defaultAEPUser]
-                  properties:
-                    aepBaseURL:
-                      type: string
-                    deploymentID:
-                      type: string
-                    defaultAEPUser:
-                      type: string
-                    identitySource:
-                      type: string
-                    governedTools:
-                      type: array
-                      items:
-                        type: string
-                    teamNames:
-                      type: object
-                      additionalProperties:
-                        type: string
-                    apiServiceCreds:
-                      type: string
-                credentials:
-                  type: object
-                  required: [name]
-                  properties:
-                    name:
-                      type: string
-                owner:
-                  type: string
-                ownerName:
-                  type: string
-                replicas:
-                  type: integer
-                  format: int32
-                  minimum: 1
-                  maximum: 10
-                nodePort:
-                  type: integer
-                  format: int32
-                  minimum: 30000
-                  maximum: 32767
-                a2a:
-                  type: object
-                  required: [image]
-                  properties:
-                    image:
-                      type: string
-                    maxDepth:
-                      type: integer
-                      format: int32
-                      minimum: 1
-                      maximum: 10
-                    nodePort:
-                      type: integer
-                      format: int32
-                      minimum: 30000
-                      maximum: 32767
-            status:
-              type: object
-              properties:
-                phase:
-                  type: string
-                  enum: [Pending, Ready, Error]
-                observedGeneration:
-                  type: integer
-                  format: int64
-                memoryUser:
-                  type: string
-                message:
-                  type: string
+                    type: object
+                required:
+                - aepBaseURL
+                - defaultAEPUser
+                - deploymentID
+                type: object
+              knowledge:
+                description: KnowledgeSpec wires the enterprise knowledge base (WeKnora)
+                  via MCP.
+                properties:
+                  mcpURL:
+                    description: MCPURL of the WeKnora MCP bridge endpoint.
+                    type: string
+                  type:
+                    description: Type of knowledge integration. Only "weknora" is
+                      implemented.
+                    enum:
+                    - weknora
+                    type: string
+                required:
+                - mcpURL
+                - type
+                type: object
+              memory:
+                description: MemorySpec configures long-term memory persistence.
+                properties:
+                  accountID:
+                    description: AccountID is the OpenViking account the employee
+                      user lives in.
+                    type: string
+                  maxInjectionChars:
+                    format: int32
+                    maximum: 100000
+                    minimum: 256
+                    type: integer
+                  scoreThreshold:
+                    maximum: 1
+                    type: number
+                  serverURL:
+                    description: ServerURL of the OpenViking service.
+                    type: string
+                  singleTenantInstance:
+                    default: false
+                    description: |-
+                      SingleTenantInstance maps every runtime user of this single-tenant
+                      instance onto the employee's memory owner (per-request human identity
+                      lives in governance, not in the memory tenant).
+                    type: boolean
+                  topK:
+                    description: Retrieval tuning; zero values fall back to the backend
+                      defaults.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  type:
+                    description: Type of memory backend. Only "openviking" is implemented.
+                    enum:
+                    - openviking
+                    type: string
+                required:
+                - accountID
+                - serverURL
+                - type
+                type: object
+              nodePort:
+                description: NodePort exposes the runtime; 0 means ClusterIP only.
+                format: int32
+                maximum: 32767
+                minimum: 30000
+                type: integer
+              owner:
+                description: |-
+                  Owner is the AEP user id of the employee's owner (set by the business
+                  layer; the operator never interprets it).
+                type: string
+              ownerName:
+                description: OwnerName is the owner's AEP username for display.
+                type: string
+              replicas:
+                default: 1
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
+              runtime:
+                description: RuntimeSpec selects the execution engine and the model
+                  route.
+                properties:
+                  image:
+                    description: |-
+                      Image is the container image for the runtime (must embed the
+                      governance middleware and MCP tooling).
+                    type: string
+                  model:
+                    description: |-
+                      Model is the wire model id routed by the Higress model gateway
+                      (e.g. bench-glm). Never a provider-native model name.
+                    type: string
+                  modelBaseURL:
+                    description: |-
+                      ModelBaseURL is the OpenAI-compatible base URL. Defaults to the
+                      in-cluster Higress gateway when empty.
+                    type: string
+                  type:
+                    description: Type of the execution engine. Only "deerflow" is
+                      implemented.
+                    enum:
+                    - deerflow
+                    type: string
+                required:
+                - image
+                - model
+                - type
+                type: object
+            required:
+            - credentials
+            - governance
+            - runtime
+            type: object
+          status:
+            description: DigitalEmployeeStatus defines the observed state of a digital
+              employee.
+            properties:
+              memoryUser:
+                description: MemoryUser is the OpenViking user provisioned for this
+                  employee.
+                type: string
+              message:
+                description: Message carries the last error detail when Phase == Error.
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: DigitalEmployeePhase describes the reconciliation phase.
+                enum:
+                - Pending
+                - Ready
+                - Error
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

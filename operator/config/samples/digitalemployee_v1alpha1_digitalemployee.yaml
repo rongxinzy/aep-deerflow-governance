@@ -1,0 +1,9 @@
+apiVersion: digitalemployee.zhiyuan.io/v1alpha1
+kind: DigitalEmployee
+metadata:
+  labels:
+    app.kubernetes.io/name: de-op-kb
+    app.kubernetes.io/managed-by: kustomize
+  name: digitalemployee-sample
+spec:
+  # TODO(user): Add fields here
