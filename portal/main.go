@@ -20,34 +20,40 @@ import (
 )
 
 type config struct {
-	addr        string
-	aepBaseURL  string
-	policyMode  string
-	adminUsers  map[string]bool
-	adminRoles  map[string]bool
+	addr         string
+	aepBaseURL   string
+	policyMode   string
+	adminUsers   map[string]bool
+	adminRoles   map[string]bool
 	quotaPerUser int
-	namespace   string
+	namespace    string
 
-	runtimeImage     string
-	model            string
-	memoryServer     string
-	memoryAccount    string
-	knowledgeMCPURL  string
+	runtimeImage      string
+	model             string
+	memoryServer      string
+	memoryAccount     string
+	knowledgeMCPURL   string
 	credentialsSecret string
-	a2aImage         string
+	a2aImage          string
+
+	// Web-chat entry: session cookie TTL, the AEP deployment id used by the
+	// /chat login form, and where the reused DeerFlow frontend is served.
+	sessionTTL      time.Duration
+	aepDeploymentID string
+	chatUIURL       string
 
 	dbURL string
 }
 
 func loadConfig() config {
 	return config{
-		addr:        env("PORTAL_ADDR", ":8090"),
-		aepBaseURL:  strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
-		policyMode:  env("PORTAL_POLICY_MODE", "approval"),
-		adminUsers:  set(env("PORTAL_ADMIN_USERS", "")),
-		adminRoles:  set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
+		addr:         env("PORTAL_ADDR", ":8090"),
+		aepBaseURL:   strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
+		policyMode:   env("PORTAL_POLICY_MODE", "approval"),
+		adminUsers:   set(env("PORTAL_ADMIN_USERS", "")),
+		adminRoles:   set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
 		quotaPerUser: envInt("PORTAL_QUOTA_PER_USER", 2),
-		namespace:   env("PORTAL_NAMESPACE", "digital-employees"),
+		namespace:    env("PORTAL_NAMESPACE", "digital-employees"),
 
 		runtimeImage:      env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v10"),
 		model:             env("PORTAL_MODEL", "bench-glm"),
@@ -56,6 +62,10 @@ func loadConfig() config {
 		knowledgeMCPURL:   env("PORTAL_KNOWLEDGE_MCP_URL", "http://weknora-mcp.weknora.svc.cluster.local:8830/mcp"),
 		credentialsSecret: env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
 		a2aImage:          env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
+
+		sessionTTL:      time.Duration(envInt("PORTAL_SESSION_TTL_MINUTES", 720)) * time.Minute,
+		aepDeploymentID: env("PORTAL_AEP_DEPLOYMENT_ID", "demo"),
+		chatUIURL:       env("PORTAL_CHAT_UI_URL", ""),
 
 		dbURL: env("PORTAL_DB_URL", ""),
 	}
@@ -104,11 +114,12 @@ func main() {
 	}
 
 	portal := &portal{
-		cfg:    cfg,
-		db:     db,
-		k8s:    k8sClient,
-		aep:    &aepAuthenticator{baseURL: cfg.aepBaseURL, http: &http.Client{Timeout: 10 * time.Second}},
-		logger: logger,
+		cfg:      cfg,
+		db:       db,
+		k8s:      k8sClient,
+		aep:      &aepAuthenticator{baseURL: cfg.aepBaseURL, http: &http.Client{Timeout: 10 * time.Second}},
+		logger:   logger,
+		sessions: newSessionStore(cfg.sessionTTL),
 	}
 
 	server := &http.Server{

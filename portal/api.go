@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,11 +19,12 @@ import (
 )
 
 type portal struct {
-	cfg    config
-	db     *sql.DB
-	k8s    client.Client
-	aep    *aepAuthenticator
-	logger *slog.Logger
+	cfg      config
+	db       *sql.DB
+	k8s      client.Client
+	aep      *aepAuthenticator
+	logger   *slog.Logger
+	sessions *sessionStore
 	// chatBaseOverride is test-only: replaces the in-cluster runtime URL.
 	chatBaseOverride string
 }
@@ -45,19 +45,27 @@ func (p *portal) routes() http.Handler {
 	// {rest...} subtree wildcard maps onto the runtime's /api/{rest...}.
 	mux.HandleFunc("/api/v1/employees/{name}/chat/{rest...}", p.auth(p.handleChat))
 	mux.HandleFunc("/api/v1/employees/{name}/chat", p.auth(p.handleChat))
+	// Portal session lifecycle + the /chat entry page (login + employee
+	// picker) for the reused DeerFlow frontend.
+	mux.HandleFunc("POST /api/v1/session", p.handleSessionLogin)
+	mux.HandleFunc("GET /api/v1/session", p.auth(p.handleSessionWhoami))
+	mux.HandleFunc("DELETE /api/v1/session", p.handleSessionLogout)
+	mux.HandleFunc("POST /api/v1/session/employee", p.auth(p.handleSessionEmployee))
+	mux.HandleFunc("GET /chat", p.handleChatEntry)
 	return mux
 }
 
+// auth gates a handler behind either an AEP Bearer token or a portal session
+// cookie (see authenticate for the CSRF rule).
 func (p *portal) auth(next func(http.ResponseWriter, *http.Request, identity)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := bearer(r)
-		if token == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
-			return
-		}
-		ident, err := p.aep.verify(r.Context(), token)
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		ident, status, ok := p.authenticate(r)
+		if !ok {
+			message := "missing bearer token or session"
+			if status == http.StatusForbidden {
+				message = "csrf token missing or mismatched"
+			}
+			writeJSON(w, status, map[string]string{"error": message})
 			return
 		}
 		next(w, r, ident)
@@ -85,7 +93,7 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	body.Name = strings.ToLower(strings.TrimSpace(body.Name))
+	body.Name = normalizeEmployeeName(body.Name)
 	if !namePattern.MatchString(body.Name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name must be lowercase letters/digits/hyphens (3-32 chars, letter开头)"})
 		return
@@ -155,8 +163,8 @@ func (p *portal) renderSpec(name, displayName string, owner identity) dev1alpha1
 				Type: "openviking", ServerURL: p.cfg.memoryServer, AccountID: p.cfg.memoryAccount,
 				SingleTenantInstance: true,
 			},
-			Knowledge:   &dev1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: p.cfg.knowledgeMCPURL},
-			Governance:  dev1alpha1.GovernanceSpec{
+			Knowledge: &dev1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: p.cfg.knowledgeMCPURL},
+			Governance: dev1alpha1.GovernanceSpec{
 				// The employee acts with its owner's data scope by default.
 				AEPBaseURL:     p.cfg.aepBaseURL,
 				DeploymentID:   "demo",

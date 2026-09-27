@@ -7,5 +7,5 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-func clientgoscheme() *runtime.Scheme { return scheme.Scheme }
+func clientgoscheme() *runtime.Scheme  { return scheme.Scheme }
 func ctrlGetConfigOrDie() *rest.Config { return ctrl.GetConfigOrDie() }

@@ -33,7 +33,7 @@ func chatTestPortal(t *testing.T, objs ...runtime.Object) (*portal, *httptest.Se
 	t.Helper()
 	p := &portal{
 		cfg: config{
-			namespace: "digital-employees",
+			namespace:  "digital-employees",
 			policyMode: "approval",
 			adminUsers: map[string]bool{"admin-user": true},
 		},
@@ -94,6 +94,46 @@ func TestChatProxyStampsInternalIdentity(t *testing.T) {
 	}
 	if got := up.URL.Path; got != "/api/threads/t1/runs/wait" {
 		t.Errorf("upstream path = %q", got)
+	}
+}
+
+// The reused DeerFlow frontend builds REST URLs as ${prefix}/api/... — the
+// director strips the redundant api/ segment so the runtime sees its native
+// path; SDK paths (threads/...) pass through untouched.
+func TestChatProxyStripsRedundantApiPrefix(t *testing.T) {
+	p, _, seen := chatTestPortal(t, readyEmployee("sales-helper", "user-1"), memkeySecret("sales-helper"))
+
+	req := httptest.NewRequest("GET", "/api/v1/employees/sales-helper/chat/api/models", nil)
+	req.SetPathValue("name", "sales-helper")
+	req.SetPathValue("rest", "api/models")
+	req.Header.Set("Cookie", portalSessionCookie+"=st; "+portalCsrfCookie+"=sc")
+	req.Header.Set("X-CSRF-Token", "sc")
+	w := httptest.NewRecorder()
+	p.handleChat(w, req, identity{UserID: "user-1"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	up := (*seen)[0]
+	if got := up.URL.Path; got != "/api/models" {
+		t.Errorf("prefixed path = %q, want /api/models", got)
+	}
+	if got := up.Header.Get("Cookie"); got != "" {
+		t.Errorf("portal session cookie leaked upstream: %q", got)
+	}
+	if got := up.Header.Get("X-CSRF-Token"); got != "" {
+		t.Errorf("portal csrf header leaked upstream: %q", got)
+	}
+
+	req = httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/threads/t1/runs/stream", nil)
+	req.SetPathValue("name", "sales-helper")
+	req.SetPathValue("rest", "threads/t1/runs/stream")
+	w = httptest.NewRecorder()
+	p.handleChat(w, req, identity{UserID: "user-1"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if got := (*seen)[1].URL.Path; got != "/api/threads/t1/runs/stream" {
+		t.Errorf("sdk path = %q, want /api/threads/t1/runs/stream", got)
 	}
 }
 

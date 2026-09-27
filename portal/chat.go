@@ -27,7 +27,6 @@ const ownerHeaderName = "X-DeerFlow-Owner-User-Id"
 // chatBaseOverride, when set (tests), replaces the in-cluster Service URL.
 // It lives on the portal struct so real deployments never configure it.
 
-
 func memkeySecretName(employee string) string { return "de-" + employee + "-memkey" }
 
 // runtimeBaseURL resolves the runtime Service for one employee.
@@ -91,10 +90,21 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 	proxy.Director = func(req *http.Request) {
 		origDirector(req)
 		req.Host = target.Host
-		req.URL.Path = "/api/" + rest
+		// The reused DeerFlow frontend builds REST URLs as
+		// ${prefix}/api/...; strip the redundant api/ so the runtime sees
+		// its native path. LangGraph SDK paths (${prefix}/threads/...)
+		// carry no api/ segment and pass through untouched.
+		stripped := rest
+		if strings.HasPrefix(stripped, "api/") {
+			stripped = stripped[len("api/"):]
+		}
+		req.URL.Path = "/api/" + stripped
 		req.Header.Set("X-DeerFlow-Internal-Token", token)
 		req.Header.Set(ownerHeaderName, ident.UserID)
 		req.Header.Del("Authorization")
+		// The runtime needs neither the portal session nor its CSRF proof.
+		req.Header.Del("Cookie")
+		req.Header.Del("X-CSRF-Token")
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "runtime unreachable: " + err.Error()})
