@@ -1,0 +1,16 @@
+# Refresh the DeerFlow backend sources on top of a published deerflow-gov
+# base image. The base carries the offline-runtime pieces that are expensive
+# to rebuild (uv standalone python at /opt/py, the relocated .venv with its
+# sed-fixed .pth files, the governance package, mcp_dept.py — original recipe
+# in DEVELOPMENT.md §4). Use the newest published tag as the base.
+#
+# Build (context = DeerFlow/backend):
+#   cd DeerFlow/backend && docker build -f <this file> \
+#     --build-arg BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v10 \
+#     -t 172.18.5.251:8081/zhiyuan/deerflow-gov:v11 .
+ARG BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v10
+FROM ${BASE}
+# Replace (not merge) the source trees so modules deleted upstream disappear.
+RUN rm -rf /app/backend/app /app/backend/packages
+COPY app /app/backend/app
+COPY packages /app/backend/packages

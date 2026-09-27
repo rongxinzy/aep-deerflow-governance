@@ -64,6 +64,10 @@ spec:
             - {name: PORTAL_QUOTA_PER_USER, value: "2"}
             - {name: PORTAL_ADMIN_USERS, value: "admin"}
             - {name: PORTAL_ADMIN_ROLES, value: "admin,platform-admin"}
+            # Web-chat entry links here after employee selection; must share
+            # the hostname the browser uses for the portal (cookies ignore
+            # ports, not hosts).
+            - {name: PORTAL_CHAT_UI_URL, value: "http://localhost:30195/workspace"}
           envFrom:
             - secretRef: {name: de-portal-db}
           ports:

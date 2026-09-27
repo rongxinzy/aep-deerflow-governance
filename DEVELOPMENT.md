@@ -122,6 +122,7 @@ DEER_FLOW_CONFIG_PATH=<cfg> DEER_FLOW_AUTH_DISABLED=1 PYTHONPATH=<治理包目�
 | 18086/18087 | mockfeishu http/ws（宿主） |
 | 18080 | AEP compose 栈的宿主转发（socat，供旧脚本） |
 | 8101-8107 | 本地调试 DeerFlow 实例（退役中） |
+| 30195 | k3s NodePort → deerflow-chat-ui（网页对话 UI） |
 
 ## 6.5 网页对话与身份对齐（portal 0.3.1+）
 
@@ -176,6 +177,47 @@ Failed（status 里有修复指引）；PAT 被吊销但账号还在 → Failed�
 Pod 重建即恢复）。镜像构建：`docker build --build-arg
 GOPROXY=https://goproxy.cn,direct`（容器内拉不动 proxy.golang.org）。
 kubectl 快览：`kubectl get de` 的 ACCOUNT 列。
+
+## 6.7 网页对话 UI（DeerFlow 前端复用，chat-ui 0.1.0+）
+
+**复用而非重写**：DeerFlow 自带 Next.js 前端以“平台模式”（fork 补丁，
+`NEXT_PUBLIC_PLATFORM_MODE=true`，默认关）跑在 `deerflow-chat-ui`（NodePort
+**30195**），对话入口在 portal `GET /chat`（登录 + 员工选择页）。
+
+```
+浏览器 ──(de_portal_session/csrf_token/de_employee cookies)──> chat-ui :30195
+   └─ 同源 /api/v1/employees/{name}/chat/{rest...}
+        └─ Next rewrites（构建期固化 → de-portal svc:8090）
+             └─ portal 鉴权（owner/admin + CSRF 双提交）→ 内部 token + owner 头 → 运行时
+```
+
+**登录链路**：`POST /api/v1/session`（AEP 密码登录或 token 换发）→ portal 签发
+HttpOnly 会话 cookie（内存 store，单副本，滑续 12h）+ 可读 `csrf_token`；选员工
+`POST /api/v1/session/employee`（复用 owner/admin 校验）设 `de_employee`。
+cookie 不区分端口但**区分主机名**：30190 与 30195 必须用同一主机串访问
+（`localhost` 与 IP 混用即断链）。
+
+**前端补丁面**（DeerFlow fork，全部走 `isPlatformMode()` 开关）：URL 构造器加
+`/api/v1/employees/{name}/chat` 绝对前缀（portal 侧剥冗余 `api/`）；SSR 认证守卫
+短路为平台伪用户（`id:"default"` 使偏好同步静默、`system_role:"user"` 避免
+admin-only 调用 403）；401 跳回 portal `/chat`（`/login` 会死循环）。
+
+**镜像构建**（`NEXT_PUBLIC_*` 进客户端 bundle、gateway URL 烧进
+`routes-manifest.json`，都是**构建期**，运行时 env 改不了）：
+
+```bash
+cd DeerFlow && docker build -f frontend/Dockerfile --target prod \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  --build-arg NEXT_PUBLIC_PLATFORM_MODE=true \
+  --build-arg NEXT_PUBLIC_PORTAL_CHAT_URL=http://localhost:30190/chat \
+  --build-arg PLATFORM_GATEWAY_URL=http://de-portal.digital-employees.svc:8090 \
+  -t ${REG}/deerflow-chat-ui:0.1.0 .
+# 构建后验证 rewrites 已固化：grep de-portal frontend/.next/routes-manifest.json
+```
+
+已知限制：browser live-view 面板（WebSocket）可能降级（Next rewrite 不保证
+代理 WS upgrade）；`/api/agents*` 面板 403（运行时 agents_api 默认关）；
+portal 重启全员登出（会话在内存）。
 
 ## 7. 坑速查
 
