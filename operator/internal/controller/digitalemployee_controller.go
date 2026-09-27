@@ -37,6 +37,9 @@ type DigitalEmployeeReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	OVRootFn func(ctx context.Context, c client.Client, namespace, secretName string) (string, error)
+	// RuntimeURLFn overrides how the runtime auth API base URL is computed
+	// (specs inject an httptest server). Nil → the in-cluster service DNS.
+	RuntimeURLFn func(namespace, name string) string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
@@ -90,11 +93,19 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	employee.Status.Phase = v1alpha1.PhaseReady
 	employee.Status.ObservedGeneration = employee.Generation
 	employee.Status.Message = ""
+
+	// 4. Runtime account bootstrap (instance admin + owner PAT). The HTTP
+	// API is up by now (deployment available); outcomes land in
+	// status.runtimeAccount and the requeue merges into one return.
+	account, err := r.ensureRuntimeAccount(ctx, &employee)
+	if err != nil {
+		return ctrl.Result{}, r.fail(ctx, &employee, err)
+	}
 	if err := r.Status().Update(ctx, &employee); err != nil {
 		return ctrl.Result{}, err
 	}
-	logger.Info("digital employee ready", "replicas", deployment.Status.ReadyReplicas)
-	return ctrl.Result{}, nil
+	logger.Info("digital employee ready", "replicas", deployment.Status.ReadyReplicas, "runtimeAccount", employee.Status.RuntimeAccount)
+	return account, nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
@@ -165,7 +176,7 @@ func (r *DigitalEmployeeReconciler) ensureMemorySecret(ctx context.Context, empl
 	// the canonical form directly.
 	secret := &corev1.Secret{
 		ObjectMeta: objectMeta(name, employee.Namespace),
-		Data: map[string][]byte{memkeySecretKey: []byte(key), internalTokenKey: []byte(token)},
+		Data:       map[string][]byte{memkeySecretKey: []byte(key), internalTokenKey: []byte(token)},
 	}
 	if err := controllerutil.SetControllerReference(employee, secret, r.Scheme); err != nil {
 		return err

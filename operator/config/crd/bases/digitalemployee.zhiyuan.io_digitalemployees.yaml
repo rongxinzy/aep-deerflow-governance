@@ -29,6 +29,9 @@ spec:
     - jsonPath: .status.memoryUser
       name: MemoryUser
       type: string
+    - jsonPath: .status.runtimeAccount
+      name: Account
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -254,6 +257,24 @@ spec:
                 - Pending
                 - Ready
                 - Error
+                type: string
+              runtimeAccount:
+                description: |-
+                  RuntimeAccount is the bootstrap state of the employee's runtime
+                  account: the per-instance DeerFlow admin plus the owner account and
+                  PAT provisioned through the runtime auth API (see the operator's
+                  ensureRuntimeAccount). Ready means the PAT in the
+                  de-<name>-runtime-creds Secret authenticates against the runtime.
+                enum:
+                - Pending
+                - Ready
+                - Failed
+                - Unsupported
+                type: string
+              runtimeAccountMessage:
+                description: |-
+                  RuntimeAccountMessage carries the last runtime-account detail
+                  (failure reason, upgrade hint, …).
                 type: string
             type: object
         type: object

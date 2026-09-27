@@ -55,7 +55,7 @@ type MemorySpec struct {
 	// +kubebuilder:validation:Maximum=100
 	TopK int32 `json:"topK,omitempty"`
 	// +optional
-	
+
 	// +kubebuilder:validation:Maximum=1
 	ScoreThreshold float64 `json:"scoreThreshold,omitempty"`
 	// +optional
@@ -177,7 +177,37 @@ type DigitalEmployeeStatus struct {
 	// Message carries the last error detail when Phase == Error.
 	// +optional
 	Message string `json:"message,omitempty"`
+	// RuntimeAccount is the bootstrap state of the employee's runtime
+	// account: the per-instance DeerFlow admin plus the owner account and
+	// PAT provisioned through the runtime auth API (see the operator's
+	// ensureRuntimeAccount). Ready means the PAT in the
+	// de-<name>-runtime-creds Secret authenticates against the runtime.
+	// +optional
+	RuntimeAccount RuntimeAccountPhase `json:"runtimeAccount,omitempty"`
+	// RuntimeAccountMessage carries the last runtime-account detail
+	// (failure reason, upgrade hint, …).
+	// +optional
+	RuntimeAccountMessage string `json:"runtimeAccountMessage,omitempty"`
 }
+
+// RuntimeAccountPhase tracks the runtime-account bootstrap.
+// +kubebuilder:validation:Enum=Pending;Ready;Failed;Unsupported
+type RuntimeAccountPhase string
+
+const (
+	// RuntimeAccountPending: the runtime is not reachable yet; the
+	// controller requeues and retries.
+	RuntimeAccountPending RuntimeAccountPhase = "Pending"
+	// RuntimeAccountReady: admin + owner account + PAT provisioned and the
+	// PAT verifies against the runtime.
+	RuntimeAccountReady RuntimeAccountPhase = "Ready"
+	// RuntimeAccountFailed: manual intervention required (rejected
+	// credentials, orphaned account, …).
+	RuntimeAccountFailed RuntimeAccountPhase = "Failed"
+	// RuntimeAccountUnsupported: the runtime image predates the provision
+	// API; upgrade the image to get runtime accounts.
+	RuntimeAccountUnsupported RuntimeAccountPhase = "Unsupported"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -185,6 +215,7 @@ type DigitalEmployeeStatus struct {
 // +kubebuilder:printcolumn:name="Runtime",type=string,JSONPath=`.spec.runtime.type`
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.runtime.model`
 // +kubebuilder:printcolumn:name="MemoryUser",type=string,JSONPath=`.status.memoryUser`
+// +kubebuilder:printcolumn:name="Account",type=string,JSONPath=`.status.runtimeAccount`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=de
 

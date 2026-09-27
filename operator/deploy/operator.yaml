@@ -28,6 +28,10 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "pods", "events"]
     verbs: ["*"]
+  # Leader election (--leader-elect) coordinates replicas via a Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -60,8 +64,8 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: 172.18.5.251:8081/zhiyuan/de-operator:0.3.0
-          args: ["--namespace", "digital-employees", "--leader-elect", "--metrics-secure=false"]
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.6.0
+          args: ["--namespace", "digital-employees", "--leader-elect"]
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}
             initialDelaySeconds: 3

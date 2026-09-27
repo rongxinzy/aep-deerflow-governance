@@ -4,6 +4,9 @@ ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
+# Offline builds: allow GOPROXY to be overridden (--build-arg GOPROXY=…).
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -20,7 +23,7 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

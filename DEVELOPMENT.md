@@ -154,6 +154,29 @@ curl -s -X POST "http://127.0.0.1:30190/api/v1/employees/sales-helper/chat/runs/
 ```
 非 owner → 403；employee 非 Ready → 409；Secret 缺失 → 503。
 
+## 6.6 运行时账号自动开通（operator 0.6.0+）
+
+operator 在运行时 Deployment 可用后，自动走 DeerFlow 认证 API 开通每个员工的
+运行时账号，凭证落 `de-<name>-runtime-creds` Secret（5 个 key：
+RUNTIME_ADMIN_EMAIL/PASSWORD、RUNTIME_OWNER_EMAIL/USER_ID/PAT）：
+
+1. `GET /api/v1/auth/setup-status` 判定认证库状态（404 = 旧镜像 →
+   status.runtimeAccount=Unsupported，升级镜像自愈）；
+2. 空库 → initialize 实例 admin（`admin@<name>.runtime.internal`，密码
+   randomToken 一次成型入库）；已有库 → 用存量密码 login；
+3. `POST /api/v1/auth/provision`（admin 会话 + CSRF 双提交，auto_pat）开
+   owner 账号 `de-<name>@runtime.internal`，PAT 全 9 个 scope
+   （threads/runs/projects）；owner 是纯 PAT 账号（无密码）；
+4. 收敛检查：存量 PAT 经 `/api/v1/auth/me`（403=有效、401=失效）探测，
+   有效即零写通过。
+
+**home 卷是 EmptyDir**：Pod 重启认证库全丢，operator 用 Secret 里留存的
+admin 密码重新 initialize + 换发新 PAT（已实测自愈）。密码被外部轮换 →
+Failed（status 里有修复指引）；PAT 被吊销但账号还在 → Failed（删运行时
+Pod 重建即恢复）。镜像构建：`docker build --build-arg
+GOPROXY=https://goproxy.cn,direct`（容器内拉不动 proxy.golang.org）。
+kubectl 快览：`kubectl get de` 的 ACCOUNT 列。
+
 ## 7. 坑速查
 
 - `pkill -f` 模式串出现在本命令行 → 自杀（exit 144）：**杀进程按监听端口找
