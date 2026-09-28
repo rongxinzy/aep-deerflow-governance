@@ -86,6 +86,18 @@ spec:
                 required:
                 - image
                 type: object
+              channels:
+                description: |-
+                  Channels toggles IM channel providers; credentials arrive at runtime
+                  via the gateway admin API, not through the CR.
+                properties:
+                  feishu:
+                    description: Feishu enables the Feishu channel.
+                    type: boolean
+                  wecom:
+                    description: Wecom enables the WeCom (企业微信) smart-bot channel.
+                    type: boolean
+                type: object
               credentials:
                 description: Credentials references the shared platform secret.
                 properties:

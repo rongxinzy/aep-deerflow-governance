@@ -116,6 +116,19 @@ type A2ASpec struct {
 	NodePort int32 `json:"nodePort,omitempty"`
 }
 
+// ChannelsSpec toggles IM channel providers on the runtime. Channel
+// credentials (bot id/secret, tokens) are supplied at runtime through the
+// gateway's admin channel-connections API and never appear in the CR or
+// the rendered config.
+type ChannelsSpec struct {
+	// Wecom enables the WeCom (企业微信) smart-bot channel.
+	// +optional
+	Wecom bool `json:"wecom,omitempty"`
+	// Feishu enables the Feishu channel.
+	// +optional
+	Feishu bool `json:"feishu,omitempty"`
+}
+
 // DigitalEmployeeSpec defines the desired state of a digital employee.
 type DigitalEmployeeSpec struct {
 	// +optional
@@ -131,6 +144,11 @@ type DigitalEmployeeSpec struct {
 
 	// Credentials references the shared platform secret.
 	Credentials CredentialsRef `json:"credentials"`
+
+	// Channels toggles IM channel providers; credentials arrive at runtime
+	// via the gateway admin API, not through the CR.
+	// +optional
+	Channels *ChannelsSpec `json:"channels,omitempty"`
 
 	// Owner is the AEP user id of the employee's owner (set by the business
 	// layer; the operator never interprets it).

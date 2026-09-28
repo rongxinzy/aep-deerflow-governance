@@ -155,6 +155,26 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 			}},
 		},
 	}
+	// IM channels: the channel-connections feature gate plus the enabled
+	// providers. Only enabled providers are listed (the runtime config
+	// schema defaults every provider to disabled). Credentials never live
+	// here — they are injected at runtime through the gateway's admin
+	// channel-connections API and persisted in the runtime's own store.
+	if spec.Channels != nil && (spec.Channels.Wecom || spec.Channels.Feishu) {
+		providers := map[string]any{}
+		if spec.Channels.Wecom {
+			providers["wecom"] = map[string]any{"enabled": true}
+		}
+		if spec.Channels.Feishu {
+			providers["feishu"] = map[string]any{"enabled": true}
+		}
+		config["channel_connections"] = map[string]any{"enabled": true}
+		for _, name := range []string{"feishu", "wecom"} { // deterministic order
+			if entry, ok := providers[name]; ok {
+				config["channel_connections"].(map[string]any)[name] = entry
+			}
+		}
+	}
 	if spec.Memory != nil {
 		retrieval := map[string]any{}
 		if spec.Memory.TopK > 0 {

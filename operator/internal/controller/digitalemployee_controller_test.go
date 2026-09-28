@@ -92,6 +92,29 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(a2aEnv["DEERFLOW_URL"]).To(Equal("http://de-alice-helper:8001"))
 		})
 
+		It("renders channel-connections only for enabled IM channels", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"channel_connections"`))
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"wecom"`))
+			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring(`"feishu"`), "disabled providers stay unlisted")
+
+			// The first reconcile adds the memory finalizer; re-read before
+			// the second mutation.
+			updated := &v1alpha1.DigitalEmployee{}
+			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(employee), updated)).To(Succeed())
+			updated.Spec.Channels = nil
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+			fresh := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, fresh)).To(Succeed())
+			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"channel_connections"`))
+		})
+
 		It("keeps the spec.owner field intact across reconciles", func(ctx context.Context) {
 			reconcile(ctx)
 			markDeploymentReady(ctx)
