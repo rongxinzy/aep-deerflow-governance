@@ -145,6 +145,15 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 			"use":             "deerflow.sandbox.local:LocalSandboxProvider",
 			"allow_host_bash": false,
 		},
+		// Threads/checkpointer DB must live on the home volume (EmptyDir or
+		// PVC), not the container filesystem — upstream's default resolves
+		// relative to CWD and dies with the pod, desyncing the channel
+		// store's topic→thread mappings ("Thread not found").
+		"database": map[string]any{"sqlite_dir": "/var/lib/deerflow/data"},
+		// Custom agents (delegation targets) default to disabled upstream;
+		// without this every get_agent/list_agents tool call 403s and the
+		// agent reports "智能体服务连续调用失败" instead of answering.
+		"agents_api": map[string]any{"enabled": true},
 		"subagents": map[string]any{"max_total_per_run": 6},
 		"extensions": map[string]any{
 			"middlewares": []any{map[string]any{
@@ -167,6 +176,10 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 	// schema defaults every provider to disabled). Credentials never live
 	// here — they are injected at runtime through the gateway's admin
 	// channel-connections API and persisted in the runtime's own store.
+	if spec.Channels != nil && spec.Channels.WecomName != "" {
+		kwargs := config["extensions"].(map[string]any)["middlewares"].([]any)[0].(map[string]any)["kwargs"].(map[string]any)
+		kwargs["im_bot_name"] = spec.Channels.WecomName
+	}
 	if spec.Channels != nil && (spec.Channels.Wecom || spec.Channels.Feishu) {
 		providers := map[string]any{}
 		if spec.Channels.Wecom {

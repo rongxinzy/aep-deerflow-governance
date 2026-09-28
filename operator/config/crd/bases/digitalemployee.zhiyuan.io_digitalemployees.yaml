@@ -97,6 +97,12 @@ spec:
                   wecom:
                     description: Wecom enables the WeCom (企业微信) smart-bot channel.
                     type: boolean
+                  wecomName:
+                    description: |-
+                      WecomName is the bot's display name on WeCom. @-mentions of this name
+                      address the bot itself; the governance middleware tells the agent so
+                      it never mistakes its own name for a delegation target.
+                    type: string
                 type: object
               credentials:
                 description: Credentials references the shared platform secret.

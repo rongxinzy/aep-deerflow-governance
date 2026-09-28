@@ -151,6 +151,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         identity_source_id: str | None = None,
         governed_tools: list[str] | None = None,
         team_names: dict[str, str] | None = None,
+        im_bot_name: str | None = None,
         scope_cache_seconds: int = 60,
         **kwargs: Any,
     ) -> None:
@@ -161,6 +162,9 @@ class AepGovernanceMiddleware(AgentMiddleware):
         self.governed = set(governed_tools or ("dept_revenue", "dept_headcount",
                                                 "benchdept__dept_revenue", "benchdept__dept_headcount"))
         self.team_names = team_names or {}
+        # Display name of this employee's bot on the IM platform: @-mentions
+        # of this name address the bot itself, not a delegation target.
+        self.im_bot_name = (im_bot_name or "").strip() or None
         self.name_to_team = {name: tid for tid, name in self.team_names.items()}
         self.cache_seconds = scope_cache_seconds
         self.identities = _IdentityResolver(self.client, identity_source_id, max(scope_cache_seconds, 30)) if identity_source_id else None
@@ -263,15 +267,36 @@ class AepGovernanceMiddleware(AgentMiddleware):
             f"其数据范围仅覆盖：{names}。访问范围外部门的请求会被工具层拒绝；"
             f"请直接告知用户无权访问，不要尝试绕过。</{_GOVERNANCE_TAG}>"))
 
+    def _im_self_note(self, context: Any) -> str | None:
+        """Prompt note for IM turns when the bot's display name is known.
+
+        @-mentions of the bot name are users addressing the bot itself —
+        mid-message or leading. Without this note the model mistakes its own
+        display name for a delegation target and reports "无法接入".
+        """
+        if not self.im_bot_name:
+            return None
+        if not (isinstance(context, dict) and context.get("channel_user_id")):
+            return None  # IM traffic only
+        return (
+            f"你在企业 IM 中的机器人名称是「{self.im_bot_name}」。消息中出现"
+            f"「@{self.im_bot_name}」或提到「{self.im_bot_name}」时，都是用户在"
+            f"称呼你本人：直接以自己的身份回答，不要把自己当作需要连接或委托"
+            f"的其他智能体。")
+
     def _decorated(self, request: Any) -> Any:
         aep_user = self.resolve_aep_user(getattr(request, "runtime", None))
         visible = self.visible_teams(aep_user)
         messages = [m for m in (list(getattr(request, "messages", None) or []))
                     if _GOVERNANCE_TAG not in str(getattr(m, "content", ""))]
+        note = self._im_self_note(getattr(request, "runtime", None) and getattr(request.runtime, "context", None))
+        governance = self._governance_message(aep_user, visible)
+        if note:
+            governance = SystemMessage(content=str(governance.content) + note)
         if messages:
-            messages.insert(len(messages) - 1, self._governance_message(aep_user, visible))
+            messages.insert(len(messages) - 1, governance)
         else:
-            messages = [self._governance_message(aep_user, visible)]
+            messages = [governance]
         return request.override(messages=messages)
 
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:

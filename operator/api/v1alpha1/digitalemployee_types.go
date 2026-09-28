@@ -124,6 +124,11 @@ type ChannelsSpec struct {
 	// Wecom enables the WeCom (企业微信) smart-bot channel.
 	// +optional
 	Wecom bool `json:"wecom,omitempty"`
+	// WecomName is the bot's display name on WeCom. @-mentions of this name
+	// address the bot itself; the governance middleware tells the agent so
+	// it never mistakes its own name for a delegation target.
+	// +optional
+	WecomName string `json:"wecomName,omitempty"`
 	// Feishu enables the Feishu channel.
 	// +optional
 	Feishu bool `json:"feishu,omitempty"`
