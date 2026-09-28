@@ -1,0 +1,54 @@
+# cicd 集群部署（172.18.5.188，k3s 双节点 rtl-control/rtl-l20）
+
+知远企业版在共享 cicd 集群上的部署清单与脚本。与 dev（本机 k3s）的差异与
+端口约定见 zhiyuan-docs `07-deployment` 的 "cicd 集群部署" 一节；本目录只放
+清单。
+
+## 命名空间与端口
+
+| 命名空间 | 内容 |
+| --- | --- |
+| `aep-system` | AEP 控制面（NodePort 30180） |
+| `higress-system` | Higress 2.2.4 模型网关 |
+| `memory-system` | embed-server + OpenViking |
+| `digital-employees` | operator、portal（NodePort 30190）、chat-ui（30195）、员工运行时 |
+
+l20 带 `rtl.ai/externally-managed:NoSchedule` 污点，负载默认全部落在
+rtl-control；l20 的 `/etc/rancher/k3s/registries.yaml` 已配置（与 188 相同），
+未来分担调度只需加容忍度。
+
+## 文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `bigmodel-anthropic-route.yaml` | 在线 GLM 的 Higress 路由（Anthropic 透传 + openai 协议转换子路由），`BIGMODEL_API_KEY=... envsubst` 渲染后 apply |
+| `memory-stack.yaml` | 记忆栈（VLM 走 Higress 在线 GLM），`OPENVIKING_ROOT_API_KEY=... envsubst` 渲染后 apply |
+| `sales-helper.yaml` | 首例员工 CR（anthropic provider 经 Higress；企微通道关闭——bot WS 单会话，dev 仍在使用） |
+| `seed-aep.sh` | AEP 种子：wecom 身份源、saber 映射、gov-service 账号；密码走 env |
+
+AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml`
+改密码后 apply；CRD/operator/portal/chat-ui 直接用各自 deploy 目录的清单。
+`de-platform-creds`/`de-portal-db` Secret 按同样的键名在 cicd 上单独创建
+（值见工作区外凭证备忘，不入 git）。
+
+## 部署顺序
+
+1. 两节点 `registries.yaml`（172.18.5.251 http + auth）
+2. AEP 栈 → readyz 200 → postgres 建 `deportal` 库 → `seed-aep.sh`
+3. Higress → `bigmodel-anthropic-route.yaml`
+4. `memory-stack.yaml` → root key 调 accounts API 建 `zhiyuan` 账号
+   （员工级 user 由 operator 自动开）
+5. `operator/deploy/crd.yaml` + `operator.yaml` → Secret →
+   `portal/deploy/portal.yaml` → `k3s/chat-ui.yaml` → `sales-helper.yaml`
+6. 验证：`kubectl get de` Ready/Ready；portal 登录→选员工→SSE 真模型回复；
+   跨会话记忆（告知事实后等待约 1 分钟抽取落库，新线程可召回）
+
+## 已知边界
+
+- WeKnora 未部署（dev 侧 app/redis 本就 CrashLoop，属上游故障）；员工 CR
+  不挂 `spec.knowledge`，知识检索降级缺席。
+- 企微通道在 dev 与 cicd 之间是单选：bot 的 WS 会话只有一个。迁移 =
+  dev CR `channels.wecom: false`、cicd CR 置 true 并注入通道凭证。
+- AEP 契约的 model protocol 枚举仅 `openai-compatible`；anthropic 路径目前
+  由 operator 的 `provider: anthropic` + 本目录路由清单承载，契约化后应
+  收编进 AEP 模型目录。

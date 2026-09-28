@@ -1,0 +1,164 @@
+# Online-GLM (Zhipu BigModel, Anthropic-protocol endpoint) routed through
+# Higress with server-side credential injection — the runtime speaks native
+# Anthropic (ChatAnthropic via spec.runtime.provider=anthropic), and this
+# route passes the protocol through unchanged.
+#
+# ai-proxy cannot serve this route: its claude provider hardcodes
+# Host=api.anthropic.com (Aliyun CDN then answers 421 "Direct IP access is
+# not allowed") and its openai provider remarshals every body to OpenAI
+# shape. Instead the EnvoyFilter below does exactly three things:
+#   1. Host rewritten to open.bigmodel.cn (the CDN routes by Host)
+#   2. path /v1/* -> /api/anthropic/v1/* (BigModel anthropic endpoint)
+#   3. credential injected server-side as x-api-key, overwriting any client
+#      value — the runtime only ever holds a dummy
+# Body and response stream through untouched. The runtime CR uses
+# modelBaseURL=http://higress-gateway.higress-system.svc.cluster.local so
+# ChatAnthropic posts to /v1/messages, which this route matches.
+#
+# A second, exact-path route serves OpenAI-protocol callers (OpenViking's
+# VLM): ai-proxy's claude provider converts openai<->anthropic in both
+# directions and injects the credential, while its route patch (below)
+# applies the same Host/path rewrite plus an authorization overwrite —
+# BigModel prefers Authorization over x-api-key when both are present, and
+# the caller's dummy Bearer would 401. The exact path beats the /v1 prefix,
+# and ai-proxy only engages on the standard /v1/chat/completions path, so
+# the two routes never interfere.
+#
+# The dns-type registry re-resolves open.bigmodel.cn, so CDN address
+# rotation needs no Endpoints patching. The API key is a deploy-time secret:
+# render with
+#   BIGMODEL_API_KEY=... envsubst < bigmodel-anthropic-route.yaml | kubectl apply -f -
+# Long-term this route belongs in the AEP model registry once the protocol
+# enum grows an anthropic value.
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: higress-system
+spec:
+  registries:
+    - type: dns
+      name: bigmodel
+      domain: open.bigmodel.cn
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aep-model-gateway-bigmodel
+  namespace: higress-system
+  annotations:
+    higress.io/backend-protocol: HTTPS
+    higress.io/destination: bigmodel.dns
+    higress.io/proxy-ssl-name: open.bigmodel.cn
+    higress.io/proxy-ssl-server-name: "on"
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              resource:
+                apiGroup: networking.higress.io
+                kind: McpBridge
+                name: default
+            path: /v1
+            pathType: Prefix
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aep-model-gateway-bigmodel-vlm
+  namespace: higress-system
+  annotations:
+    higress.io/backend-protocol: HTTPS
+    higress.io/destination: bigmodel.dns
+    higress.io/proxy-ssl-name: open.bigmodel.cn
+    higress.io/proxy-ssl-server-name: "on"
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              resource:
+                apiGroup: networking.higress.io
+                kind: McpBridge
+                name: default
+            path: /v1/chat/completions
+            pathType: Exact
+---
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: aep-ai-proxy-bigmodel-vlm
+  namespace: higress-system
+spec:
+  defaultConfigDisable: true
+  matchRules:
+    - ingress:
+        - aep-model-gateway-bigmodel-vlm
+      config:
+        provider:
+          type: claude
+          apiTokens:
+            - "${BIGMODEL_API_KEY}"
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-proxy:2.0.1
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: bigmodel-anthropic-passthrough
+  namespace: higress-system
+spec:
+  configPatches:
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost:
+            route:
+              name: aep-model-gateway-bigmodel
+      patch:
+        operation: MERGE
+        value:
+          # request_headers_to_add lives on the Route, not the RouteAction —
+          # nesting it under `route` makes istiod silently drop it.
+          request_headers_to_add:
+            - header:
+                key: x-api-key
+                value: "${BIGMODEL_API_KEY}"
+              append: false
+          route:
+            host_rewrite_literal: open.bigmodel.cn
+            regex_rewrite:
+              pattern:
+                google_re2: {}
+                regex: "^/v1/(.*)$"
+              substitution: "/api/anthropic/v1/\\1"
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost:
+            route:
+              name: aep-model-gateway-bigmodel-vlm
+      patch:
+        operation: MERGE
+        value:
+          request_headers_to_add:
+            - header:
+                key: authorization
+                value: "Bearer ${BIGMODEL_API_KEY}"
+              append: false
+            - header:
+                key: x-api-key
+                value: "${BIGMODEL_API_KEY}"
+              append: false
+          route:
+            host_rewrite_literal: open.bigmodel.cn
+            regex_rewrite:
+              pattern:
+                google_re2: {}
+                regex: "^/v1/(.*)$"
+              substitution: "/api/anthropic/v1/\\1"

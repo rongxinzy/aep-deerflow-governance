@@ -1,0 +1,160 @@
+# Memory stack for the cicd cluster. Same shape as ../memory-stack.yaml with
+# cicd differences baked in:
+#   - VLM goes through the in-cluster Higress model gateway (online GLM via
+#     the Anthropic route; ai-proxy converts openai<->anthropic and injects
+#     the credential server-side) — api_key is a non-empty dummy on purpose
+#   - root_api_key is a deploy-time secret: render with
+#       OPENVIKING_ROOT_API_KEY=... envsubst < memory-stack.yaml | kubectl apply -f -
+# Embedding stays on the local embed-server (not a GLM concern).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: memory-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed-server
+  namespace: memory-system
+  labels: {app: embed-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embed-server}
+  template:
+    metadata:
+      labels: {app: embed-server}
+    spec:
+      containers:
+        - name: embed-server
+          image: 172.18.5.251:8081/zhiyuan/embed-server:0.1.0
+          args: ["--port", "8080", "-m", "/opt/models/bge-small-zh-v1.5-f16.gguf"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed-server
+  namespace: memory-system
+spec:
+  selector: {app: embed-server}
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openviking-data
+  namespace: memory-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openviking-config
+  namespace: memory-system
+data:
+  ov.conf: |
+    {
+      "storage": {
+        "workspace": "/app/.openviking/openviking_workspace",
+        "vectordb": {"name": "context", "backend": "local"},
+        "agfs": {"backend": "local"}
+      },
+      "log": {"level": "INFO", "output": "stdout"},
+      "server": {
+        "host": "0.0.0.0",
+        "port": 1933,
+        "root_api_key": "${OPENVIKING_ROOT_API_KEY}"
+      },
+      "embedding": {
+        "allow_metadata_override": true,
+        "dense": {
+          "api_base": "http://embed-server:8080/v1",
+          "api_key": "none",
+          "provider": "openai",
+          "dimension": 512,
+          "model": "bge-small-zh-v1.5"
+        }
+      },
+      "vlm": {
+        "api_base": "http://higress-gateway.higress-system.svc.cluster.local/v1",
+        "timeout": 120,
+        "thinking": false,
+        "api_key": "aep-managed-by-higress",
+        "provider": "openai",
+        "model": "glm-5.3-flash"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openviking
+  namespace: memory-system
+  labels: {app: openviking}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: openviking}
+  template:
+    metadata:
+      labels: {app: openviking}
+    spec:
+      containers:
+        - name: openviking
+          image: 172.18.5.251:8081/zhiyuan/openviking:0.4.21
+          ports:
+            - containerPort: 1933
+          volumeMounts:
+            - name: data
+              mountPath: /app/.openviking
+            - name: config
+              mountPath: /app/.openviking/ov.conf
+              subPath: ov.conf
+          readinessProbe:
+            httpGet: {path: /ready, port: 1933}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 1933}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 4Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openviking-data
+        - name: config
+          configMap:
+            name: openviking-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openviking
+  namespace: memory-system
+spec:
+  selector: {app: openviking}
+  ports:
+    - port: 1933
+      targetPort: 1933
