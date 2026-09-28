@@ -11,7 +11,7 @@
 | `aep-system` | AEP 控制面（NodePort 30180） |
 | `higress-system` | Higress 2.2.4 模型网关 |
 | `memory-system` | embed-server + OpenViking |
-| `digital-employees` | operator、portal（NodePort 30190）、chat-ui（30195）、员工运行时 |
+| `digital-employees` | operator、portal（NodePort 30190）、chat-ui（30195）、admin-console（30196）、员工运行时 |
 
 l20 带 `rtl.ai/externally-managed:NoSchedule` 污点，负载默认全部落在
 rtl-control；l20 的 `/etc/rancher/k3s/registries.yaml` 已配置（与 188 相同），
@@ -39,7 +39,9 @@ AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-s
 4. `memory-stack.yaml` → root key 调 accounts API 建 `zhiyuan` 账号
    （员工级 user 由 operator 自动开）
 5. `operator/deploy/crd.yaml` + `operator.yaml` → Secret →
-   `portal/deploy/portal.yaml` → `k3s/chat-ui.yaml` → `sales-helper.yaml`
+   `portal/deploy/portal.yaml` → `k3s/chat-ui.yaml` →
+   zhiyuanAaaS `deploy/admin-console.yaml`（企业版前端，30196） →
+   `sales-helper.yaml`
 6. 验证：`kubectl get de` Ready/Ready；portal 登录→选员工→SSE 真模型回复；
    跨会话记忆（告知事实后等待约 1 分钟抽取落库，新线程可召回）
 
