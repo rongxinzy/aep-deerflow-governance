@@ -15,6 +15,7 @@ const chatEntryHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>数字员工 · 对话入口</title>
 <style>
   :root { color-scheme: light dark; }
@@ -66,30 +67,70 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+// The platform (Admin Console) hands over an AEP access token in the URL
+// fragment — fragments are never sent to servers and never appear in
+// Referer. Exchange it for the portal session, wiping it from the address
+// bar immediately whether the exchange succeeds or not.
+async function consumeFragmentToken() {
+  const match = /^#token=(.+)$/.exec(location.hash);
+  if (!match) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  try {
+    await api("/api/v1/session", {
+      method: "POST",
+      body: JSON.stringify({ token: decodeURIComponent(match[1]) }),
+    });
+  } catch {
+    // Fall through: the login form below takes over.
+  }
+}
+
 async function boot() {
+  await consumeFragmentToken();
   try {
     await api("/api/v1/session");
     $("login").hidden = true;
     $("picker").hidden = false;
     $("logout").hidden = false;
     await loadEmployees();
+    autoSelect();
   } catch {
     $("login").hidden = false;
+  }
+}
+
+// ?employee= from a platform link preselects and jumps straight to the chat.
+function autoSelect() {
+  const name = new URLSearchParams(location.search).get("employee");
+  if (!name) return;
+  for (const btn of document.querySelectorAll("#employees button.employee")) {
+    if (btn.dataset.name === name) {
+      void select(name, btn);
+      return;
+    }
   }
 }
 
 async function loadEmployees() {
   const { employees } = await api("/api/v1/employees");
   const box = $("employees");
-  box.innerHTML = "";
+  box.replaceChildren();
   if (!employees.length) {
-    box.innerHTML = '<p class="muted">还没有可用的数字员工（需 owner 或管理员，且实例 Ready）。</p>';
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "还没有可用的数字员工（需 owner 或管理员，且实例 Ready）。";
+    box.appendChild(empty);
     return;
   }
   for (const e of employees) {
     const btn = document.createElement("button");
     btn.className = "employee";
-    btn.innerHTML = (e.displayName || e.name) + "<small>" + e.name + " · " + (e.phase || "") + "</small>";
+    btn.dataset.name = e.name;
+    const title = document.createElement("span");
+    title.textContent = e.displayName || e.name;
+    const sub = document.createElement("small");
+    sub.textContent = e.name + " · " + (e.phase || "");
+    btn.append(title, sub);
     btn.onclick = () => select(e.name, btn);
     box.appendChild(btn);
   }

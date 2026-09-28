@@ -58,7 +58,7 @@ spec:
       serviceAccountName: de-portal
       containers:
         - name: portal
-          image: 172.18.5.251:8081/zhiyuan/de-portal:0.4.0
+          image: 172.18.5.251:8081/zhiyuan/de-portal:0.4.1
           env:
             - {name: PORTAL_POLICY_MODE, value: approval}
             - {name: PORTAL_QUOTA_PER_USER, value: "2"}
