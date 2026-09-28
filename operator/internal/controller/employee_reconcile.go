@@ -175,7 +175,11 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 		if spec.Channels.Feishu {
 			providers["feishu"] = map[string]any{"enabled": true}
 		}
-		config["channel_connections"] = map[string]any{"enabled": true}
+		// require_bound_identity=false: identity resolution is the platform
+		// governance middleware's job (AEP identity mappings + guest mode),
+		// not upstream's per-user browser binding (which would gate every
+		// unbound IM sender behind a "connect from DeerFlow Settings" reply).
+		config["channel_connections"] = map[string]any{"enabled": true, "require_bound_identity": false}
 		for _, name := range []string{"feishu", "wecom"} { // deterministic order
 			if entry, ok := providers[name]; ok {
 				config["channel_connections"].(map[string]any)[name] = entry

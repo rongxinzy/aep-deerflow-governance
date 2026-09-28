@@ -64,7 +64,7 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: 172.18.5.251:8081/zhiyuan/de-operator:0.8.0
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.8.1
           args: ["--namespace", "digital-employees", "--leader-elect"]
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}
