@@ -55,13 +55,17 @@ const chatEntryHTML = `<!DOCTYPE html>
 
 <script>
 const CHAT_URL = {{.ChatURL}};
-const CSRF = (() => { const m = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/); return m ? decodeURIComponent(m[1]) : ""; })();
+// Read the csrf cookie fresh on every call: the #token= handoff (and the
+// login form) mint a NEW session whose csrf cookie lands after page load —
+// a load-time const would carry a stale/empty value into the very next POST
+// and 403 with "csrf token missing or mismatched" (Console jump → autoSelect).
+const csrfToken = () => { const m = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/); return m ? decodeURIComponent(m[1]) : ""; };
 
 const $ = (id) => document.getElementById(id);
 
 async function api(path, options = {}) {
   const init = { credentials: "same-origin", headers: {}, ...options };
-  if (init.method && init.method !== "GET") init.headers["X-CSRF-Token"] = CSRF;
+  if (init.method && init.method !== "GET") init.headers["X-CSRF-Token"] = csrfToken();
   if (init.body) init.headers["Content-Type"] = "application/json";
   const res = await fetch(path, init);
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
