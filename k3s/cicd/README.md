@@ -47,10 +47,21 @@ AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-s
 7. 验证：`kubectl get de` Ready/Ready；portal 登录→选员工→SSE 真模型回复；
    跨会话记忆（告知事实后等待约 1 分钟抽取落库，新线程可召回）
 
+## WeKnora（2026-09-28 补装）
+
+dev 侧故障根因是 redis PVC 的 AOF 文件损坏（`redis-check-aof --fix` 修复后
+全栈恢复）。cicd 用 WeKnora fork main 分支的 helm chart（`zhiyuan/helm-extra-env`
+补丁已并入）全新安装：values 密钥随机生成（存工作区外凭证备忘），
+`SSRF_WHITELIST_EXTRA` 同时放行 higress 网关与内网 embed-server；
+`k3s/weknora-mcp.yaml` 按 cicd bearer 渲染后 apply（`WEKNORA_API_KEY` 待
+实例初始化后回填）。实例初始化清单：管理员账户 → 嵌入模型指向
+`http://embed-server.memory-system.svc.cluster.local:8080/v1`（bge-small-zh-v1.5）
+→ 建库 → 租户 API key 回填 mcp → 员工 CR 挂 `spec.knowledge`（注意 operator
+配置变更不滚动 pod，需重启运行时生效）。
+
 ## 已知边界
 
-- WeKnora 未部署（dev 侧 app/redis 本就 CrashLoop，属上游故障）；员工 CR
-  不挂 `spec.knowledge`，知识检索降级缺席。
+- WeKnora 已部署（栈健康、mcp 桥就位），但实例内容初始化未做（见上）。
 - 企微通道在 dev 与 cicd 之间是单选：bot 的 WS 会话只有一个。迁移 =
   dev CR `channels.wecom: false`、cicd CR 置 true 并注入通道凭证。
 - AEP 契约的 model protocol 枚举仅 `openai-compatible`；anthropic 路径目前
