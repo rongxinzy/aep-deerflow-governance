@@ -221,5 +221,5 @@ func (p *portal) handleSessionEmployee(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: employeeCookie, Value: body.Name, Path: "/", SameSite: http.SameSiteLaxMode})
-	writeJSON(w, http.StatusOK, map[string]any{"employee": body.Name, "chatURL": p.cfg.chatUIURL})
+	writeJSON(w, http.StatusOK, map[string]any{"employee": body.Name, "chatURL": p.chatUIURL(r)})
 }

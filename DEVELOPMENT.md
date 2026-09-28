@@ -194,13 +194,22 @@ kubectl 快览：`kubectl get de` 的 ACCOUNT 列。
 **登录链路**：`POST /api/v1/session`（AEP 密码登录或 token 换发）→ portal 签发
 HttpOnly 会话 cookie（内存 store，单副本，滑续 12h）+ 可读 `csrf_token`；选员工
 `POST /api/v1/session/employee`（复用 owner/admin 校验）设 `de_employee`。
-cookie 不区分端口但**区分主机名**：30190 与 30195 必须用同一主机串访问
-（`localhost` 与 IP 混用即断链）。
+cookie 不区分端口但**区分主机名**：30190 与 30195 须以同一主机串访问
+（见下「地址零硬编码」——地址已按请求主机名自推导）。
 
 **前端补丁面**（DeerFlow fork，全部走 `isPlatformMode()` 开关）：URL 构造器加
 `/api/v1/employees/{name}/chat` 绝对前缀（portal 侧剥冗余 `api/`）；SSR 认证守卫
 短路为平台伪用户（`id:"default"` 使偏好同步静默、`system_role:"user"` 避免
 admin-only 调用 403）；401 跳回 portal `/chat`（`/login` 会死循环）。
+
+**地址零硬编码（主机名自推导）**：portal 与 chat-ui 同主机、只差端口，所有
+跨端跳转地址从请求自身 hostname 推导——用户用什么主机名访问，链接就跟什么
+主机名（cookie 主机名一致性天然满足，WSL IP 变化零影响）：
+- Console「打开对话」→ `${console主机}:30190/chat`（`VITE_PORTAL_URL` 可覆盖）
+- portal 员工选择 → `${请求Host去端口}:30195/workspace`（`PORTAL_CHAT_UI_URL`
+  可覆盖；默认不设）
+- chat-ui 401 回跳 → `${自身主机}:30190/chat`（`NEXT_PUBLIC_PORTAL_CHAT_URL`
+  可覆盖，默认不设）
 
 **镜像构建**（`NEXT_PUBLIC_*` 进客户端 bundle、gateway URL 烧进
 `routes-manifest.json`，都是**构建期**，运行时 env 改不了）：
@@ -209,10 +218,8 @@ admin-only 调用 403）；401 跳回 portal `/chat`（`/login` 会死循环）�
 cd DeerFlow && docker build -f frontend/Dockerfile --target prod \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
   --build-arg NEXT_PUBLIC_PLATFORM_MODE=true \
-  --build-arg NEXT_PUBLIC_PORTAL_CHAT_URL=http://172.19.159.225:30190/chat \
   --build-arg PLATFORM_GATEWAY_URL=http://de-portal.digital-employees.svc:8090 \
-  -t ${REG}/deerflow-chat-ui:0.1.0 .
-# 构建后验证 rewrites 已固化：grep de-portal frontend/.next/routes-manifest.json
+  -t ${REG}/deerflow-chat-ui:0.1.3 .
 ```
 
 已知限制：browser live-view 面板（WebSocket）可能降级（Next rewrite 不保证

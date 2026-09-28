@@ -310,3 +310,22 @@ func TestSessionLogoutDropsSession(t *testing.T) {
 		t.Fatalf("replayed session must 401, got %d", response.StatusCode)
 	}
 }
+
+func TestChatUIURLDerivesFromRequestHost(t *testing.T) {
+	p := &portal{cfg: config{}}
+	// Host with port: same host, chat UI port.
+	request := httptest.NewRequest(http.MethodGet, "http://172.19.159.225:30190/chat", nil)
+	if got := p.chatUIURL(request); got != "http://172.19.159.225:30195/workspace" {
+		t.Fatalf("derived = %q", got)
+	}
+	// Host without port.
+	request = httptest.NewRequest(http.MethodGet, "http://de.example/chat", nil)
+	if got := p.chatUIURL(request); got != "http://de.example:30195/workspace" {
+		t.Fatalf("derived = %q", got)
+	}
+	// Explicit env wins.
+	configured := &portal{cfg: config{chatUIURL: "https://chat.example/workspace"}}
+	if got := configured.chatUIURL(request); got != "https://chat.example/workspace" {
+		t.Fatalf("override = %q", got)
+	}
+}

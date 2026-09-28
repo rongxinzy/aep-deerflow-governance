@@ -2,6 +2,7 @@ package main
 
 import (
 	"html/template"
+	"net"
 	"net/http"
 )
 
@@ -179,10 +180,27 @@ boot();
 
 var chatEntryTemplate = template.Must(template.New("chat-entry").Parse(chatEntryHTML))
 
+// chatUIURL resolves where the reused DeerFlow frontend is served. Default
+// derives from the request's own host (the chat UI runs on the same host,
+// NodePort 30195): whichever hostname the user typed keeps portal and chat
+// UI on one hostname — cookies ignore ports, not hosts — and no
+// environment-specific address is baked anywhere. PORTAL_CHAT_UI_URL
+// overrides for split deployments.
+func (p *portal) chatUIURL(r *http.Request) string {
+	if p.cfg.chatUIURL != "" {
+		return p.cfg.chatUIURL
+	}
+	host := r.Host
+	if withoutPort, _, err := net.SplitHostPort(r.Host); err == nil {
+		host = withoutPort
+	}
+	return "http://" + host + ":30195/workspace"
+}
+
 // handleChatEntry serves the login + employee-picker page. Unauthenticated
 // on purpose: the page itself carries no data, everything loads through the
 // authenticated /api/v1/* endpoints.
-func (p *portal) handleChatEntry(w http.ResponseWriter, _ *http.Request) {
+func (p *portal) handleChatEntry(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = chatEntryTemplate.Execute(w, map[string]any{"ChatURL": p.cfg.chatUIURL})
+	_ = chatEntryTemplate.Execute(w, map[string]any{"ChatURL": p.chatUIURL(r)})
 }
