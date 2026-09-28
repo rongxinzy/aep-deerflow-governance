@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	dev1alpha1 "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
 
 // Service-status endpoints backing the admin console's sidebar entries for
@@ -25,7 +28,10 @@ func (p *portal) platformSecretKey(ctx context.Context, key string) (string, err
 	return string(secret.Data[key]), nil
 }
 
-// handleMemoryStatus reports OpenViking health plus its account inventory.
+// handleMemoryStatus reports OpenViking health plus its account inventory
+// and per-employee memory activity (sessions count + last write, queried
+// with each employee's own OpenViking user key — the root key is denied
+// tenant-scoped data by design).
 func (p *portal) handleMemoryStatus(w http.ResponseWriter, r *http.Request, _ identity) {
 	out := map[string]any{
 		"server":  p.cfg.memoryServer,
@@ -49,15 +55,15 @@ func (p *portal) handleMemoryStatus(w http.ResponseWriter, r *http.Request, _ id
 				defer response.Body.Close()
 				var payload struct {
 					Accounts []struct {
-						AccountID  string `json:"account_id"`
-						AdminUser  string `json:"admin_user_id"`
-						CreatedAt  string `json:"created_at"`
+						AccountID string `json:"account_id"`
+						UserCount int    `json:"user_count"`
+						CreatedAt string `json:"created_at"`
 					} `json:"result"`
 				}
 				if err := json.NewDecoder(response.Body).Decode(&payload); err == nil {
 					for _, account := range payload.Accounts {
 						accounts = append(accounts, map[string]any{
-							"accountID": account.AccountID, "adminUser": account.AdminUser, "createdAt": account.CreatedAt,
+							"accountID": account.AccountID, "createdAt": account.CreatedAt, "userCount": account.UserCount,
 						})
 					}
 				}
@@ -68,7 +74,128 @@ func (p *portal) handleMemoryStatus(w http.ResponseWriter, r *http.Request, _ id
 		accounts = []map[string]any{}
 	}
 	out["accounts"] = accounts
+
+	// Per-employee activity from the user key the operator provisions.
+	var employees []map[string]any
+	var list dev1alpha1.DigitalEmployeeList
+	if err := p.k8s.List(r.Context(), &list, client.InNamespace(p.cfg.namespace)); err == nil {
+		for i := range list.Items {
+			item := &list.Items[i]
+			if item.Status.MemoryUser == "" {
+				continue
+			}
+			entry := map[string]any{"name": item.Name, "memoryUser": item.Status.MemoryUser}
+			if userKey := p.memkeyUserKey(r.Context(), item.Name); userKey != "" {
+				if stats := p.openvikingSessionStats(r.Context(), userKey); stats != nil {
+					entry["sessions"] = stats["sessions"]
+					entry["lastActive"] = stats["lastActive"]
+				}
+			}
+			employees = append(employees, entry)
+		}
+	}
+	if employees == nil {
+		employees = []map[string]any{}
+	}
+	out["employees"] = employees
 	writeJSON(w, http.StatusOK, out)
+}
+
+// memkeyUserKey reads the employee's OpenViking user key from the memkey
+// Secret the operator provisions (empty string when absent).
+func (p *portal) memkeyUserKey(ctx context.Context, employee string) string {
+	var secret corev1.Secret
+	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: memkeySecretName(employee)}, &secret); err != nil {
+		return ""
+	}
+	return string(secret.Data["OPENVIKING_API_KEY"])
+}
+
+func (p *portal) openvikingSessionStats(ctx context.Context, userKey string) map[string]any {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.memoryServer+"/api/v1/sessions", nil)
+	if err != nil {
+		return nil
+	}
+	request.Header.Set("X-API-Key", userKey)
+	response, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Sessions []struct {
+			ModTime string `json:"mod_time"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return nil
+	}
+	last := ""
+	for _, session := range payload.Sessions {
+		if session.ModTime > last {
+			last = session.ModTime
+		}
+	}
+	return map[string]any{"sessions": len(payload.Sessions), "lastActive": last}
+}
+
+// handleMemorySearch runs an OpenViking search/find with the named
+// employee's user key — the console's retrieval test box.
+func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ identity) {
+	var body struct {
+		Employee string `json:"employee"`
+		Query    string `json:"query"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil ||
+		body.Employee == "" || body.Query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "employee and query are required"})
+		return
+	}
+	userKey := p.memkeyUserKey(r.Context(), body.Employee)
+	if userKey == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no memory key for employee"})
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"query": body.Query})
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.cfg.memoryServer+"/api/v1/search/find", bytes.NewReader(payload))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	request.Header.Set("X-API-Key", userKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := serviceProbeClient.Do(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer response.Body.Close()
+	var result struct {
+		Status string `json:"status"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Result struct {
+			Memories []struct {
+				URI      string  `json:"uri"`
+				Score    float64 `json:"score"`
+				Abstract string  `json:"abstract"`
+			} `json:"memories"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream response"})
+		return
+	}
+	if result.Status != "ok" && result.Error != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": result.Error.Message})
+		return
+	}
+	memories := make([]map[string]any, 0, len(result.Result.Memories))
+	for _, memory := range result.Result.Memories {
+		memories = append(memories, map[string]any{"uri": memory.URI, "score": memory.Score, "abstract": memory.Abstract})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memories": memories})
 }
 
 // handleKnowledgeStatus reports WeKnora reachability through its configured
