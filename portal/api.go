@@ -36,6 +36,10 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /api/v1/employees", p.auth(p.applyForEmployee))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
+	// Sidebar service-status probes for the admin console (browser never
+	// sees the OpenViking root key — the portal holds it server-side).
+	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
+	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.handleKnowledgeStatus))
 	mux.HandleFunc("GET /api/v1/employees/{name}", p.auth(p.getEmployee))
 	mux.HandleFunc("DELETE /api/v1/employees/{name}", p.auth(p.deleteEmployee))
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))
@@ -346,11 +350,19 @@ func (p *portal) record(ctx context.Context, spec dev1alpha1.DigitalEmployee, st
 }
 
 func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
+	channels := map[string]any{"wecom": false}
+	if item.Spec.Channels != nil {
+		channels["wecom"] = item.Spec.Channels.Wecom
+		if item.Spec.Channels.WecomName != "" {
+			channels["wecomName"] = item.Spec.Channels.WecomName
+		}
+	}
 	return map[string]any{
 		"name": item.Name, "displayName": item.Spec.DisplayName, "phase": item.Status.Phase,
 		"runtime": item.Spec.Runtime.Type, "model": item.Spec.Runtime.Model,
 		"owner": item.Spec.OwnerName, "ownerId": item.Spec.Owner,
 		"memoryUser": item.Status.MemoryUser, "createdAt": item.CreationTimestamp,
+		"channels": channels,
 	}
 }
 

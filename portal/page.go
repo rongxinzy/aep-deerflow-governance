@@ -133,6 +133,12 @@ async function loadEmployees() {
     btn.dataset.name = e.name;
     const title = document.createElement("span");
     title.textContent = e.displayName || e.name;
+    if (e.channels && e.channels.wecom) {
+      const badge = document.createElement("em");
+      badge.textContent = "企业微信";
+      badge.style.cssText = "font-style:normal;font-size:.72rem;border:1px solid #2f855a;color:#2f855a;border-radius:4px;padding:0 6px;margin-left:8px;vertical-align:1px";
+      title.appendChild(badge);
+    }
     const sub = document.createElement("small");
     sub.textContent = e.name + " · " + (e.phase || "");
     btn.append(title, sub);
