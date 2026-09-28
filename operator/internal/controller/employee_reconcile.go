@@ -128,19 +128,35 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 	if modelBase == "" {
 		modelBase = defaultModelBaseURL
 	}
+	// Wire name (spec.Runtime.Model) stays stable for agents and threads;
+	// provider/nativeModel/apiKeyEnv shape the actual client behind it.
+	modelEntry := map[string]any{
+		"name":         spec.Runtime.Model,
+		"display_name": spec.Runtime.Model,
+		"model":        spec.Runtime.Model,
+		"api_key":      "$DEER_BENCH_API_KEY",
+		"base_url":     modelBase,
+	}
+	if spec.Runtime.NativeModel != "" {
+		modelEntry["model"] = spec.Runtime.NativeModel
+	}
+	if spec.Runtime.ApiKeyEnv != "" {
+		modelEntry["api_key"] = "$" + spec.Runtime.ApiKeyEnv
+	}
+	// ChatAnthropic's constructor takes `timeout`; ChatOpenAI's is
+	// `request_timeout`.
+	if spec.Runtime.Provider == "anthropic" {
+		modelEntry["use"] = "langchain_anthropic:ChatAnthropic"
+		modelEntry["timeout"] = 300.0
+	} else {
+		modelEntry["use"] = "langchain_openai:ChatOpenAI"
+		modelEntry["request_timeout"] = 300.0
+	}
+	modelEntry["max_retries"] = 2
 	config := map[string]any{
 		"config_version": 46,
 		"log_level":      "info",
-		"models": []any{map[string]any{
-			"name":            spec.Runtime.Model,
-			"display_name":    spec.Runtime.Model,
-			"use":             "langchain_openai:ChatOpenAI",
-			"model":           spec.Runtime.Model,
-			"api_key":         "$DEER_BENCH_API_KEY",
-			"base_url":        modelBase,
-			"request_timeout": 300.0,
-			"max_retries":     2,
-		}},
+		"models":         []any{modelEntry},
 		"sandbox": map[string]any{
 			"use":             "deerflow.sandbox.local:LocalSandboxProvider",
 			"allow_host_bash": false,
@@ -154,7 +170,7 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 		// without this every get_agent/list_agents tool call 403s and the
 		// agent reports "智能体服务连续调用失败" instead of answering.
 		"agents_api": map[string]any{"enabled": true},
-		"subagents": map[string]any{"max_total_per_run": 6},
+		"subagents":  map[string]any{"max_total_per_run": 6},
 		"extensions": map[string]any{
 			"middlewares": []any{map[string]any{
 				"class": "aep_deerflow_governance:AepGovernanceMiddleware",

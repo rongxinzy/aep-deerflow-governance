@@ -294,7 +294,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         if note:
             governance = SystemMessage(content=str(governance.content) + note)
         if messages:
-            messages.insert(len(messages) - 1, governance)
+            # Anthropic-protocol providers require system messages to be a
+            # single consecutive block at the head of the conversation;
+            # inserting mid-list (as the OpenAI path tolerated) is rejected
+            # with "multiple non-consecutive system messages".
+            head = 0
+            while head < len(messages) and isinstance(messages[head], SystemMessage):
+                head += 1
+            messages.insert(head, governance)
         else:
             messages = [governance]
         return request.override(messages=messages)

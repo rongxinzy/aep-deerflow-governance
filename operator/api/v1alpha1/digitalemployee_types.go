@@ -24,10 +24,30 @@ type RuntimeSpec struct {
 	// (e.g. bench-glm). Never a provider-native model name.
 	Model string `json:"model"`
 
-	// ModelBaseURL is the OpenAI-compatible base URL. Defaults to the
-	// in-cluster Higress gateway when empty.
+	// ModelBaseURL is the model API base URL. Defaults to the in-cluster
+	// Higress gateway when empty.
 	// +optional
 	ModelBaseURL string `json:"modelBaseURL,omitempty"`
+
+	// Provider selects the model protocol family. "openai" (default) keeps
+	// the Higress-routed OpenAI-compatible path; "anthropic" connects the
+	// runtime directly to an Anthropic-protocol endpoint (emergency
+	// fallback when the in-cluster route is unavailable — the AEP model
+	// registry only models openai-compatible providers).
+	// +optional
+	// +kubebuilder:validation:Enum=openai;anthropic
+	Provider string `json:"provider,omitempty"`
+
+	// NativeModel is the provider-native model id behind the wire name
+	// (Model stays the stable wire id agents and threads reference).
+	// Defaults to Model (Higress passthrough).
+	// +optional
+	NativeModel string `json:"nativeModel,omitempty"`
+
+	// ApiKeyEnv names the credentials-Secret env var holding the provider
+	// API key. Defaults to DEER_BENCH_API_KEY.
+	// +optional
+	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
 }
 
 // MemorySpec configures long-term memory persistence.
