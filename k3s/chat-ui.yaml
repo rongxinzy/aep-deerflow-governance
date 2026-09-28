@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
         - name: chat-ui
-          image: 172.18.5.251:8081/zhiyuan/deerflow-chat-ui:0.1.3
+          image: 172.18.5.251:8081/zhiyuan/deerflow-chat-ui:0.1.4
           # The API proxy route handler reads this at request time (unlike
           # the baked NEXT_PUBLIC_* values, this one is runtime-configurable).
           env:

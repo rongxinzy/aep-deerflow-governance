@@ -329,3 +329,32 @@ func TestChatUIURLDerivesFromRequestHost(t *testing.T) {
 		t.Fatalf("override = %q", got)
 	}
 }
+
+func TestMarshalIdentityRoundTripKeepsToken(t *testing.T) {
+	ident := identity{
+		Token:       "aep-access-token",
+		UserID:      "u1",
+		Username:    "saber",
+		DisplayName: "Saber",
+		Kind:        "user",
+		Roles:       []string{"admin", "gov-service"},
+	}
+	raw, err := marshalIdentity(ident)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The AEP token must survive the trip: a plain json.Marshal of identity
+	// would drop it (json:"-") and quietly break AEP calls after a restart.
+	if !strings.Contains(string(raw), "aep-access-token") {
+		t.Fatalf("token missing from persisted identity: %s", raw)
+	}
+	back, err := unmarshalIdentity(raw)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Token != ident.Token || back.UserID != ident.UserID ||
+		back.Username != ident.Username || back.DisplayName != ident.DisplayName ||
+		back.Kind != ident.Kind || len(back.Roles) != len(ident.Roles) {
+		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+}

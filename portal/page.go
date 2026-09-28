@@ -41,8 +41,8 @@ const chatEntryHTML = `<!DOCTYPE html>
 <section id="login" hidden>
   <p>使用企业账号（AEP）登录后选择要对话的数字员工。</p>
   <form id="login-form">
-    <label>用户名<input id="username" autocomplete="username" required></label>
-    <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+    <label>用户名<input id="username" name="username" autocomplete="username" required></label>
+    <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
     <button type="submit">登录</button>
   </form>
 </section>

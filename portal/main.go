@@ -119,7 +119,7 @@ func main() {
 		k8s:      k8sClient,
 		aep:      &aepAuthenticator{baseURL: cfg.aepBaseURL, http: &http.Client{Timeout: 10 * time.Second}},
 		logger:   logger,
-		sessions: newSessionStore(cfg.sessionTTL),
+		sessions: newSessionStoreWithDB(cfg.sessionTTL, db),
 	}
 
 	server := &http.Server{
@@ -148,6 +148,12 @@ CREATE TABLE IF NOT EXISTS requests (
 	decided_by    TEXT NOT NULL DEFAULT '',
 	created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 	decided_at    TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS sessions (
+	token         TEXT PRIMARY KEY,
+	identity_json TEXT NOT NULL,
+	csrf          TEXT NOT NULL,
+	expires_at    TIMESTAMPTZ NOT NULL
 )`)
 	return err
 }

@@ -24,6 +24,7 @@ rtl-control；l20 的 `/etc/rancher/k3s/registries.yaml` 已配置（与 188 相
 | `bigmodel-anthropic-route.yaml` | 在线 GLM 的 Higress 路由（Anthropic 透传 + openai 协议转换子路由），`BIGMODEL_API_KEY=... envsubst` 渲染后 apply |
 | `memory-stack.yaml` | 记忆栈（VLM 走 Higress 在线 GLM），`OPENVIKING_ROOT_API_KEY=... envsubst` 渲染后 apply |
 | `sales-helper.yaml` | 首例员工 CR（anthropic provider 经 Higress；企微通道关闭——bot WS 单会话，dev 仍在使用） |
+| `demo-employees.yaml` | 演示员工批量清单（财务/生产/研发/行政，与 sales-helper 同规格） |
 | `seed-aep.sh` | AEP 种子：wecom 身份源、saber 映射、gov-service 账号；密码走 env |
 
 AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml`
@@ -42,7 +43,8 @@ AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-s
    `portal/deploy/portal.yaml` → `k3s/chat-ui.yaml` →
    zhiyuanAaaS `deploy/admin-console.yaml`（企业版前端，30196） →
    `sales-helper.yaml`
-6. 验证：`kubectl get de` Ready/Ready；portal 登录→选员工→SSE 真模型回复；
+6. （可选）演示员工：`demo-employees.yaml`
+7. 验证：`kubectl get de` Ready/Ready；portal 登录→选员工→SSE 真模型回复；
    跨会话记忆（告知事实后等待约 1 分钟抽取落库，新线程可召回）
 
 ## 已知边界
