@@ -26,7 +26,7 @@ rules:
     resources: ["deployments"]
     verbs: ["*"]
   - apiGroups: [""]
-    resources: ["configmaps", "secrets", "services", "pods", "events"]
+    resources: ["configmaps", "secrets", "services", "pods", "events", "persistentvolumeclaims"]
     verbs: ["*"]
   # Leader election (--leader-elect) coordinates replicas via a Lease.
   - apiGroups: ["coordination.k8s.io"]
@@ -64,7 +64,7 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: 172.18.5.251:8081/zhiyuan/de-operator:0.7.0
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.8.0
           args: ["--namespace", "digital-employees", "--leader-elect"]
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}

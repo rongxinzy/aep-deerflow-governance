@@ -46,7 +46,7 @@ type DigitalEmployeeReconciler struct {
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=*
-// +kubebuilder:rbac:groups=core,resources=configmaps;secrets;services;pods;events,verbs=*
+// +kubebuilder:rbac:groups=core,resources=configmaps;secrets;services;pods;events;persistentvolumeclaims,verbs=*
 
 // Reconcile is part of the main kubernetes reconciliation loop.
 func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
@@ -116,6 +116,7 @@ func (r *DigitalEmployeeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Named("digitalemployee").
 		Complete(r)
 }

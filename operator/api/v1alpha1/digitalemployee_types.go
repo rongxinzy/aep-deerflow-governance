@@ -129,6 +129,20 @@ type ChannelsSpec struct {
 	Feishu bool `json:"feishu,omitempty"`
 }
 
+// PersistenceSpec controls durable runtime storage. The runtime home
+// (/var/lib/deerflow: conversation threads, channel credentials, auth DB)
+// defaults to a PVC so pod restarts and image upgrades no longer wipe
+// conversation history. Set enabled=false to fall back to an EmptyDir.
+type PersistenceSpec struct {
+	// +optional
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+	// Size of the home volume (minimum 1Gi).
+	// +optional
+	// +kubebuilder:default="2Gi"
+	Size string `json:"size,omitempty"`
+}
+
 // DigitalEmployeeSpec defines the desired state of a digital employee.
 type DigitalEmployeeSpec struct {
 	// +optional
@@ -149,6 +163,11 @@ type DigitalEmployeeSpec struct {
 	// via the gateway admin API, not through the CR.
 	// +optional
 	Channels *ChannelsSpec `json:"channels,omitempty"`
+
+	// Persistence makes the runtime home durable (threads, channel
+	// credentials, auth DB survive pod restarts and image upgrades).
+	// +optional
+	Persistence PersistenceSpec `json:"persistence,omitempty"`
 
 	// Owner is the AEP user id of the employee's owner (set by the business
 	// layer; the operator never interprets it).

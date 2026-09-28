@@ -92,6 +92,44 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(a2aEnv["DEERFLOW_URL"]).To(Equal("http://de-alice-helper:8001"))
 		})
 
+		It("renders a durable home PVC and Recreate strategy when persistence is enabled", func(ctx context.Context) {
+			updated := &v1alpha1.DigitalEmployee{}
+			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(employee), updated)).To(Succeed())
+			updated.Spec.Persistence = v1alpha1.PersistenceSpec{Enabled: true, Size: "3Gi"}
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+
+			claim := &corev1.PersistentVolumeClaim{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: "de-alice-helper-home"}, claim)).To(Succeed())
+			Expect(claim.Spec.AccessModes).To(ContainElement(corev1.ReadWriteOnce))
+			Expect(claim.Spec.Resources.Requests.Storage().String()).To(Equal("3Gi"))
+
+			deployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+			Expect(deployment.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+			home := corev1.Volume{}
+			for _, v := range deployment.Spec.Template.Spec.Volumes {
+				if v.Name == "home" {
+					home = v
+				}
+			}
+			Expect(home.PersistentVolumeClaim).NotTo(BeNil(), "home volume must reference the PVC")
+			Expect(home.PersistentVolumeClaim.ClaimName).To(Equal("de-alice-helper-home"))
+		})
+
+		It("keeps the home volume ephemeral when persistence is disabled", func(ctx context.Context) {
+			reconcile(ctx)
+			deployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+			home := corev1.Volume{}
+			for _, v := range deployment.Spec.Template.Spec.Volumes {
+				if v.Name == "home" {
+					home = v
+				}
+			}
+			Expect(home.EmptyDir).NotTo(BeNil())
+		})
+
 		It("renders channel-connections only for enabled IM channels", func(ctx context.Context) {
 			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true}
 			Expect(fx.client.Update(ctx, employee)).To(Succeed())

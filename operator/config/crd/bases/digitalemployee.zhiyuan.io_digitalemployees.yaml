@@ -208,6 +208,19 @@ spec:
               ownerName:
                 description: OwnerName is the owner's AEP username for display.
                 type: string
+              persistence:
+                description: |-
+                  Persistence makes the runtime home durable (threads, channel
+                  credentials, auth DB survive pod restarts and image upgrades).
+                properties:
+                  enabled:
+                    default: true
+                    type: boolean
+                  size:
+                    default: 2Gi
+                    description: Size of the home volume (minimum 1Gi).
+                    type: string
+                type: object
               replicas:
                 default: 1
                 format: int32

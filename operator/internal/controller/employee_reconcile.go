@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +39,12 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 	}
 	if err := safeCreateOrUpdate(ctx, r.Client, extensions); err != nil {
 		return fmt.Errorf("extensions config map: %w", err)
+	}
+
+	if employee.Spec.Persistence.Enabled {
+		if err := r.ensurePVC(ctx, employee); err != nil {
+			return fmt.Errorf("home pvc: %w", err)
+		}
 	}
 
 	deployment := renderDeployment(employee)
@@ -280,17 +287,17 @@ func renderDeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: deploymentName(employee), Namespace: employee.Namespace, Labels: labels(employee)},
 		Spec: appsv1.DeploymentSpec{
+			// The home volume is RWO when persistent: a rolling update would
+			// try to double-mount it. Single-replica Recreate is the honest
+			// strategy either way.
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels(employee)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels(employee)},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{container},
-					Volumes: []corev1.Volume{
-						{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configName(employee)}}}},
-						{Name: "extensions", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: extensionsName(employee)}}}},
-						{Name: "home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes:    volumes(employee),
 				},
 			},
 		},
@@ -332,4 +339,56 @@ func int32String(v int32) string { return strconv.FormatInt(int64(v), 10) }
 
 func labels(employee *v1alpha1.DigitalEmployee) map[string]string {
 	return map[string]string{"app": "de-" + employee.Name, "digitalemployee.zhiyuan.io/name": employee.Name}
+}
+
+// volumes renders the pod volumes: config/extensions from ConfigMaps, and
+// the runtime home from a PVC when persistence is enabled (threads, channel
+// credentials, and the auth DB survive restarts) or an EmptyDir otherwise.
+func volumes(employee *v1alpha1.DigitalEmployee) []corev1.Volume {
+	home := corev1.Volume{Name: "home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+	if employee.Spec.Persistence.Enabled {
+		home = corev1.Volume{Name: "home", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: homePVCName(employee)},
+		}}
+	}
+	return []corev1.Volume{
+		{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configName(employee)}}}},
+		{Name: "extensions", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: extensionsName(employee)}}}},
+		home,
+	}
+}
+
+func homePVCName(employee *v1alpha1.DigitalEmployee) string { return "de-" + employee.Name + "-home" }
+
+func renderPVC(employee *v1alpha1.DigitalEmployee) *corev1.PersistentVolumeClaim {
+	size := employee.Spec.Persistence.Size
+	if _, err := resource.ParseQuantity(size); err != nil {
+		size = "2Gi"
+	}
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: objectMeta(homePVCName(employee), employee.Namespace),
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			},
+		},
+	}
+}
+
+// ensurePVC creates the home claim when absent. Existing claims are left
+// untouched: PVC specs are largely immutable, and shrinking an in-use claim
+// would only produce a reconcile error loop.
+func (r *DigitalEmployeeReconciler) ensurePVC(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
+	claim := renderPVC(employee)
+	if err := controllerutil.SetControllerReference(employee, claim, r.Scheme); err != nil {
+		return err
+	}
+	existing := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(claim), existing); err == nil {
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+	return r.Create(ctx, claim)
 }
