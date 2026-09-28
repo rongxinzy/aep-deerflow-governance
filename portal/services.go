@@ -215,5 +215,39 @@ func (p *portal) handleKnowledgeStatus(w http.ResponseWriter, r *http.Request, _
 		}
 	}
 	out["healthy"] = healthy
+
+	// Knowledge-base inventory through the WeKnora tenant API, using the
+	// retrieve-scoped key from the platform Secret (server-side only;
+	// skipped silently when the key is not configured yet).
+	var knowledgeBases []map[string]any
+	if key, err := p.platformSecretKey(r.Context(), "WEKNORA_API_KEY"); err == nil && key != "" && p.cfg.knowledgeAPIURL != "" {
+		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.cfg.knowledgeAPIURL+"/api/v1/knowledge-bases", nil)
+		if err == nil {
+			request.Header.Set("X-API-Key", key)
+			if response, err := serviceProbeClient.Do(request); err == nil {
+				var payload struct {
+					Data []struct {
+						ID            string `json:"id"`
+						Name          string `json:"name"`
+						Description   string `json:"description"`
+						DocumentCount int    `json:"document_count"`
+						CreatedAt     string `json:"created_at"`
+					} `json:"data"`
+				}
+				if json.NewDecoder(response.Body).Decode(&payload) == nil {
+					for _, kb := range payload.Data {
+						knowledgeBases = append(knowledgeBases, map[string]any{
+							"id": kb.ID, "name": kb.Name, "description": kb.Description,
+							"documentCount": kb.DocumentCount, "createdAt": kb.CreatedAt,
+						})
+					}
+				}
+			}
+		}
+	}
+	if knowledgeBases == nil {
+		knowledgeBases = []map[string]any{}
+	}
+	out["knowledgeBases"] = knowledgeBases
 	writeJSON(w, http.StatusOK, out)
 }
