@@ -209,7 +209,7 @@ admin-only 调用 403）；401 跳回 portal `/chat`（`/login` 会死循环）�
 cd DeerFlow && docker build -f frontend/Dockerfile --target prod \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
   --build-arg NEXT_PUBLIC_PLATFORM_MODE=true \
-  --build-arg NEXT_PUBLIC_PORTAL_CHAT_URL=http://localhost:30190/chat \
+  --build-arg NEXT_PUBLIC_PORTAL_CHAT_URL=http://172.19.159.225:30190/chat \
   --build-arg PLATFORM_GATEWAY_URL=http://de-portal.digital-employees.svc:8090 \
   -t ${REG}/deerflow-chat-ui:0.1.0 .
 # 构建后验证 rewrites 已固化：grep de-portal frontend/.next/routes-manifest.json

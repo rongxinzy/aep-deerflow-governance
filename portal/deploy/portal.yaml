@@ -67,7 +67,7 @@ spec:
             # Web-chat entry links here after employee selection; must share
             # the hostname the browser uses for the portal (cookies ignore
             # ports, not hosts).
-            - {name: PORTAL_CHAT_UI_URL, value: "http://localhost:30195/workspace"}
+            - {name: PORTAL_CHAT_UI_URL, value: "http://172.19.159.225:30195/workspace"}
           envFrom:
             - secretRef: {name: de-portal-db}
           ports:
