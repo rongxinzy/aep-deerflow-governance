@@ -247,10 +247,16 @@ class AepGovernanceMiddleware(AgentMiddleware):
     # ------------------------------------------------------------ hooks
     def _governance_message(self, aep_user: str | None, visible: frozenset[str]) -> SystemMessage:
         if aep_user is None:
+            # Guest mode: the sender is already inside the corporate IM
+            # boundary (authenticated by the platform), just not linked to an
+            # AEP account yet. Chat normally; only governed data tools are
+            # denied — and the agent should mention binding only when the
+            # user actually asks for enterprise data, not on every turn.
             return SystemMessage(content=(
-                f"<{_GOVERNANCE_TAG}>发送者的平台账号尚未绑定企业身份，数据范围解析结果为空。"
-                f"所有数据类工具都会被拒绝。请直接告知用户：账号尚未绑定企业身份，"
-                f"请联系管理员完成绑定后重试。</{_GOVERNANCE_TAG}>"))
+                f"<{_GOVERNANCE_TAG}>发送者来自企业 IM，但尚未关联企业账号：权限层级未知（访客）。"
+                f"请正常与其对话——通用问题、闲聊、知识问答照常回答，不要主动、反复提及绑定事宜。"
+                f"仅企业数据类工具的调用会被工具层拒绝；当用户询问企业数据而被拒绝时，"
+                f"自然说明：当前账号未绑定企业身份，绑定后即可按其权限查询，请联系管理员完成绑定。</{_GOVERNANCE_TAG}>"))
         names = ", ".join(sorted(self.team_names.get(t, t) for t in visible)) or "（范围解析失败，按无可见部门处理）"
         return SystemMessage(content=(
             f"<{_GOVERNANCE_TAG}>当前会话代表 AEP 用户 {aep_user} 执行。"
@@ -285,9 +291,9 @@ class AepGovernanceMiddleware(AgentMiddleware):
         aep_user = self.resolve_aep_user(getattr(request, "runtime", None))
         visible = self.visible_teams(aep_user)
         if aep_user is None:
-            print(f"[aep-governance] DENY unmapped-sender tool={name} dept={dept}", flush=True)
+            print(f"[aep-governance] DENY guest tool={name} dept={dept}", flush=True)
             return ToolMessage(
-                content="DENIED: 发送者账号尚未绑定企业身份，无法解析数据范围。请联系管理员完成绑定后重试。",
+                content="DENIED: 当前为访客身份（未绑定企业账号），无法查询企业数据。请联系管理员绑定企业账号后，按你的权限查询。",
                 tool_call_id=getattr(call, "id", "") or "",
             )
         team_id = self.name_to_team.get(dept)

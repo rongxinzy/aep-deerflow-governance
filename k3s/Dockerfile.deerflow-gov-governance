@@ -1,0 +1,13 @@
+# Refresh ONLY the governance middleware package on top of a published
+# deerflow-gov base. Cheaper than a backend refresh (Dockerfile.deerflow-gov)
+# when just aep_deerflow_governance changed. Remember: any governance-package
+# change must ship in an image or the middleware silently fails to construct
+# (every turn answers nothing).
+#
+# Build (context = aep-deerflow-governance repo root):
+#   cd aep-deerflow-governance && docker build -f k3s/Dockerfile.deerflow-gov-governance \
+#     --build-arg BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v11 \
+#     -t 172.18.5.251:8081/zhiyuan/deerflow-gov:v12 .
+ARG BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v11
+FROM ${BASE}
+COPY aep_deerflow_governance /opt/governance/aep_deerflow_governance
