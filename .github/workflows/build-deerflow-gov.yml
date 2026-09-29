@@ -1,0 +1,79 @@
+# Publishes the governed DeerFlow runtime image (deerflow-gov) to ghcr.
+#
+# This image is LINEAGE-BASED: each version refreshes sources on top of the
+# previous published image (the scratch recipe needs offline uv/python pieces
+# that are not reproducible in CI). The base therefore comes from ghcr itself:
+#   variant=governance → context = this repo, Dockerfile.deerflow-gov-governance
+#   variant=backend    → context = the DeerFlow fork, Dockerfile.deerflow-gov
+# The lineage root (v15 and earlier) lives on the intranet registry and was
+# seeded to ghcr once; never rebuild those from scratch.
+name: build-deerflow-gov
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Target image tag (e.g. v16)"
+        required: true
+      base:
+        description: "Base image tag on ghcr (e.g. v15)"
+        required: true
+      variant:
+        description: "governance (middleware only) or backend (full backend refresh)"
+        required: false
+        default: governance
+      deerflow_ref:
+        description: "DeerFlow fork ref for variant=backend (branch/tag/sha)"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/rongxinzy/deerflow-gov
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout DeerFlow (backend variant)
+        if: inputs.variant == 'backend'
+        uses: actions/checkout@v4
+        with:
+          repository: rongxinzy/deer-flow
+          ref: ${{ inputs.deerflow_ref }}
+          path: deerflow
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (governance variant)
+        if: inputs.variant != 'backend'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k3s/Dockerfile.deerflow-gov-governance
+          push: true
+          tags: ${{ env.IMAGE }}:${{ inputs.tag }}
+          build-args: |
+            BASE=${{ env.IMAGE }}:${{ inputs.base }}
+
+      - name: Build and push (backend variant)
+        if: inputs.variant == 'backend'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deerflow/backend
+          file: k3s/Dockerfile.deerflow-gov
+          push: true
+          tags: ${{ env.IMAGE }}:${{ inputs.tag }}
+          build-args: |
+            BASE=${{ env.IMAGE }}:${{ inputs.base }}
