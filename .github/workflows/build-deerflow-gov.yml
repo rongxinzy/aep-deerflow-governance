@@ -50,11 +50,13 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # The lineage base was seeded outside CI (no repo linkage), so the
+      # GITHUB_TOKEN cannot pull it; use the dedicated PAT secret.
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: hawkli-1994
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and push (governance variant)
         if: inputs.variant != 'backend'
