@@ -1,0 +1,123 @@
+{{- if .Values.models.anthropic.enabled }}
+{{- $ns := "higress-system" }}
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: {{ $ns }}
+spec:
+  registries:
+    - type: dns
+      name: bigmodel
+      domain: {{ .Values.models.anthropic.upstreamDomain }}
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aep-model-gateway-bigmodel
+  namespace: {{ $ns }}
+  annotations:
+    higress.io/backend-protocol: HTTPS
+    higress.io/destination: bigmodel.dns
+    higress.io/proxy-ssl-name: {{ .Values.models.anthropic.upstreamDomain }}
+    higress.io/proxy-ssl-server-name: "on"
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              resource: {apiGroup: networking.higress.io, kind: McpBridge, name: default}
+            path: /v1
+            pathType: Prefix
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aep-model-gateway-bigmodel-vlm
+  namespace: {{ $ns }}
+  annotations:
+    higress.io/backend-protocol: HTTPS
+    higress.io/destination: bigmodel.dns
+    higress.io/proxy-ssl-name: {{ .Values.models.anthropic.upstreamDomain }}
+    higress.io/proxy-ssl-server-name: "on"
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          # Exact path beats the /v1 prefix above; ai-proxy only engages on
+          # the standard /v1/chat/completions path.
+          - backend:
+              resource: {apiGroup: networking.higress.io, kind: McpBridge, name: default}
+            path: /v1/chat/completions
+            pathType: Exact
+---
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: aep-ai-proxy-bigmodel-vlm
+  namespace: {{ $ns }}
+spec:
+  defaultConfigDisable: true
+  matchRules:
+    - ingress: [aep-model-gateway-bigmodel-vlm]
+      config:
+        provider:
+          type: claude
+          apiTokens: ["{{ .Values.models.anthropic.apiKey }}"]
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-proxy:2.0.1
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: bigmodel-anthropic-passthrough
+  namespace: {{ $ns }}
+spec:
+  configPatches:
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost: {route: {name: aep-model-gateway-bigmodel}}
+      patch:
+        operation: MERGE
+        value:
+          # request_headers_to_add lives on the Route, not the RouteAction —
+          # nesting it under `route` makes istiod silently drop it.
+          request_headers_to_add:
+            - header:
+                key: x-api-key
+                value: "{{ .Values.models.anthropic.apiKey }}"
+              append: false
+          route:
+            host_rewrite_literal: {{ .Values.models.anthropic.upstreamDomain }}
+            regex_rewrite:
+              pattern: {google_re2: {}, regex: "^/v1/(.*)$"}
+              substitution: "/api/anthropic/v1/\\1"
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost: {route: {name: aep-model-gateway-bigmodel-vlm}}
+      patch:
+        operation: MERGE
+        value:
+          # BigModel prefers Authorization over x-api-key when both are
+          # present, so overwrite the caller's dummy bearer as well.
+          request_headers_to_add:
+            - header:
+                key: authorization
+                value: "Bearer {{ .Values.models.anthropic.apiKey }}"
+              append: false
+            - header:
+                key: x-api-key
+                value: "{{ .Values.models.anthropic.apiKey }}"
+              append: false
+          route:
+            host_rewrite_literal: {{ .Values.models.anthropic.upstreamDomain }}
+            regex_rewrite:
+              pattern: {google_re2: {}, regex: "^/v1/(.*)$"}
+              substitution: "/api/anthropic/v1/\\1"
+{{- end }}

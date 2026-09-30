@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespaces.main }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespaces.memory }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}

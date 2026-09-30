@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-portal
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: de-portal}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-portal}
+  template:
+    metadata:
+      labels: {app: de-portal}
+    spec:
+      serviceAccountName: de-portal
+      containers:
+        - name: portal
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.portal.repository "tag" .Values.images.portal.tag) }}
+          env:
+            - {name: PORTAL_POLICY_MODE, value: {{ .Values.portal.policyMode | quote }}}
+            - {name: PORTAL_QUOTA_PER_USER, value: {{ .Values.portal.quotaPerUser | quote }}}
+            - {name: PORTAL_ADMIN_USERS, value: {{ .Values.portal.adminUsers | quote }}}
+            - {name: PORTAL_ADMIN_ROLES, value: {{ .Values.portal.adminRoles | quote }}}
+          envFrom:
+            - secretRef: {name: {{ .Values.secrets.portalDB }}}
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8090}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8090}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: de-portal
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  type: NodePort
+  selector: {app: de-portal}
+  ports:
+    - port: 8090
+      targetPort: 8090
+      nodePort: {{ .Values.portal.nodePort }}

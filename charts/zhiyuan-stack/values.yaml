@@ -1,0 +1,91 @@
+# Defaults; per-environment overrides live in values-<env>.local.yaml files
+# that are gitignored (they carry credentials).
+
+global:
+  # Image registry base for the zhiyuan-built images. ghcr.io is the
+  # version source (CI publishes there); clusters pull from the intranet
+  # Artifactory local repo for speed — until CI mirrors finished builds
+  # back, point at the intranet registry. The ghcr pull-through
+  # (172.18.5.251:8081/ghcr) works but its on-demand origin fetch times
+  # out under kubelet deadlines.
+  registry: "172.18.5.251:8081/zhiyuan"
+  # Third-party images that only exist on the intranet registry.
+  intranetRegistry: "172.18.5.251:8081/zhiyuan"
+  namespaces:
+    main: digital-employees
+    memory: memory-system
+
+images:
+  operator: { repository: rongxinzy/de-operator, tag: "0.9.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.4.10" }
+  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.5.0" }
+  # runtime images are big and version rarely; the lineage lives on ghcr
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v15" }
+  openviking: { repository: "172.18.5.251:8081/zhiyuan/openviking", tag: "0.4.21" }
+  embedServer: { repository: "172.18.5.251:8081/zhiyuan/embed-server", tag: "0.1.0" }
+
+aep:
+  baseURL: http://aep-control-service.aep-system.svc.cluster.local:8080
+  deploymentID: demo
+  # AEP admin user id; employees use it as the governance default user.
+  adminUserId: ""
+
+# Created out-of-band (kept out of the chart on purpose): de-platform-creds
+# (OPENVIKING_ROOT_API_KEY, WEKNORA_MCP_BEARER, GOV_*, DEER_BENCH_API_KEY,
+# BIGMODEL_API_KEY dummy, WEKNORA_API_KEY) and de-portal-db (PORTAL_DB_URL).
+secrets:
+  platformCreds: de-platform-creds
+  portalDB: de-portal-db
+
+portal:
+  policyMode: approval
+  quotaPerUser: "2"
+  adminUsers: admin
+  adminRoles: admin,platform-admin
+  nodePort: 30190
+
+chatUI:
+  gatewayBaseURL: http://de-portal.digital-employees.svc.cluster.local:8090
+  nodePort: 30195
+
+adminConsole:
+  enabled: true
+  aepBaseURL: http://aep-control-service.aep-system.svc.cluster.local:8080
+  portalBaseURL: http://de-portal.digital-employees.svc.cluster.local:8090
+  nodePort: 30196
+
+# Online GLM through Higress: Anthropic passthrough for the runtime
+# (ChatAnthropic) plus the openai<->anthropic conversion route for
+# OpenViking's VLM. apiKey is a credential — keep it in the local values
+# file, never commit it.
+models:
+  anthropic:
+    enabled: true
+    wireName: bench-glm
+    nativeModel: glm-5.3-flash
+    apiKey: ""
+    upstreamDomain: open.bigmodel.cn
+
+memory:
+  enabled: true
+  openviking:
+    account: zhiyuan
+    rootAPIKey: ""        # credential — local values file only
+    storage: 10Gi
+    vlm:
+      # in-cluster Higress gateway speaks openai to the VLM
+      apiBase: http://higress-gateway.higress-system.svc.cluster.local/v1
+      model: glm-5.3-flash
+    embedding:
+      apiBase: http://embed-server:8080/v1
+      model: bge-small-zh-v1.5
+      dimension: 512
+
+# Digital employees. wecom requires the bot's WS session (single instance
+# cluster-wide); knowledge is absent until WeKnora is wired per employee.
+employees: []
+#  - name: sales-helper
+#    displayName: 销售助理
+#    wecom: false
+#    wecomName: ""

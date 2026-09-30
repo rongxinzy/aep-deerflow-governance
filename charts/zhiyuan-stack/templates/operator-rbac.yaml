@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: de-operator
+  namespace: {{ include "zhiyuan.ns" . }}
+---
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: de-operator
+  namespace: {{ include "zhiyuan.ns" . }}
+rules:
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees
+  verbs:
+  - '*'
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - digitalemployee.zhiyuan.io
+  resources:
+  - digitalemployees/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - '*'
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  - secrets
+  - services
+  - pods
+  - events
+  - persistentvolumeclaims
+  verbs:
+  - '*'
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - create
+  - update
+---
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: de-operator
+  namespace: {{ include "zhiyuan.ns" . }}
+subjects:
+- kind: ServiceAccount
+  name: de-operator
+  namespace: digital-employees
+roleRef:
+  kind: Role
+  name: de-operator
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: de-portal
+  namespace: {{ include "zhiyuan.ns" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: de-portal
+  namespace: {{ include "zhiyuan.ns" . }}
+rules:
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["digitalemployees"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: de-portal
+  namespace: {{ include "zhiyuan.ns" . }}
+subjects:
+  - {kind: ServiceAccount, name: de-portal, namespace: {{ include "zhiyuan.ns" . }}}
+roleRef: {kind: Role, name: de-portal, apiGroup: rbac.authorization.k8s.io}

@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflow-chat-ui
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: deerflow-chat-ui}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: deerflow-chat-ui}
+  template:
+    metadata:
+      labels: {app: deerflow-chat-ui}
+    spec:
+      containers:
+        - name: chat-ui
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.chatUI.repository "tag" .Values.images.chatUI.tag) }}
+          env:
+            - name: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL
+              value: {{ .Values.chatUI.gatewayBaseURL | quote }}
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet: {path: /login, port: 3000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflow-chat-ui
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  type: NodePort
+  selector: {app: deerflow-chat-ui}
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: {{ .Values.chatUI.nodePort }}

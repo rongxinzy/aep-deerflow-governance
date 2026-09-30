@@ -1,0 +1,129 @@
+{{- if .Values.memory.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed-server
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+  labels: {app: embed-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embed-server}
+  template:
+    metadata:
+      labels: {app: embed-server}
+    spec:
+      containers:
+        - name: embed-server
+          image: {{ .Values.images.embedServer.repository }}:{{ .Values.images.embedServer.tag }}
+          args: ["--port", "8080", "-m", "/opt/models/bge-small-zh-v1.5-f16.gguf"]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /health, port: 8080}, initialDelaySeconds: 3, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health, port: 8080}, initialDelaySeconds: 10, periodSeconds: 30}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed-server
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+spec:
+  selector: {app: embed-server}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openviking-data
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.memory.openviking.storage }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openviking-config
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+data:
+  ov.conf: |
+    {
+      "storage": {
+        "workspace": "/app/.openviking/openviking_workspace",
+        "vectordb": {"name": "context", "backend": "local"},
+        "agfs": {"backend": "local"}
+      },
+      "log": {"level": "INFO", "output": "stdout"},
+      "server": {
+        "host": "0.0.0.0",
+        "port": 1933,
+        "root_api_key": "{{ .Values.memory.openviking.rootAPIKey }}"
+      },
+      "embedding": {
+        "allow_metadata_override": true,
+        "dense": {
+          "api_base": "{{ .Values.memory.openviking.embedding.apiBase }}",
+          "api_key": "none",
+          "provider": "openai",
+          "dimension": {{ .Values.memory.openviking.embedding.dimension }},
+          "model": "{{ .Values.memory.openviking.embedding.model }}"
+        }
+      },
+      "vlm": {
+        "api_base": "{{ .Values.memory.openviking.vlm.apiBase }}",
+        "timeout": 120,
+        "thinking": false,
+        "api_key": "aep-managed-by-higress",
+        "provider": "openai",
+        "model": "{{ .Values.memory.openviking.vlm.model }}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openviking
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+  labels: {app: openviking}
+spec:
+  replicas: 1
+  # The workspace holds an exclusive file lock; a rolling overlap deadlocks
+  # the new pod. Replace, never overlap.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: openviking}
+  template:
+    metadata:
+      labels: {app: openviking}
+    spec:
+      containers:
+        - name: openviking
+          image: {{ .Values.images.openviking.repository }}:{{ .Values.images.openviking.tag }}
+          ports: [{containerPort: 1933}]
+          volumeMounts:
+            - {name: data, mountPath: /app/.openviking}
+            - {name: config, mountPath: /app/.openviking/ov.conf, subPath: ov.conf}
+          readinessProbe: {httpGet: {path: /ready, port: 1933}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health, port: 1933}, initialDelaySeconds: 30, periodSeconds: 30}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 4Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: openviking-data}
+        - name: config
+          configMap: {name: openviking-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openviking
+  namespace: {{ include "zhiyuan.nsMemory" . }}
+spec:
+  selector: {app: openviking}
+  ports: [{port: 1933, targetPort: 1933}]
+{{- end }}

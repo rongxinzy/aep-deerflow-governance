@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-operator
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: de-operator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-operator}
+  template:
+    metadata:
+      labels: {app: de-operator}
+    spec:
+      serviceAccountName: de-operator
+      containers:
+        - name: operator
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.operator.repository "tag" .Values.images.operator.tag) }}
+          args: ["--namespace", {{ include "zhiyuan.ns" . | quote }}, "--leader-elect"]
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8081}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8081}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 512Mi}

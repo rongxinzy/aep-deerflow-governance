@@ -1,0 +1,38 @@
+{{- range .Values.employees }}
+apiVersion: digitalemployee.zhiyuan.io/v1alpha1
+kind: DigitalEmployee
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "zhiyuan.ns" $ }}
+spec:
+  displayName: {{ .displayName | default .name | quote }}
+  runtime:
+    type: deerflow
+    image: {{ include "zhiyuan.image" (dict "registry" $.Values.global.registry "repo" $.Values.images.runtime.repository "tag" $.Values.images.runtime.tag) }}
+    model: {{ $.Values.models.anthropic.wireName }}
+    modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local
+    provider: anthropic
+    nativeModel: {{ $.Values.models.anthropic.nativeModel }}
+    apiKeyEnv: BIGMODEL_API_KEY
+  memory:
+    type: openviking
+    serverURL: http://openviking.{{ $.Values.global.namespaces.memory }}.svc.cluster.local:1933
+    accountID: {{ $.Values.memory.openviking.account }}
+    singleTenantInstance: true
+  governance:
+    aepBaseURL: {{ $.Values.aep.baseURL }}
+    deploymentID: {{ $.Values.aep.deploymentID }}
+    defaultAEPUser: {{ $.Values.aep.adminUserId }}
+    identitySource: wecom
+  credentials:
+    name: {{ $.Values.secrets.platformCreds }}
+  channels:
+    wecom: {{ .wecom | default false }}
+    {{- with .wecomName }}
+    wecomName: {{ . | quote }}
+    {{- end }}
+  persistence:
+    enabled: true
+    size: 2Gi
+---
+{{- end }}

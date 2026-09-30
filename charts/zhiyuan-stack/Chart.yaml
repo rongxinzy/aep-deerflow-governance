@@ -1,0 +1,11 @@
+apiVersion: v2
+name: zhiyuan-stack
+description: |
+  Zhiyuan digital-employee platform stack: DE operator + portal + chat UI +
+  admin console, the OpenViking memory stack, and the Higress model routes
+  for the online GLM (Anthropic passthrough + openai conversion).
+  The AEP control plane and Higress itself are prerequisites installed from
+  their own repos; this chart manages everything zhiyuan-specific above them.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

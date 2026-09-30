@@ -1,0 +1,26 @@
+# cicd overlay example — copy to values-cicd.local.yaml and fill the
+# credentials (never commit the local copy).
+aep:
+  adminUserId: "<aep-admin-user-uuid>"
+
+models:
+  anthropic:
+    apiKey: "<bigmodel-api-key>"
+
+memory:
+  openviking:
+    rootAPIKey: "<openviking-root-key>"
+
+employees:
+  - name: sales-helper
+    displayName: 销售助理
+    wecom: true
+    wecomName: 数字员工测试
+  - name: finance-helper
+    displayName: 财务助理
+  - name: production-helper
+    displayName: 生产助理
+  - name: rd-helper
+    displayName: 研发助理
+  - name: admin-helper
+    displayName: 行政助理

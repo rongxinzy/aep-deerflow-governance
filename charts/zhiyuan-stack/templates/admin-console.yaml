@@ -1,0 +1,44 @@
+{{- if .Values.adminConsole.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-admin-console
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: de-admin-console}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-admin-console}
+  template:
+    metadata:
+      labels: {app: de-admin-console}
+    spec:
+      containers:
+        - name: admin-console
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.adminConsole.repository "tag" .Values.images.adminConsole.tag) }}
+          env:
+            - {name: ZHIYUAN_AEP_BASE_URL, value: {{ .Values.adminConsole.aepBaseURL | quote }}}
+            - {name: ZHIYUAN_PORTAL_BASE_URL, value: {{ .Values.adminConsole.portalBaseURL | quote }}}
+          ports:
+            - containerPort: 5173
+          readinessProbe:
+            httpGet: {path: /, port: 5173}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: de-admin-console
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  type: NodePort
+  selector: {app: de-admin-console}
+  ports:
+    - port: 80
+      targetPort: 5173
+      nodePort: {{ .Values.adminConsole.nodePort }}
+{{- end }}
