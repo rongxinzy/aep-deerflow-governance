@@ -153,6 +153,23 @@ spec:
                 - defaultAEPUser
                 - deploymentID
                 type: object
+              hibernation:
+                description: |-
+                  Hibernation optionally lets the operator scale the runtime to zero
+                  when idle (KEDA watches the portal database's wake/activity tables).
+                  Disabled by default; employees with an IM channel that holds an
+                  outbound connection (WeCom) must stay resident until the
+                  channel-gateway lands.
+                properties:
+                  enabled:
+                    type: boolean
+                  idleTimeout:
+                    description: |-
+                      IdleTimeout is how long the employee stays up after the last
+                      activity before scaling to zero (e.g. "30m", "2h").
+                    pattern: ^[0-9]+[smh]$
+                    type: string
+                type: object
               knowledge:
                 description: KnowledgeSpec wires the enterprise knowledge base (WeKnora)
                   via MCP.
@@ -328,6 +345,7 @@ spec:
                 enum:
                 - Pending
                 - Ready
+                - Sleeping
                 - Error
                 type: string
               runtimeAccount:

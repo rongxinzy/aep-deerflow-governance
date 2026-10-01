@@ -3,8 +3,11 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,6 +23,9 @@ import (
 func chatTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
@@ -187,5 +193,82 @@ func TestChatProxyMissingSecret(t *testing.T) {
 	p.handleChat(w, req, identity{UserID: "user-1"})
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func sleepingEmployee(name, owner string) *dev1alpha1.DigitalEmployee {
+	item := readyEmployee(name, owner)
+	item.Status.Phase = dev1alpha1.PhaseSleeping
+	enabled := true
+	item.Spec.Hibernation = &dev1alpha1.HibernationSpec{Enabled: &enabled}
+	return item
+}
+
+func readyDeployment(name string) *appsv1.Deployment {
+	one := int32(1)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "de-" + name, Namespace: "digital-employees"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &one},
+		Status:     appsv1.DeploymentStatus{ReadyReplicas: 1},
+	}
+}
+
+func scaledToZeroDeployment(name string) *appsv1.Deployment {
+	zero := int32(0)
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "de-" + name, Namespace: "digital-employees"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &zero},
+		Status:     appsv1.DeploymentStatus{ReadyReplicas: 0},
+	}
+}
+
+// A Sleeping employee is still authorizable: the memkey persists and the
+// portal wakes the runtime before proxying. With the deployment already
+// ready (race: someone else woke it first) the request flows straight
+// through.
+func TestChatProxyWakesSleepingEmployee(t *testing.T) {
+	p, _, seen := chatTestPortal(t,
+		sleepingEmployee("sales-helper", "user-a"),
+		memkeySecret("sales-helper"),
+		readyDeployment("sales-helper"),
+	)
+	req := httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/threads", nil)
+	req.SetPathValue("name", "sales-helper")
+	req.SetPathValue("rest", "threads")
+	req.Header.Set("Authorization", "Bearer x")
+	w := httptest.NewRecorder()
+	p.handleChat(w, req, identity{UserID: "user-a", DisplayName: "User A"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("expected the proxy call to go through, saw %d", len(*seen))
+	}
+}
+
+// Cold start slower than the wake budget: the caller gets an explicit 503
+// explaining the employee is waking, not a bare bad gateway.
+func TestChatReportsWakeTimeout(t *testing.T) {
+	p, _, _ := chatTestPortal(t,
+		sleepingEmployee("sales-helper", "user-a"),
+		memkeySecret("sales-helper"),
+		scaledToZeroDeployment("sales-helper"),
+	)
+	p.cfg.wakeTimeout = 1500 * time.Millisecond // one poll tick then bail
+	req := httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/threads", nil)
+	req.SetPathValue("name", "sales-helper")
+	req.SetPathValue("rest", "threads")
+	req.Header.Set("Authorization", "Bearer x")
+	w := httptest.NewRecorder()
+	start := time.Now()
+	p.handleChat(w, req, identity{UserID: "user-a", DisplayName: "User A"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "waking up") {
+		t.Fatalf("body should explain the wake, got %s", w.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wake wait took %s, timeout not honored", elapsed)
 	}
 }

@@ -29,6 +29,9 @@ rules:
     resources: ["configmaps", "secrets", "services", "pods", "events", "persistentvolumeclaims"]
     verbs: ["*"]
   # Leader election (--leader-elect) coordinates replicas via a Lease.
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "triggerauthentications"]
+    verbs: ["*"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
@@ -64,7 +67,12 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: 172.18.5.251:8081/zhiyuan/de-operator:0.9.0
+          image: 172.18.5.251:8081/zhiyuan/de-operator:0.13.0
+          env:
+            - name: HIBERNATION_DB_URL_SECRET
+              value: de-portal-db
+            - name: HIBERNATION_IDLE_TIMEOUT_SECONDS
+              value: "1800"
           args: ["--namespace", "digital-employees", "--leader-elect"]
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}

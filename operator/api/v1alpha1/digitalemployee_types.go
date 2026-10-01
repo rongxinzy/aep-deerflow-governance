@@ -239,16 +239,37 @@ type DigitalEmployeeSpec struct {
 	// A2A optionally exposes this employee over the A2A delegation contract.
 	// +optional
 	A2A *A2ASpec `json:"a2a,omitempty"`
+	// Hibernation optionally lets the operator scale the runtime to zero
+	// when idle (KEDA watches the portal database's wake/activity tables).
+	// Disabled by default; employees with an IM channel that holds an
+	// outbound connection (WeCom) must stay resident until the
+	// channel-gateway lands.
+	// +optional
+	Hibernation *HibernationSpec `json:"hibernation,omitempty"`
+}
+
+// HibernationSpec configures scale-to-zero for one employee. The effective
+// idle window = spec.hibernation.idleTimeout, falling back to the
+// operator's HIBERNATION_IDLE_TIMEOUT default.
+type HibernationSpec struct {
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// IdleTimeout is how long the employee stays up after the last
+	// activity before scaling to zero (e.g. "30m", "2h").
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]+[smh]$`
+	IdleTimeout string `json:"idleTimeout,omitempty"`
 }
 
 // DigitalEmployeePhase describes the reconciliation phase.
-// +kubebuilder:validation:Enum=Pending;Ready;Error
+// +kubebuilder:validation:Enum=Pending;Ready;Sleeping;Error
 type DigitalEmployeePhase string
 
 const (
-	PhasePending DigitalEmployeePhase = "Pending"
-	PhaseReady   DigitalEmployeePhase = "Ready"
-	PhaseError   DigitalEmployeePhase = "Error"
+	PhasePending  DigitalEmployeePhase = "Pending"
+	PhaseReady    DigitalEmployeePhase = "Ready"
+	PhaseSleeping DigitalEmployeePhase = "Sleeping"
+	PhaseError    DigitalEmployeePhase = "Error"
 )
 
 // DigitalEmployeeStatus defines the observed state of a digital employee.

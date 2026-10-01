@@ -227,3 +227,128 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 		})
 	})
 })
+
+var _ = Describe("DigitalEmployee hibernation", func() {
+	var fx *fixture
+	var employee *v1alpha1.DigitalEmployee
+
+	enable := func(on bool, idle string) *v1alpha1.HibernationSpec {
+		return &v1alpha1.HibernationSpec{Enabled: &on, IdleTimeout: idle}
+	}
+
+	reconcile := func(ctx context.Context) (ctrl.Result, error) {
+		return fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+	}
+
+	getEmployee := func(ctx context.Context) *v1alpha1.DigitalEmployee {
+		fresh := &v1alpha1.DigitalEmployee{}
+		ExpectWithOffset(1, fx.client.Get(ctx, client.ObjectKeyFromObject(employee), fresh)).To(Succeed())
+		return fresh
+	}
+
+	getScaledObject := func(ctx context.Context) (*KedaScaledObject, bool) {
+		so := &KedaScaledObject{}
+		err := fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee) + "-wake"}, so)
+		return so, err == nil
+	}
+
+	BeforeEach(func(ctx context.Context) {
+		fx = newFixture(ctx)
+		fx.wakeDBURL = "postgresql://wake:wak3pass@pg.db.svc:5432/deportal"
+		employee = fx.employeeFixture("alice-helper")
+		Expect(fx.client.Create(ctx, employee)).To(Succeed())
+	})
+
+	Describe("scaled-object rendering", func() {
+		It("renders the KEDA objects for an opted-in employee", func(ctx context.Context) {
+			employee.Spec.Hibernation = enable(true, "45m")
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			_, err := reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			so, found := getScaledObject(ctx)
+			Expect(found).To(BeTrue())
+			Expect(so.Spec.ScaleTargetRef.Name).To(Equal(deploymentName(employee)))
+			Expect(*so.Spec.MinReplicaCount).To(Equal(int32(0)))
+			Expect(*so.Spec.MaxReplicaCount).To(Equal(int32(1)))
+			Expect(*so.Spec.CooldownPeriod).To(Equal(int32(45 * 60)))
+			Expect(so.Spec.Triggers).To(HaveLen(1))
+			trigger := so.Spec.Triggers[0]
+			Expect(trigger.Type).To(Equal("postgresql"))
+			Expect(trigger.Metadata["host"]).To(Equal("pg.db.svc"))
+			Expect(trigger.Metadata["port"]).To(Equal("5432"))
+			Expect(trigger.Metadata["dbName"]).To(Equal("deportal"))
+			Expect(trigger.Metadata["userName"]).To(Equal("wake"))
+			Expect(trigger.Metadata["query"]).To(ContainSubstring("channel_wake WHERE employee='alice-helper'"))
+			Expect(trigger.Metadata["query"]).To(ContainSubstring("employee_activity WHERE employee='alice-helper'"))
+			Expect(trigger.AuthenticationRef.Name).To(Equal("de-wake-db-auth"))
+
+			secret := &corev1.Secret{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "de-wake-db"}, secret)).To(Succeed())
+			Expect(string(secret.Data["DB_PASSWORD"])).To(Equal("wak3pass"))
+			auth := &KedaTriggerAuthentication{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "de-wake-db-auth"}, auth)).To(Succeed())
+			Expect(auth.Spec.SecretTargetRef).To(HaveLen(1))
+		})
+
+		It("falls back to the operator default idle window", func(ctx context.Context) {
+			employee.Spec.Hibernation = enable(true, "")
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			_, err := reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			so, found := getScaledObject(ctx)
+			Expect(found).To(BeTrue())
+			Expect(*so.Spec.CooldownPeriod).To(Equal(int32(1800)))
+		})
+
+		It("renders nothing when hibernation is disabled", func(ctx context.Context) {
+			employee.Spec.Hibernation = enable(false, "")
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			_, err := reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			_, found := getScaledObject(ctx)
+			Expect(found).To(BeFalse())
+		})
+
+		It("refuses employees with the WeCom channel and reports why", func(ctx context.Context) {
+			employee.Spec.Hibernation = enable(true, "")
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true, WecomName: "数字员工"}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			_, err := reconcile(ctx)
+			Expect(err).To(HaveOccurred())
+			Expect(getEmployee(ctx).Status.Phase).To(Equal(v1alpha1.PhaseError))
+			Expect(getEmployee(ctx).Status.Message).To(ContainSubstring("WeCom"))
+			_, found := getScaledObject(ctx)
+			Expect(found).To(BeFalse())
+		})
+	})
+
+	Describe("sleeping phase", func() {
+		It("reports Sleeping when KEDA scales the runtime to zero", func(ctx context.Context) {
+			employee.Spec.Hibernation = enable(true, "")
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			_, err := reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			deployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+			deployment.Status.ObservedGeneration = deployment.Generation
+			deployment.Status.ReadyReplicas = *deployment.Spec.Replicas
+			Expect(fx.client.Status().Update(ctx, deployment)).To(Succeed())
+			_, err = reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getEmployee(ctx).Status.Phase).To(Equal(v1alpha1.PhaseReady))
+
+			zero := int32(0)
+			deployment.Spec.Replicas = &zero
+			deployment.Status.ReadyReplicas = 0
+			deployment.Status.ObservedGeneration = deployment.Generation
+			Expect(fx.client.Update(ctx, deployment)).To(Succeed())
+			Expect(fx.client.Status().Update(ctx, deployment)).To(Succeed())
+
+			_, err = reconcile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getEmployee(ctx).Status.Phase).To(Equal(v1alpha1.PhaseSleeping))
+		})
+	})
+})

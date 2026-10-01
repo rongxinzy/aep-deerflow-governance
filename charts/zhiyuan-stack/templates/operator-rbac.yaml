@@ -49,6 +49,13 @@ rules:
   verbs:
   - '*'
 - apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  - triggerauthentications
+  verbs:
+  - '*'
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases

@@ -45,6 +45,10 @@ type config struct {
 	chatUIURL       string
 
 	dbURL string
+
+	// Hibernation: how long handleChat waits for a scaled-to-zero employee
+	// to come back before giving up (the browser shows "waking up").
+	wakeTimeout time.Duration
 }
 
 func loadConfig() config {
@@ -72,6 +76,8 @@ func loadConfig() config {
 		chatUIURL:       env("PORTAL_CHAT_UI_URL", ""),
 
 		dbURL: env("PORTAL_DB_URL", ""),
+
+		wakeTimeout: time.Duration(envInt("PORTAL_WAKE_TIMEOUT_SECONDS", 60)) * time.Second,
 	}
 }
 
@@ -158,6 +164,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 	identity_json TEXT NOT NULL,
 	csrf          TEXT NOT NULL,
 	expires_at    TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_wake (
+	id         BIGSERIAL PRIMARY KEY,
+	employee   TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS channel_wake_pending ON channel_wake (employee) WHERE consumed_at IS NULL;
+CREATE TABLE IF NOT EXISTS employee_activity (
+	employee    TEXT PRIMARY KEY,
+	last_active TIMESTAMPTZ NOT NULL DEFAULT now()
 )`)
 	return err
 }

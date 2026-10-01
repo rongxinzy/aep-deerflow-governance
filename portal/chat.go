@@ -50,7 +50,9 @@ func (p *portal) authorizeChat(ctx context.Context, name string, ident identity)
 	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
 		return "", http.StatusForbidden, "not authorized for this digital employee (owner, team member, or admin required)"
 	}
-	if item.Status.Phase != dev1alpha1.PhaseReady {
+	// Sleeping (KEDA scaled to zero) is fine to authorize: the memkey
+	// Secret persists, and handleChat wakes the runtime before proxying.
+	if item.Status.Phase != dev1alpha1.PhaseReady && item.Status.Phase != dev1alpha1.PhaseSleeping {
 		return "", http.StatusConflict, "digital employee is not Ready (phase " + string(item.Status.Phase) + ")"
 	}
 	var secret corev1.Secret
@@ -76,6 +78,13 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 	rest := r.PathValue("rest")
 	token, code, errMsg := p.authorizeChat(r.Context(), name, ident)
 	if code != 0 {
+		writeJSON(w, code, map[string]string{"error": errMsg})
+		return
+	}
+	// Hibernation: mark the conversation active (KEDA's idle signal) and, if
+	// the runtime is scaled to zero, wake it and wait out the cold start.
+	p.markActivity(name)
+	if code, errMsg := p.wakeRuntime(r.Context(), name); code != 0 {
 		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
 	}

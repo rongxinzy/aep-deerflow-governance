@@ -10,6 +10,9 @@ metadata:
   name: de-portal
   namespace: {{ include "zhiyuan.ns" . }}
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees"]
     verbs: ["create", "get", "list", "watch", "delete"]

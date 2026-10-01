@@ -104,6 +104,18 @@ spec:
                       it never mistakes its own name for a delegation target.
                     type: string
                 type: object
+              conversationStore:
+                description: |-
+                  ConversationStore centralizes conversation persistence (postgres)
+                  or keeps it per-employee on the home volume (sqlite, default).
+                properties:
+                  backend:
+                    default: sqlite
+                    enum:
+                    - sqlite
+                    - postgres
+                    type: string
+                type: object
               credentials:
                 description: Credentials references the shared platform secret.
                 properties:
@@ -140,6 +152,23 @@ spec:
                 - aepBaseURL
                 - defaultAEPUser
                 - deploymentID
+                type: object
+              hibernation:
+                description: |-
+                  Hibernation optionally lets the operator scale the runtime to zero
+                  when idle (KEDA watches the portal database's wake/activity tables).
+                  Disabled by default; employees with an IM channel that holds an
+                  outbound connection (WeCom) must stay resident until the
+                  channel-gateway lands.
+                properties:
+                  enabled:
+                    type: boolean
+                  idleTimeout:
+                    description: |-
+                      IdleTimeout is how long the employee stays up after the last
+                      activity before scaling to zero (e.g. "30m", "2h").
+                    pattern: ^[0-9]+[smh]$
+                    type: string
                 type: object
               knowledge:
                 description: KnowledgeSpec wires the enterprise knowledge base (WeKnora)
@@ -285,6 +314,13 @@ spec:
                 - model
                 - type
                 type: object
+              team:
+                description: |-
+                  Team scopes the employee to a department. Members of this AEP team
+                  can see and converse with the employee in addition to the owner;
+                  admins bypass all team scoping. Empty means visible to everyone
+                  (legacy behavior for employees created before team scoping).
+                type: string
             required:
             - credentials
             - governance
@@ -309,6 +345,7 @@ spec:
                 enum:
                 - Pending
                 - Ready
+                - Sleeping
                 - Error
                 type: string
               runtimeAccount:

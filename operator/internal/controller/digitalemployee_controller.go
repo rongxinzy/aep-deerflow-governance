@@ -40,6 +40,11 @@ type DigitalEmployeeReconciler struct {
 	// RuntimeURLFn overrides how the runtime auth API base URL is computed
 	// (specs inject an httptest server). Nil → the in-cluster service DNS.
 	RuntimeURLFn func(namespace, name string) string
+	// WakeDBFn returns the portal database URL the KEDA wake trigger polls
+	// (nil → hibernation is not configured on this operator).
+	WakeDBFn func(ctx context.Context, namespace string) (string, error)
+	// DefaultIdleSeconds backs hibernation when the CR omits idleTimeout.
+	DefaultIdleSeconds int32
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
@@ -47,6 +52,7 @@ type DigitalEmployeeReconciler struct {
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=*
 // +kubebuilder:rbac:groups=core,resources=configmaps;secrets;services;pods;events;persistentvolumeclaims,verbs=*
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects;triggerauthentications,verbs=*
 
 // Reconcile is part of the main kubernetes reconciliation loop.
 func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
@@ -82,6 +88,17 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 		}
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
+	// Hibernating: KEDA scaled the runtime to zero. The pod (and its HTTP
+	// API) is gone, so runtime-account bootstrap must not run — it already
+	// succeeded before the first sleep. Watch for the wake from here.
+	if hibernationEnabled(&employee) && !hibernationBlockedByChannel(&employee) &&
+		deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
+		if err := r.setStatus(ctx, &employee, v1alpha1.PhaseSleeping, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
 	available := deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.ReadyReplicas == *deployment.Spec.Replicas
 	if !available {
 		if err := r.setStatus(ctx, &employee, v1alpha1.PhasePending, ""); err != nil {

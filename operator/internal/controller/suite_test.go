@@ -268,12 +268,14 @@ type fixture struct {
 	runtime    *runtimeStub
 	runtimeSrv *httptest.Server
 	runtimeURL string // overrides the runtime auth base (dead URL specs)
+	wakeDBURL  string // non-empty enables the hibernation wake-db source
 }
 
 func newFixture(ctx context.Context, objects ...client.Object) *fixture {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha1.AddToScheme(scheme)
+	AddKedaTypesToScheme(scheme)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.DigitalEmployee{}).Build()
 	stub := newOVStub()
 	server := httptest.NewServer(stub.handler())
@@ -283,7 +285,7 @@ func newFixture(ctx context.Context, objects ...client.Object) *fixture {
 }
 
 func (f *fixture) reconciler() *DigitalEmployeeReconciler {
-	return &DigitalEmployeeReconciler{
+	r := &DigitalEmployeeReconciler{
 		Client: f.client,
 		Scheme: f.client.Scheme(),
 		OVRootFn: func(context.Context, client.Client, string, string) (string, error) {
@@ -291,6 +293,11 @@ func (f *fixture) reconciler() *DigitalEmployeeReconciler {
 		},
 		RuntimeURLFn: func(string, string) string { return f.runtimeURL },
 	}
+	if f.wakeDBURL != "" {
+		r.WakeDBFn = func(context.Context, string) (string, error) { return f.wakeDBURL, nil }
+	}
+	r.DefaultIdleSeconds = 1800
+	return r
 }
 
 // employeeFixture returns a complete CR pointing at the stub server.

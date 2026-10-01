@@ -16,10 +16,10 @@ global:
     memory: memory-system
 
 images:
-  operator: { repository: rongxinzy/de-operator, tag: "0.9.0" }
-  portal: { repository: rongxinzy/de-portal, tag: "0.4.10" }
+  operator: { repository: rongxinzy/de-operator, tag: "0.13.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.13.0" }
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.2" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.3" }
   # runtime images are big and version rarely; the lineage lives on ghcr
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v17.1" }
   openviking: { repository: "172.18.5.251:8081/zhiyuan/openviking", tag: "0.4.21" }

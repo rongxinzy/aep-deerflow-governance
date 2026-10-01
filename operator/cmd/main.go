@@ -45,6 +45,10 @@ func main() {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	// Locally-modelled KEDA CRDs (see internal/controller/keda_types.go):
+	// registering them lets the manager's client create the ScaledObject /
+	// TriggerAuthentication renders without importing keda client-go.
+	controller.AddKedaTypesToScheme(scheme)
 
 	// Watch only the configured namespace: employee workloads are
 	// namespaced and the operator's blast radius should match.
@@ -65,12 +69,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	wakeDBSecret := envOrDefault("HIBERNATION_DB_URL_SECRET", "de-portal-db")
 	reconciler := &controller.DigitalEmployeeReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		OVRootFn: func(ctx context.Context, c client.Client, namespace, secretName string) (string, error) {
 			return readSecretKey(ctx, c, namespace, secretName, "OPENVIKING_ROOT_API_KEY")
 		},
+		WakeDBFn: func(ctx context.Context, namespace string) (string, error) {
+			return readSecretKey(ctx, mgr.GetClient(), namespace, wakeDBSecret, "PORTAL_DB_URL")
+		},
+		DefaultIdleSeconds: int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")
@@ -114,3 +123,24 @@ const (
 	errNoCredentialsSecret = stringError("spec.credentials.name must reference the platform credentials secret")
 	errMissingKey          = stringError("credentials secret is missing OPENVIKING_ROOT_API_KEY")
 )
+
+func envOrDefault(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envIntOrDefault(key string, fallback int) int {
+	value := 0
+	for _, c := range envOrDefault(key, "") {
+		if c < '0' || c > '9' {
+			return fallback
+		}
+		value = value*10 + int(c-'0')
+	}
+	if value == 0 {
+		return fallback
+	}
+	return value
+}

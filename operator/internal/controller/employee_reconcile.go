@@ -79,6 +79,10 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 			return fmt.Errorf("a2a service: %w", err)
 		}
 	}
+
+	if err := r.ensureHibernation(ctx, employee); err != nil {
+		return fmt.Errorf("hibernation: %w", err)
+	}
 	return nil
 }
 
@@ -116,6 +120,20 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 		// ClusterIP is immutable: keep whatever is assigned.
 		previous.Spec.Type = typed.Spec.Type
 		previous.Spec.Ports = typed.Spec.Ports
+		return c.Update(ctx, previous)
+	case *KedaScaledObject:
+		previous := existing.(*KedaScaledObject)
+		if reflect.DeepEqual(previous.Spec, typed.Spec) {
+			return nil
+		}
+		previous.Spec = typed.Spec
+		return c.Update(ctx, previous)
+	case *KedaTriggerAuthentication:
+		previous := existing.(*KedaTriggerAuthentication)
+		if reflect.DeepEqual(previous.Spec, typed.Spec) {
+			return nil
+		}
+		previous.Spec = typed.Spec
 		return c.Update(ctx, previous)
 	}
 	return fmt.Errorf("unsupported type %T", object)
