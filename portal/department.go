@@ -175,7 +175,7 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 		"description": "Department: " + req.Name,
 	})
 	tenantReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		p.cfg.knowledgeAPIURL+"/api/v1/admin/tenants", bytes.NewReader(body))
+		p.cfg.knowledgeAPIURL+"/api/v1/tenants", bytes.NewReader(body))
 	tenantReq.Header.Set("Content-Type", "application/json")
 	tenantReq.Header.Set("Authorization", "Bearer "+loginResult.Token)
 	resp, err := serviceProbeClient.Do(tenantReq)
