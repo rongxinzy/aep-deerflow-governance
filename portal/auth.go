@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // identity is the authenticated caller resolved from an AEP access token.
@@ -17,6 +18,19 @@ type identity struct {
 	Kind        string   `json:"kind"`
 	Roles       []string `json:"roles"`
 	Teams       []string `json:"-"` // AEP team ids; used for department scoping
+	TeamsFetchedAt time.Time `json:"-"` // when Teams was last refreshed
+}
+
+// teamsStaleAt is how long cached team memberships remain trusted before
+// the portal re-fetches them from AEP. Department changes (UI-driven)
+// take effect within this window without requiring re-login.
+const teamsStaleAt = 5 * time.Minute
+
+// needsTeamRefresh reports whether the cached team memberships are due
+// for refresh. Admin check is separate (Roles, also cached) but role
+// changes are rarer and the session TTL bounds them.
+func (i *identity) needsTeamRefresh() bool {
+	return time.Since(i.TeamsFetchedAt) > teamsStaleAt
 }
 
 // inTeam reports whether the caller belongs to the given AEP team.

@@ -254,45 +254,59 @@ func (p *portal) weknoraAdminCreds(ctx context.Context) (string, string) {
 // and stores them on the identity. Called once at login, cached in the
 // portal session — /user/me doesn't include teamIds.
 func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
-	if len(ident.Teams) > 0 {
-		return // already enriched (e.g. from a persisted session)
+	if len(ident.Teams) > 0 && !ident.needsTeamRefresh() {
+		return // fresh enough
 	}
-	adminToken := p.adminToken(ctx)
-	if adminToken == "" {
-		p.logger.Warn("enrichTeams: no admin token available")
-		return
+	if ident.Token == "" {
+		return // no token to verify against
 	}
-	p.logger.Info("enrichTeams: fetching teams", "userId", ident.UserID)
+	// Use the user's own token against /user/me — the response now
+	// includes teamIds (AEP contract enhancement). This gives real-time
+	// team data with zero admin credential usage: "authenticate once,
+	// authorize per-request".
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		p.cfg.aepBaseURL+"/aep/v1/admin/users?limit=200", nil)
+		p.cfg.aepBaseURL+"/aep/v1/user/me", nil)
 	if err != nil {
 		return
 	}
-	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("Authorization", "Bearer "+ident.Token)
 	request.Header.Set("X-AEP-Protocol-Version", "1.0")
 	resp, err := serviceProbeClient.Do(request)
 	if err != nil {
-		return
+		p.logger.Warn("enrichTeams: /user/me unreachable", "error", err)
+		return // keep cached teams; next request retries
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		p.logger.Warn("enrichTeams: /user/me returned non-OK", "status", resp.StatusCode)
+		return
+	}
 	var result struct {
-		Users []struct {
-			ID      string   `json:"id"`
+		User struct {
 			TeamIDs []string `json:"teamIds"`
-		} `json:"items"`
+		} `json:"user"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
 		return
 	}
-	for _, u := range result.Users {
-		if u.ID == ident.UserID {
-			ident.Teams = u.TeamIDs
-			if ident.Teams == nil {
-				ident.Teams = []string{}
-			}
-			p.logger.Info("enrichTeams: found", "userId", ident.UserID, "teams", ident.Teams)
-			return
-		}
+	ident.Teams = result.User.TeamIDs
+	if ident.Teams == nil {
+		ident.Teams = []string{}
 	}
-	p.logger.Warn("enrichTeams: user not found in admin listing", "userId", ident.UserID)
+	ident.TeamsFetchedAt = time.Now()
+}
+
+// refreshSessionTeams re-fetches team memberships from AEP and updates
+// the session in place. Called in the background by authenticate() when
+// the cached teams are stale; the current request proceeds with the old
+// values (within the 5-minute window) and the next request sees fresh ones.
+func (p *portal) refreshSessionTeams(sessionToken string, ident identity) {
+	ident.Teams = nil // force re-fetch in enrichTeams
+	p.enrichTeams(context.Background(), &ident)
+	if len(ident.Teams) == 0 {
+		return // nothing changed (or fetch failed; retry on next stale check)
+	}
+	ident.TeamsFetchedAt = time.Now()
+	p.sessions.updateIdentity(sessionToken, ident)
+	p.logger.Info("refreshed session teams", "userId", ident.UserID, "teams", ident.Teams)
 }

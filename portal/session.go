@@ -82,7 +82,12 @@ func unmarshalIdentity(raw []byte) (identity, error) {
 	if err := json.Unmarshal(raw, &shadow); err != nil {
 		return identity{}, err
 	}
-	return identity(shadow), nil
+	return identity{
+		Token: shadow.Token, UserID: shadow.UserID, Username: shadow.Username,
+		DisplayName: shadow.DisplayName, Kind: shadow.Kind,
+		Roles: shadow.Roles, Teams: shadow.Teams,
+		// TeamsFetchedAt left zero: first request triggers a refresh.
+	}, nil
 }
 
 func randomSessionToken() string {
@@ -177,6 +182,18 @@ func (s *sessionStore) loadLocked(token string) (session, bool) {
 	return session{identity: ident, csrf: csrf, expires: expires}, true
 }
 
+// updateIdentity replaces the identity stored in a live session (used by
+// the background team-refresh; token, csrf, and expiry are preserved).
+func (s *sessionStore) updateIdentity(token string, ident identity) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[token]
+	if !ok {
+		return
+	}
+	s.items[token] = session{identity: ident, csrf: item.csrf, expires: item.expires}
+}
+
 func (s *sessionStore) drop(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -231,6 +248,15 @@ func (p *portal) authenticate(r *http.Request) (identity, int, bool) {
 	ident, csrf, ok := p.sessions.get(cookie.Value)
 	if !ok {
 		return identity{}, http.StatusUnauthorized, false
+	}
+	// Department-scope freshness: if the cached team memberships are due,
+	// refresh them synchronously using the user's own token against
+	// /user/me (which now returns teamIds). This adds ~5ms to requests
+	// that need team data, giving real-time permission response without
+	// background polling or admin credentials.
+	if ident.needsTeamRefresh() {
+		p.enrichTeams(r.Context(), &ident)
+		p.sessions.updateIdentity(cookie.Value, ident)
 	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
