@@ -33,8 +33,9 @@ func (p *portal) platformSecretKey(ctx context.Context, key string) (string, err
 // with each employee's own OpenViking user key — the root key is denied
 // tenant-scoped data by design).
 func (p *portal) handleMemoryStatus(w http.ResponseWriter, r *http.Request, _ identity) {
+	// The internal OpenViking URL is cluster-only; show health + account
+	// without the address (browsers cannot resolve cluster DNS).
 	out := map[string]any{
-		"server":  p.cfg.memoryServer,
 		"account": p.cfg.memoryAccount,
 	}
 
@@ -203,7 +204,9 @@ func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ id
 // MCP endpoint) still proves the service is up; only transport failures and
 // 5xx count as unhealthy.
 func (p *portal) handleKnowledgeStatus(w http.ResponseWriter, r *http.Request, _ identity) {
-	out := map[string]any{"url": p.cfg.knowledgeMCPURL, "configured": p.cfg.knowledgeMCPURL != ""}
+	// The internal MCP URL is cluster-only (browsers cannot reach it);
+	// the console shows health + configured, never the internal address.
+	out := map[string]any{"configured": p.cfg.knowledgeMCPURL != ""}
 	healthy := false
 	if p.cfg.knowledgeMCPURL != "" {
 		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.cfg.knowledgeMCPURL, nil)
