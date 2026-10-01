@@ -21,7 +21,7 @@ images:
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
   adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.5.0" }
   # runtime images are big and version rarely; the lineage lives on ghcr
-  runtime: { repository: rongxinzy/deerflow-gov, tag: "v15" }
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v16.1" }
   openviking: { repository: "172.18.5.251:8081/zhiyuan/openviking", tag: "0.4.21" }
   embedServer: { repository: "172.18.5.251:8081/zhiyuan/embed-server", tag: "0.1.0" }
 
