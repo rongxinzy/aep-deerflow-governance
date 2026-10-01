@@ -10,6 +10,16 @@
 #     -t 172.18.5.251:8081/zhiyuan/deerflow-gov:v11 .
 ARG BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v10
 FROM ${BASE}
+# PostgreSQL conversation-store support: the base venv predates the
+# centralized-conversation feature and lacks the async driver. Bootstrap
+# pip via ensurepip first (the uv-managed venv ships without it), then
+# install the postgres extras. alembic handles auto-migration on first
+# connect to a fresh database.
+RUN /app/backend/.venv/bin/python -m ensurepip --upgrade \
+ && /app/backend/.venv/bin/python -m pip install --no-cache-dir \
+      asyncpg "psycopg[binary]" psycopg-pool \
+      "langgraph-checkpoint-postgres>=3.1.2,<3.2" alembic \
+      -i https://pypi.org/simple
 # Replace (not merge) the source trees so modules deleted upstream disappear.
 RUN rm -rf /app/backend/app /app/backend/packages
 COPY app /app/backend/app

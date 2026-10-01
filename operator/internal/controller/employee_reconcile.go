@@ -122,6 +122,19 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 }
 
 // renderConfig produces the DeerFlow config.yaml (JSON form) from the CR.
+// databaseConfig renders the DeerFlow database section for the selected
+// conversation store backend.
+func databaseConfig(backend string) map[string]any {
+	if backend == "postgres" {
+		return map[string]any{
+			"backend":      "postgres",
+			"postgres_url": "$CONVERSATION_DB_URL",
+		}
+	}
+	// Default: per-employee SQLite on the home volume.
+	return map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}
+}
+
 func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 	spec := employee.Spec
 	modelBase := spec.Runtime.ModelBaseURL
@@ -161,11 +174,12 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 			"use":             "deerflow.sandbox.local:LocalSandboxProvider",
 			"allow_host_bash": false,
 		},
-		// Threads/checkpointer DB must live on the home volume (EmptyDir or
-		// PVC), not the container filesystem — upstream's default resolves
-		// relative to CWD and dies with the pod, desyncing the channel
-		// store's topic→thread mappings ("Thread not found").
-		"database": map[string]any{"sqlite_dir": "/var/lib/deerflow/data"},
+		// Threads/checkpointer DB: centralized PostgreSQL enables
+		// multi-replica employees and cross-employee queries; per-employee
+		// SQLite on the home volume remains the default (single-writer).
+		// The CONVERSATION_DB_URL env var is injected from the platform
+		// credentials Secret when backend=postgres.
+		"database": databaseConfig(spec.ConversationStore.Backend),
 		// Custom agents (delegation targets) default to disabled upstream;
 		// without this every get_agent/list_agents tool call 403s and the
 		// agent reports "智能体服务连续调用失败" instead of answering.

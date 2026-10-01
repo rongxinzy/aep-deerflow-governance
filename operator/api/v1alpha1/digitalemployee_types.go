@@ -168,6 +168,19 @@ type PersistenceSpec struct {
 	Size string `json:"size,omitempty"`
 }
 
+// ConversationStoreSpec selects where conversation threads are persisted.
+// "sqlite" (default) stores per-employee on the home volume — single-writer,
+// no multi-replica HA. "postgres" centralizes into the shared PostgreSQL
+// conversation database (URL from the platform credentials Secret's
+// CONVERSATION_DB_URL key), enabling multi-replica employees and
+// cross-employee queries.
+type ConversationStoreSpec struct {
+	// +kubebuilder:validation:Enum=sqlite;postgres
+	// +optional
+	// +kubebuilder:default=sqlite
+	Backend string `json:"backend,omitempty"`
+}
+
 // DigitalEmployeeSpec defines the desired state of a digital employee.
 type DigitalEmployeeSpec struct {
 	// +optional
@@ -193,6 +206,11 @@ type DigitalEmployeeSpec struct {
 	// credentials, auth DB survive pod restarts and image upgrades).
 	// +optional
 	Persistence PersistenceSpec `json:"persistence,omitempty"`
+
+	// ConversationStore centralizes conversation persistence (postgres)
+	// or keeps it per-employee on the home volume (sqlite, default).
+	// +optional
+	ConversationStore ConversationStoreSpec `json:"conversationStore,omitempty"`
 
 	// Owner is the AEP user id of the employee's owner (set by the business
 	// layer; the operator never interprets it).
