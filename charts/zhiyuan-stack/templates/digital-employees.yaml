@@ -26,6 +26,10 @@ spec:
     identitySource: wecom
   credentials:
     name: {{ $.Values.secrets.platformCreds }}
+  {{- if $.Values.conversationStore.backend }}
+  conversationStore:
+    backend: {{ $.Values.conversationStore.backend }}
+  {{- end }}
   channels:
     wecom: {{ .wecom | default false }}
     {{- with .wecomName }}

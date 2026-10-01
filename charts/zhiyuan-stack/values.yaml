@@ -84,6 +84,9 @@ memory:
 
 # Digital employees. wecom requires the bot's WS session (single instance
 # cluster-wide); knowledge is absent until WeKnora is wired per employee.
+conversationStore:
+  backend: postgres
+
 employees: []
 #  - name: sales-helper
 #    displayName: 销售助理
