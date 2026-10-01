@@ -153,14 +153,21 @@ func (r *DigitalEmployeeReconciler) ensureMemorySecret(ctx context.Context, empl
 		return errWrap("openviking root key: ", err)
 	}
 	ov := ovNew(employee.Spec.Memory.ServerURL, rootKey)
+	// Department-scoped memory: when spec.team is set, the employee's
+	// memories live in the department's OV account (provisioned by the
+	// portal's department orchestration), not the shared default.
+	accountID := employee.Spec.Memory.AccountID
+	if employee.Spec.Team != "" {
+		accountID = "tenant-" + employee.Spec.Team
+	}
 	key := string(existing.Data[memkeySecretKey])
 	if !haveMemoryKey {
-		minted, found, err := ov.RegisterUser(ctx, employee.Spec.Memory.AccountID, employee.Name)
+		minted, found, err := ov.RegisterUser(ctx, accountID, employee.Name)
 		if err != nil {
 			return errWrap("register memory user: ", err)
 		}
 		if found || minted == "" {
-			minted, err = ov.RegenerateKey(ctx, employee.Spec.Memory.AccountID, employee.Name)
+			minted, err = ov.RegenerateKey(ctx, accountID, employee.Name)
 			if err != nil {
 				return errWrap("regenerate memory user key: ", err)
 			}
