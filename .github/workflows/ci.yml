@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            operator/go.sum
+            portal/go.sum
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -l operator portal)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files need gofmt: $unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: (cd operator && go vet ./...) && (cd portal && go vet ./...)
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: operator
+          args: --timeout=5m
+      - name: Coverage floors (portal, operator ≥ 80%)
+        run: |
+          scripts/check-coverage.sh portal 80
+          scripts/check-coverage.sh operator 80
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: channel-gateway tests (coverage ≥ 80%)
+        working-directory: channel-gateway
+        run: |
+          python -m pip install --quiet pytest pytest-asyncio pytest-cov fastapi uvicorn asyncpg pydantic httpx
+          python -m pytest tests/ --cov=gateway_app --cov-fail-under=80 --cov-report=term
+      - name: Helm chart lint
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null 2>&1 || true
+          helm lint charts/zhiyuan-stack
+
+  # Coverage ratchet: a PR may not lower coverage relative to main.
+  coverage-ratchet:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pull in enough history to reach the base commit.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: |
+            operator/go.sum
+            portal/go.sum
+      - name: Compare head vs base
+        run: |
+          extract() {
+            dir="$1"; rev="$2"
+            git checkout --quiet "$rev" -- "$dir"
+            (cd "$dir" && go test ./... -coverprofile=/tmp/c.cov >/dev/null && \
+             go tool cover -func=/tmp/c.cov | awk '/^total:/ {sub(/%/, "", $3); print $3}')
+          }
+          base="$(git rev-parse origin/${{ github.base_ref }})"
+          for dir in portal operator; do
+            head_pct=$(extract "$dir" HEAD)
+            base_pct=$(extract "$dir" "$base")
+            echo "$dir: main=${base_pct}% PR=${head_pct}%"
+            if awk "BEGIN{exit !($head_pct < $base_pct)}"; then
+              echo "::error::$dir coverage dropped from ${base_pct}% (main) to ${head_pct}% (PR)"
+              exit 1
+            fi
+          done

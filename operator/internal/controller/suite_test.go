@@ -98,6 +98,8 @@ func writeOVError(w http.ResponseWriter, code, message string) {
 // login / provision / me, with the same session + CSRF double-submit
 // discipline the real gateway enforces (provision is admin-session-only).
 type runtimeStub struct {
+	failMode        bool // answer 5xx on the auth API to exercise failure paths
+	glitchProvision bool // user-create answers 201 with a PAT-less body
 	mu              sync.Mutex
 	needsSetup      bool
 	adminEmail      string
@@ -130,6 +132,10 @@ func (s *runtimeStub) handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/setup-status", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.failMode {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if s.hideAuthAPI {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -198,6 +204,10 @@ func (s *runtimeStub) handler() http.Handler {
 		s.provisions++
 		if s.failProvision != 0 {
 			w.WriteHeader(s.failProvision)
+			return
+		}
+		if s.glitchProvision {
+			writeRuntimeJSON(w, http.StatusCreated, map[string]any{"user": map[string]any{"id": "u-glitch"}})
 			return
 		}
 		if _, exists := s.accounts[body.Email]; exists {

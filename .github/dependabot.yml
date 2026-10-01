@@ -1,0 +1,42 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /operator
+    schedule:
+      interval: weekly
+    groups:
+      operator-deps:
+        patterns: ['*']
+  - package-ecosystem: gomod
+    directory: /portal
+    schedule:
+      interval: weekly
+    groups:
+      portal-deps:
+        patterns: ['*']
+  - package-ecosystem: pip
+    directory: /channel-gateway
+    schedule:
+      interval: weekly
+    groups:
+      gateway-deps:
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /channel-gateway
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /operator
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /portal
+    schedule:
+      interval: weekly
