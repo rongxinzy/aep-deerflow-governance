@@ -13,9 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
@@ -45,6 +50,10 @@ type DigitalEmployeeReconciler struct {
 	WakeDBFn func(ctx context.Context, namespace string) (string, error)
 	// DefaultIdleSeconds backs hibernation when the CR omits idleTimeout.
 	DefaultIdleSeconds int32
+	// ChannelGatewayURL, when set, deploys every runtime in channel-gateway
+	// mode (the platform websockets live in de-channel-gateway) and lifts
+	// the WeCom hibernation refusal.
+	ChannelGatewayURL string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
@@ -91,7 +100,7 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	// Hibernating: KEDA scaled the runtime to zero. The pod (and its HTTP
 	// API) is gone, so runtime-account bootstrap must not run — it already
 	// succeeded before the first sleep. Watch for the wake from here.
-	if hibernationEnabled(&employee) && !hibernationBlockedByChannel(&employee) &&
+	if hibernationEnabled(&employee) && !r.hibernationBlockedByChannel(&employee) &&
 		deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
 		if err := r.setStatus(ctx, &employee, v1alpha1.PhaseSleeping, ""); err != nil {
 			return ctrl.Result{}, err
@@ -134,9 +143,43 @@ func (r *DigitalEmployeeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		// Policy ConfigMap edits re-render every ScaledObject (idle
+		// windows, keep-warm pool) without waiting for a CR touch.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, object client.Object) []reconcile.Request {
+				if object.GetName() != hibernationPolicyName {
+					return nil
+				}
+				var employees v1alpha1.DigitalEmployeeList
+				if err := r.List(ctx, &employees, client.InNamespace(object.GetNamespace())); err != nil {
+					return nil
+				}
+				requests := make([]reconcile.Request, 0, len(employees.Items))
+				for i := range employees.Items {
+					requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+						Namespace: employees.Items[i].Namespace, Name: employees.Items[i].Name}})
+				}
+				return requests
+			}),
+			builder.WithPredicates(configMapNamePredicate(hibernationPolicyName))).
 		Named("digitalemployee").
 		Complete(r)
 }
+
+type cmPredicate struct {
+	name string
+}
+
+func (p cmPredicate) Create(e event.CreateEvent) bool {
+	return e.Object.GetName() == p.name
+}
+func (p cmPredicate) Delete(e event.DeleteEvent) bool { return e.Object.GetName() == p.name }
+func (p cmPredicate) Update(e event.UpdateEvent) bool {
+	return e.ObjectNew.GetName() == p.name
+}
+func (p cmPredicate) Generic(e event.GenericEvent) bool { return false }
+
+func configMapNamePredicate(name string) predicate.Predicate { return cmPredicate{name: name} }
 
 // ensureMemorySecret registers an OpenViking user for the employee and
 // persists its key plus the gateway internal-auth token. Existing values

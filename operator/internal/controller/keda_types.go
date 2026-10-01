@@ -52,11 +52,11 @@ type KedaScaledObject struct {
 }
 
 type KedaScaledObjectSpec struct {
-	ScaleTargetRef KedaScaleTargetRef `json:"scaleTargetRef"`
-	PollingInterval *int32           `json:"pollingInterval,omitempty"`
-	CooldownPeriod *int32            `json:"cooldownPeriod,omitempty"`
-	MinReplicaCount *int32           `json:"minReplicaCount,omitempty"`
-	MaxReplicaCount *int32           `json:"maxReplicaCount,omitempty"`
+	ScaleTargetRef  KedaScaleTargetRef `json:"scaleTargetRef"`
+	PollingInterval *int32             `json:"pollingInterval,omitempty"`
+	CooldownPeriod  *int32             `json:"cooldownPeriod,omitempty"`
+	MinReplicaCount *int32             `json:"minReplicaCount,omitempty"`
+	MaxReplicaCount *int32             `json:"maxReplicaCount,omitempty"`
 	Triggers        []KedaScaleTrigger `json:"triggers"`
 }
 
@@ -65,9 +65,9 @@ type KedaScaleTargetRef struct {
 }
 
 type KedaScaleTrigger struct {
-	Type              string                    `json:"type"`
-	Metadata          map[string]string         `json:"metadata"`
-	AuthenticationRef *KedaScaledObjectAuthRef  `json:"authenticationRef,omitempty"`
+	Type              string                   `json:"type"`
+	Metadata          map[string]string        `json:"metadata"`
+	AuthenticationRef *KedaScaledObjectAuthRef `json:"authenticationRef,omitempty"`
 }
 
 type KedaScaledObjectAuthRef struct {

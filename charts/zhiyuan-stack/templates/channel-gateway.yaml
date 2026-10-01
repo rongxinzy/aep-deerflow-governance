@@ -1,0 +1,86 @@
+{{- if .Values.channelGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-channel-gateway
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: de-channel-gateway}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: de-channel-gateway}
+  template:
+    metadata:
+      labels: {app: de-channel-gateway}
+    spec:
+      containers:
+        - name: gateway
+          image: {{ .Values.channelGateway.image.repository }}:{{ .Values.channelGateway.image.tag }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORTAL_DB_URL
+              valueFrom:
+                secretKeyRef: {name: de-portal-db, key: PORTAL_DB_URL}
+            - name: CONNECTIONS_FILE
+              value: /etc/channel-gateway/connections.json
+          volumeMounts:
+            - {name: connections, mountPath: /etc/channel-gateway, readOnly: true}
+          ports:
+            - containerPort: {{ .Values.channelGateway.port }}
+              name: http
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: connections
+          secret: {secretName: {{ .Values.channelGateway.connectionsSecret }}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: de-channel-gateway
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  selector: {app: de-channel-gateway}
+  ports:
+    - port: {{ .Values.channelGateway.port }}
+      targetPort: http
+      name: http
+---
+# Warm-node pool: pre-pull the runtime image on every node so a hibernated
+# employee's cold start skips the image pull entirely.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: de-runtime-image-prepull
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: de-runtime-image-prepull}
+spec:
+  selector:
+    matchLabels: {app: de-runtime-image-prepull}
+  template:
+    metadata:
+      labels: {app: de-runtime-image-prepull}
+    spec:
+      # l20 carries rtl.ai/externally-managed:NoSchedule — tolerate it so the
+      # image lands on both nodes.
+      tolerations:
+        - {key: rtl.ai/externally-managed, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: prepull
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag) }}
+          # Hold the (already-pulled) image resident so node image GC keeps it.
+          command: ["/bin/sh", "-c", "exec sleep 365d"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+      restartPolicy: Always
+{{- end }}

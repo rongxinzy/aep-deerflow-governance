@@ -80,6 +80,7 @@ func main() {
 			return readSecretKey(ctx, mgr.GetClient(), namespace, wakeDBSecret, "PORTAL_DB_URL")
 		},
 		DefaultIdleSeconds: int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
+		ChannelGatewayURL:  envOrDefault("CHANNEL_GATEWAY_URL", ""),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")

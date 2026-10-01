@@ -17,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -350,5 +351,99 @@ var _ = Describe("DigitalEmployee hibernation", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(getEmployee(ctx).Status.Phase).To(Equal(v1alpha1.PhaseSleeping))
 		})
+	})
+})
+
+var _ = Describe("DigitalEmployee hibernation P2", func() {
+	var fx *fixture
+	var employee *v1alpha1.DigitalEmployee
+
+	enable := func() *v1alpha1.HibernationSpec {
+		on := true
+		return &v1alpha1.HibernationSpec{Enabled: &on}
+	}
+
+	reconcile := func(ctx context.Context) (ctrl.Result, error) {
+		return fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+	}
+
+	getSO := func(ctx context.Context) *KedaScaledObject {
+		so := &KedaScaledObject{}
+		if err := fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee) + "-wake"}, so); err != nil {
+			return nil
+		}
+		return so
+	}
+
+	BeforeEach(func(ctx context.Context) {
+		fx = newFixture(ctx)
+		fx.wakeDBURL = "postgresql://wake:wak3pass@pg.db.svc:5432/deportal"
+		employee = fx.employeeFixture("wecom-helper")
+		employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true, WecomName: "数字员工"}
+		Expect(fx.client.Create(ctx, employee)).To(Succeed())
+	})
+
+	It("lifts the WeCom refusal when a channel-gateway is configured", func(ctx context.Context) {
+		fx.gatewayURL = "http://de-channel-gateway.digital-employees.svc.cluster.local:8899"
+		employee.Spec.Hibernation = enable()
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getSO(ctx)).NotTo(BeNil())
+	})
+
+	It("still refuses WeCom without a gateway", func(ctx context.Context) {
+		employee.Spec.Hibernation = enable()
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("merges the policy ConfigMap: team override beats global default", func(ctx context.Context) {
+		fx.gatewayURL = "http://gw:8899"
+		employee.Spec.Team = "rd-dept"
+		employee.Spec.Hibernation = enable()
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		Expect(fx.client.Create(ctx, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "de-hibernation-policy", Namespace: testNamespace},
+			Data: map[string]string{
+				"defaultIdleSeconds":       "900",
+				"keepWarm":                 "3",
+				"team.rd-dept.idleSeconds": "2400",
+			},
+		})).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		so := getSO(ctx)
+		Expect(so).NotTo(BeNil())
+		Expect(*so.Spec.CooldownPeriod).To(Equal(int32(2400)))
+		Expect(so.Spec.Triggers[0].Metadata["query"]).To(ContainSubstring("LIMIT 3"))
+	})
+
+	It("falls back to the policy default when the team is unset", func(ctx context.Context) {
+		fx.gatewayURL = "http://gw:8899"
+		employee.Spec.Hibernation = enable()
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		Expect(fx.client.Create(ctx, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "de-hibernation-policy", Namespace: testNamespace},
+			Data:       map[string]string{"defaultIdleSeconds": "900"},
+		})).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*getSO(ctx).Spec.CooldownPeriod).To(Equal(int32(900)))
+	})
+
+	It("injects gateway env into the runtime deployment", func(ctx context.Context) {
+		fx.gatewayURL = "http://gw:8899"
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		env := map[string]string{}
+		for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		Expect(env["DEERFLOW_CHANNEL_GATEWAY_URL"]).To(Equal("http://gw:8899"))
+		Expect(env["DEERFLOW_EMPLOYEE_NAME"]).To(Equal("wecom-helper"))
 	})
 })

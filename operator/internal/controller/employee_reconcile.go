@@ -47,7 +47,7 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		}
 	}
 
-	deployment := renderDeployment(employee)
+	deployment := r.renderDeployment(employee)
 	if err := controllerutil.SetControllerReference(employee, deployment, r.Scheme); err != nil {
 		return err
 	}
@@ -300,7 +300,7 @@ func renderExtensions(employee *v1alpha1.DigitalEmployee) string {
 	return string(encoded)
 }
 
-func renderDeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment {
+func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment {
 	spec := employee.Spec
 	replicas := spec.Replicas
 	if replicas <= 0 {
@@ -313,6 +313,15 @@ func renderDeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment {
 		{Name: "DEER_FLOW_CONFIG_PATH", Value: "/app/config.yaml"},
 		{Name: "DEER_FLOW_EXTENSIONS_CONFIG_PATH", Value: "/app/extensions-config/extensions_config.json"},
 		{Name: "DEER_FLOW_HOME", Value: "/var/lib/deerflow"},
+	}
+	// Channel-gateway mode: the platform websockets live in
+	// de-channel-gateway; runtimes poll its inbox instead of dialing out,
+	// which is what makes idle scale-to-zero safe for IM employees.
+	if r.ChannelGatewayURL != "" {
+		environment = append(environment,
+			corev1.EnvVar{Name: "DEERFLOW_CHANNEL_GATEWAY_URL", Value: r.ChannelGatewayURL},
+			corev1.EnvVar{Name: "DEERFLOW_EMPLOYEE_NAME", Value: employee.Name},
+		)
 	}
 	var secretRefs []corev1.LocalObjectReference
 	if spec.Credentials.Name != "" {

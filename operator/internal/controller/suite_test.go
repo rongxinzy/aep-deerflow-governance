@@ -269,6 +269,7 @@ type fixture struct {
 	runtimeSrv *httptest.Server
 	runtimeURL string // overrides the runtime auth base (dead URL specs)
 	wakeDBURL  string // non-empty enables the hibernation wake-db source
+	gatewayURL string // non-empty enables channel-gateway mode
 }
 
 func newFixture(ctx context.Context, objects ...client.Object) *fixture {
@@ -296,6 +297,7 @@ func (f *fixture) reconciler() *DigitalEmployeeReconciler {
 	if f.wakeDBURL != "" {
 		r.WakeDBFn = func(context.Context, string) (string, error) { return f.wakeDBURL, nil }
 	}
+	r.ChannelGatewayURL = f.gatewayURL
 	r.DefaultIdleSeconds = 1800
 	return r
 }

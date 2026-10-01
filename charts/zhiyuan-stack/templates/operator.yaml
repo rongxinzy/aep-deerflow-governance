@@ -19,6 +19,9 @@ spec:
           env:
             - {name: HIBERNATION_DB_URL_SECRET, value: de-portal-db}
             - {name: HIBERNATION_IDLE_TIMEOUT_SECONDS, value: "1800"}
+            {{- if .Values.channelGateway.enabled }}
+            - {name: CHANNEL_GATEWAY_URL, value: "http://de-channel-gateway.{{ include "zhiyuan.ns" . }}.svc.cluster.local:8899"}
+            {{- end }}
           args: ["--namespace", {{ include "zhiyuan.ns" . | quote }}, "--leader-elect"]
           livenessProbe:
             httpGet: {path: /healthz, port: 8081}
