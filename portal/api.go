@@ -38,6 +38,7 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
+	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
 	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.handleMemorySearch))
 	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.handleKnowledgeStatus))
@@ -228,7 +229,7 @@ func (p *portal) listEmployees(w http.ResponseWriter, r *http.Request, ident ide
 	out := make([]map[string]any, 0, len(list.Items))
 	for i := range list.Items {
 		item := &list.Items[i]
-		if !admin && item.Spec.Owner != ident.UserID {
+		if !admin && !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
 			continue
 		}
 		out = append(out, summarize(item))
@@ -362,6 +363,7 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 		"name": item.Name, "displayName": item.Spec.DisplayName, "phase": item.Status.Phase,
 		"runtime": item.Spec.Runtime.Type, "model": item.Spec.Runtime.Model,
 		"owner": item.Spec.OwnerName, "ownerId": item.Spec.Owner,
+		"team": item.Spec.Team,
 		"memoryUser": item.Status.MemoryUser, "createdAt": item.CreationTimestamp,
 		"channels": channels,
 	}

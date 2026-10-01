@@ -16,6 +16,36 @@ type identity struct {
 	DisplayName string   `json:"displayName"`
 	Kind        string   `json:"kind"`
 	Roles       []string `json:"roles"`
+	Teams       []string `json:"-"` // AEP team ids; used for department scoping
+}
+
+// inTeam reports whether the caller belongs to the given AEP team.
+// An empty team means the employee is not scoped to any department:
+// only the owner and admins can access it (strict by default — set
+// spec.team to grant department-level access).
+func (i identity) inTeam(team string) bool {
+	if team == "" {
+		return false // unscoped: owner/admin only, not open to everyone
+	}
+	for _, t := range i.Teams {
+		if t == team {
+			return true
+		}
+	}
+	return false
+}
+
+// canAccessEmployee applies the department-scoping rule: admins bypass all
+// team scoping (the "大老板" requirement); owners always can; same-team
+// members can; everyone else cannot.
+func (i identity) canAccessEmployee(cfg config, team, ownerID string) bool {
+	if i.isAdmin(cfg) {
+		return true
+	}
+	if ownerID != "" && i.UserID == ownerID {
+		return true
+	}
+	return i.inTeam(team)
 }
 
 func (i identity) isAdmin(cfg config) bool {
@@ -52,10 +82,11 @@ func (a *aepAuthenticator) verify(ctx context.Context, token string) (identity, 
 	}
 	var body struct {
 		User struct {
-			ID          string  `json:"id"`
-			DisplayName string  `json:"displayName"`
-			Email       *string `json:"email"`
-			Kind        string  `json:"kind"`
+			ID          string   `json:"id"`
+			DisplayName string   `json:"displayName"`
+			Email       *string  `json:"email"`
+			Kind        string   `json:"kind"`
+			TeamIDs     []string `json:"teamIds"`
 		} `json:"user"`
 		Roles []string `json:"roles"`
 	}
@@ -71,6 +102,10 @@ func (a *aepAuthenticator) verify(ctx context.Context, token string) (identity, 
 		DisplayName: body.User.DisplayName,
 		Kind:        body.User.Kind,
 		Roles:       body.Roles,
+		Teams:       body.User.TeamIDs,
+	}
+	if ident.Teams == nil {
+		ident.Teams = []string{}
 	}
 	// Username: derive from displayName when AEP does not expose it on /me.
 	ident.Username = body.User.DisplayName

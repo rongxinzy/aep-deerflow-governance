@@ -297,6 +297,13 @@ spec:
                 - model
                 - type
                 type: object
+              team:
+                description: |-
+                  Team scopes the employee to a department. Members of this AEP team
+                  can see and converse with the employee in addition to the owner;
+                  admins bypass all team scoping. Empty means visible to everyone
+                  (legacy behavior for employees created before team scoping).
+                type: string
             required:
             - credentials
             - governance

@@ -219,6 +219,12 @@ type DigitalEmployeeSpec struct {
 	// OwnerName is the owner's AEP username for display.
 	// +optional
 	OwnerName string `json:"ownerName,omitempty"`
+	// Team scopes the employee to a department. Members of this AEP team
+	// can see and converse with the employee in addition to the owner;
+	// admins bypass all team scoping. Empty means visible to everyone
+	// (legacy behavior for employees created before team scoping).
+	// +optional
+	Team string `json:"team,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Minimum=1

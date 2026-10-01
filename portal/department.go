@@ -1,0 +1,298 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"context"
+	"net/http"
+	"time"
+)
+
+// Department orchestration: one API call provisions a department across
+// AEP (identity), OpenViking (memory isolation), and optionally WeKnora
+// (knowledge isolation). Admin-only.
+
+type departmentRequest struct {
+	ID       string `json:"id"`       // e.g. "rd-dept" (URL-safe)
+	Name     string `json:"name"`     // e.g. "研发部"
+	AdminIDs []string `json:"adminIds"` // AEP user IDs who manage this department
+}
+
+type departmentStatus struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	AepTeamID    string `json:"aepTeamId"`
+	OvAccountID  string `json:"ovAccountId"`
+	WeKnoraTenant string `json:"weknoraTenant,omitempty"`
+	Phase        string `json:"phase"` // provisioning | ready | partial
+	Message      string `json:"message,omitempty"`
+}
+
+func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, ident identity) {
+	if !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	var req departmentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if req.ID == "" || req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id and name are required"})
+		return
+	}
+
+	status := departmentStatus{ID: req.ID, Name: req.Name, Phase: "provisioning"}
+	var partials []string
+
+	// 1. AEP team (identity)
+	teamID, err := p.createAepTeam(r, req)
+	if err != nil {
+		partials = append(partials, fmt.Sprintf("aep-team: %v", err))
+	} else {
+		status.AepTeamID = teamID
+	}
+
+	// 2. OpenViking account (memory isolation boundary)
+	ovAccount, err := p.createOpenVikingAccount(r, req.ID)
+	if err != nil {
+		partials = append(partials, fmt.Sprintf("openviking: %v", err))
+	} else {
+		status.OvAccountID = ovAccount
+	}
+
+	// 3. WeKnora tenant (knowledge isolation, optional — skip if not deployed)
+	if p.cfg.knowledgeAPIURL != "" {
+		tenant, err := p.createWeKnoraTenant(r, req)
+		if err != nil {
+			partials = append(partials, fmt.Sprintf("weknora: %v", err))
+		} else {
+			status.WeKnoraTenant = tenant
+		}
+	}
+
+	if len(partials) == 0 {
+		status.Phase = "ready"
+	} else {
+		status.Phase = "partial"
+		status.Message = fmt.Sprintf("partially provisioned: %v", partials)
+	}
+	p.logger.Info("department provisioned", "id", req.ID, "phase", status.Phase, "partials", partials)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"id":   req.ID,
+		"name": req.Name,
+	})
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		p.cfg.aepBaseURL+"/aep/v1/admin/teams", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-AEP-Protocol-Version", "1.0")
+	request.Header.Set("Authorization", "Bearer "+p.adminToken(r.Context()))
+	resp, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("aep returned %d: %s", resp.StatusCode, string(raw))
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &result)
+	if result.ID == "" {
+		result.ID = req.ID // AEP may echo the team in a different shape
+	}
+	return result.ID, nil
+}
+
+func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (string, error) {
+	rootKey := p.platformSecretKeyOrEmpty(r.Context(), "OPENVIKING_ROOT_API_KEY")
+	if rootKey == "" {
+		return "", fmt.Errorf("root key not configured")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"account_id":   "tenant-" + accountID,
+		"admin_user_id": "portal",
+	})
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		p.cfg.memoryServer+"/api/v1/admin/accounts", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", rootKey)
+	resp, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("openviking returned %d: %s", resp.StatusCode, string(raw))
+	}
+	return "tenant-" + accountID, nil
+}
+
+func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (string, error) {
+	// WeKnora admin auth: use the admin credentials from the platform secret
+	// to obtain a JWT, then create a tenant.
+	adminUser, adminPass := p.weknoraAdminCreds(r.Context())
+	if adminUser == "" {
+		return "", fmt.Errorf("weknora admin credentials not configured")
+	}
+	// Login
+	body, _ := json.Marshal(map[string]string{"email": adminUser, "password": adminPass})
+	loginReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		p.cfg.knowledgeAPIURL+"/api/v1/auth/login", bytes.NewReader(body))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, err := serviceProbeClient.Do(loginReq)
+	if err != nil {
+		return "", fmt.Errorf("weknora login: %w", err)
+	}
+	defer loginResp.Body.Close()
+	var loginResult struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(loginResp.Body).Decode(&loginResult)
+	if loginResult.Token == "" {
+		return "", fmt.Errorf("weknora login returned no token")
+	}
+
+	// Create tenant
+	body, _ = json.Marshal(map[string]any{
+		"name":        req.Name,
+		"description": "Department: " + req.Name,
+	})
+	tenantReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		p.cfg.knowledgeAPIURL+"/api/v1/admin/tenants", bytes.NewReader(body))
+	tenantReq.Header.Set("Content-Type", "application/json")
+	tenantReq.Header.Set("Authorization", "Bearer "+loginResult.Token)
+	resp, err := serviceProbeClient.Do(tenantReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("weknora returned %d: %s", resp.StatusCode, string(raw))
+	}
+	return req.ID, nil
+}
+
+// platformSecretKeyOrEmpty reads a key from the platform Secret without erroring.
+func (p *portal) platformSecretKeyOrEmpty(ctx context.Context, key string) string {
+	// Simplified: reuse the existing platformSecretKey but return empty on error
+	val, err := p.platformSecretKey(ctx, key)
+	if err != nil {
+		return ""
+	}
+	return val
+}
+
+// adminToken logs into AEP with the bootstrap admin credentials from the
+// platform secret. For the private-deployment single-instance model this
+// is acceptable; a dedicated service account replaces it in public mode.
+var adminTokenCache struct {
+	token   string
+	expires time.Time
+}
+
+func (p *portal) adminToken(ctx context.Context) string {
+	if adminTokenCache.token != "" && time.Now().Before(adminTokenCache.expires) {
+		return adminTokenCache.token
+	}
+	user := p.platformSecretKeyOrEmpty(ctx, "AEP_ADMIN_USER")
+	pass := p.platformSecretKeyOrEmpty(ctx, "AEP_ADMIN_PASSWORD")
+	if user == "" || pass == "" {
+		p.logger.Error("department: AEP admin credentials not configured")
+		return ""
+	}
+	body, _ := json.Marshal(map[string]string{
+		"deploymentId": p.cfg.aepDeploymentID,
+		"sessionId":    fmt.Sprintf("portal-dept-%d", time.Now().UnixNano()),
+		"username":     user,
+		"password":     pass,
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.cfg.aepBaseURL+"/aep/v1/auth/password/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		p.logger.Error("department: AEP admin login failed", "error", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	var result struct {
+		AccessToken string `json:"accessToken"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	adminTokenCache.token = result.AccessToken
+	adminTokenCache.expires = time.Now().Add(20 * time.Minute)
+	return result.AccessToken
+}
+
+// weknoraAdminCreds reads WeKnora admin credentials from the platform secret.
+func (p *portal) weknoraAdminCreds(ctx context.Context) (string, string) {
+	user := p.platformSecretKeyOrEmpty(ctx, "WEKNORA_ADMIN_USER")
+	pass := p.platformSecretKeyOrEmpty(ctx, "WEKNORA_ADMIN_PASSWORD")
+	return user, pass
+}
+
+// enrichTeams fetches the user's AEP team memberships via the admin API
+// and stores them on the identity. Called once at login, cached in the
+// portal session — /user/me doesn't include teamIds.
+func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
+	if len(ident.Teams) > 0 {
+		return // already enriched (e.g. from a persisted session)
+	}
+	adminToken := p.adminToken(ctx)
+	if adminToken == "" {
+		p.logger.Warn("enrichTeams: no admin token available")
+		return
+	}
+	p.logger.Info("enrichTeams: fetching teams", "userId", ident.UserID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		p.cfg.aepBaseURL+"/aep/v1/admin/users?limit=200", nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Users []struct {
+			ID      string   `json:"id"`
+			TeamIDs []string `json:"teamIds"`
+		} `json:"items"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) != nil {
+		return
+	}
+	for _, u := range result.Users {
+		if u.ID == ident.UserID {
+			ident.Teams = u.TeamIDs
+			if ident.Teams == nil {
+				ident.Teams = []string{}
+			}
+			p.logger.Info("enrichTeams: found", "userId", ident.UserID, "teams", ident.Teams)
+			return
+		}
+	}
+	p.logger.Warn("enrichTeams: user not found in admin listing", "userId", ident.UserID)
+}

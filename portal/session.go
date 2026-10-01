@@ -63,6 +63,7 @@ type sessionIdentityJSON struct {
 	DisplayName string   `json:"displayName"`
 	Kind        string   `json:"kind"`
 	Roles       []string `json:"roles"`
+	Teams       []string `json:"teams"`
 }
 
 func marshalIdentity(ident identity) ([]byte, error) {
@@ -278,6 +279,11 @@ func (p *portal) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username/password or token required"})
 		return
 	}
+
+	// Department scoping: /user/me doesn't carry teamIds, so enrich the
+	// identity with team memberships from the admin API once at login.
+	// The result is cached in the portal session for its lifetime.
+	p.enrichTeams(r.Context(), &ident)
 
 	token, csrf := p.sessions.issue(ident)
 	// Path=/ explicitly: the default path (/api/v1) would hide the cookies

@@ -47,8 +47,8 @@ func (p *portal) authorizeChat(ctx context.Context, name string, ident identity)
 	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &item); err != nil {
 		return "", statusOf(err), err.Error()
 	}
-	if !ident.isAdmin(p.cfg) && item.Spec.Owner != ident.UserID {
-		return "", http.StatusForbidden, "not the owner of this digital employee"
+	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
+		return "", http.StatusForbidden, "not authorized for this digital employee (owner, team member, or admin required)"
 	}
 	if item.Status.Phase != dev1alpha1.PhaseReady {
 		return "", http.StatusConflict, "digital employee is not Ready (phase " + string(item.Status.Phase) + ")"
