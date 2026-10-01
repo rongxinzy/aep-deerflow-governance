@@ -207,6 +207,23 @@ func (p *portal) chatUIURL(r *http.Request) string {
 	return "http://" + host + ":30195/workspace"
 }
 
+// knowledgeUIURL resolves the browser-reachable WeKnora frontend. The console
+// deployment proxies WeKnora on a dedicated port of its own NodePort service
+// (same host, 30163) so knowledge management opens in a working tab without a
+// separate WeKnora NodePort; the port must move in lockstep with the console
+// chart's weknoraNodePort. PORTAL_KNOWLEDGE_UI_URL overrides for split or
+// port-forwarded deployments.
+func (p *portal) knowledgeUIURL(r *http.Request) string {
+	if p.cfg.knowledgeUIURL != "" {
+		return p.cfg.knowledgeUIURL
+	}
+	host := r.Host
+	if withoutPort, _, err := net.SplitHostPort(r.Host); err == nil {
+		host = withoutPort
+	}
+	return "http://" + host + ":30163"
+}
+
 // handleChatEntry serves the login + employee-picker page. Unauthenticated
 // on purpose: the page itself carries no data, everything loads through the
 // authenticated /api/v1/* endpoints.

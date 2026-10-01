@@ -19,7 +19,7 @@ images:
   operator: { repository: rongxinzy/de-operator, tag: "0.9.0" }
   portal: { repository: rongxinzy/de-portal, tag: "0.4.10" }
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.5.0" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.2" }
   # runtime images are big and version rarely; the lineage lives on ghcr
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v17.1" }
   openviking: { repository: "172.18.5.251:8081/zhiyuan/openviking", tag: "0.4.21" }
@@ -54,6 +54,9 @@ adminConsole:
   aepBaseURL: http://aep-control-service.aep-system.svc.cluster.local:8080
   portalBaseURL: http://de-portal.digital-employees.svc.cluster.local:8090
   nodePort: 30196
+  # WeKnora management UI proxied by the console container (second port).
+  weknoraNodePort: 30163
+  weknoraUIURL: http://frontend.weknora.svc.cluster.local
 
 # Online GLM through Higress: Anthropic passthrough for the runtime
 # (ChatAnthropic) plus the openai<->anthropic conversion route for

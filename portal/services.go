@@ -204,9 +204,14 @@ func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ id
 // MCP endpoint) still proves the service is up; only transport failures and
 // 5xx count as unhealthy.
 func (p *portal) handleKnowledgeStatus(w http.ResponseWriter, r *http.Request, _ identity) {
-	// The internal MCP URL is cluster-only (browsers cannot reach it);
-	// the console shows health + configured, never the internal address.
-	out := map[string]any{"configured": p.cfg.knowledgeMCPURL != ""}
+	// The internal MCP URL is cluster-only (browsers cannot reach it); the
+	// console shows health + configured, never the internal address. The
+	// browser-facing entry is the console's WeKnora proxy, derived from the
+	// request host so it matches whichever hostname the user typed.
+	out := map[string]any{
+		"configured": p.cfg.knowledgeMCPURL != "",
+		"uiURL":      p.knowledgeUIURL(r),
+	}
 	healthy := false
 	if p.cfg.knowledgeMCPURL != "" {
 		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.cfg.knowledgeMCPURL, nil)

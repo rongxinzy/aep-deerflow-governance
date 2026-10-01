@@ -19,8 +19,11 @@ spec:
           env:
             - {name: ZHIYUAN_AEP_BASE_URL, value: {{ .Values.adminConsole.aepBaseURL | quote }}}
             - {name: ZHIYUAN_PORTAL_BASE_URL, value: {{ .Values.adminConsole.portalBaseURL | quote }}}
+            - {name: ZHIYUAN_WEKNORA_UI_URL, value: {{ .Values.adminConsole.weknoraUIURL | quote }}}
           ports:
             - containerPort: 5173
+            - containerPort: 5174
+              name: weknora
           readinessProbe:
             httpGet: {path: /, port: 5173}
             initialDelaySeconds: 5
@@ -41,4 +44,13 @@ spec:
     - port: 80
       targetPort: 5173
       nodePort: {{ .Values.adminConsole.nodePort }}
+    # WeKnora management UI: the console container proxies the WeKnora
+    # frontend on a dedicated port (root path — WeKnora's build uses
+    # root-absolute asset/API paths and cannot live under a subpath).
+    # Service port must differ from the console port (uniqueness), the
+    # nodePort is what browsers hit.
+    - port: 81
+      name: weknora
+      targetPort: 5174
+      nodePort: {{ .Values.adminConsole.weknoraNodePort }}
 {{- end }}

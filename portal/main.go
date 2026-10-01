@@ -34,6 +34,7 @@ type config struct {
 	memoryAccount     string
 	knowledgeMCPURL   string
 	knowledgeAPIURL  string
+	knowledgeUIURL   string // browser-facing WeKnora URL override; default derives per request
 	credentialsSecret string
 	a2aImage          string
 
@@ -62,6 +63,7 @@ func loadConfig() config {
 		memoryAccount:     env("PORTAL_MEMORY_ACCOUNT", "zhiyuan"),
 		knowledgeMCPURL:   env("PORTAL_KNOWLEDGE_MCP_URL", "http://weknora-mcp.weknora.svc.cluster.local:8830/mcp"),
 		knowledgeAPIURL:   env("PORTAL_KNOWLEDGE_API_URL", "http://app.weknora.svc.cluster.local:8080"),
+		knowledgeUIURL:    env("PORTAL_KNOWLEDGE_UI_URL", ""),
 		credentialsSecret: env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
 		a2aImage:          env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
 
