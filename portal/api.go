@@ -40,6 +40,7 @@ func (p *portal) routes() http.Handler {
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
 	mux.HandleFunc("GET /api/v1/departments", p.auth(p.handleListDepartments))
+	mux.HandleFunc("GET /api/v1/usage/stats", p.auth(p.handleUsageStats))
 	mux.HandleFunc("PATCH /api/v1/departments/{id}", p.auth(p.handleUpdateDepartment))
 	mux.HandleFunc("DELETE /api/v1/departments/{id}", p.auth(p.handleDeleteDepartment))
 	mux.HandleFunc("GET /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
@@ -437,4 +438,105 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// handleUsageStats returns aggregated usage metrics for the admin console
+// dashboard: conversation counts, message volume, model calls, active users,
+// broken down by department. Queries the centralized PG conversation store.
+func (p *portal) handleUsageStats(w http.ResponseWriter, r *http.Request, ident identity) {
+	if !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	ctx := r.Context()
+
+	// Total conversations and messages (all time)
+	var totalThreads, totalRuns int
+	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta`).Scan(&totalThreads)
+	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&totalRuns)
+
+	// Today's activity
+	var todayThreads, todayRuns int
+	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta WHERE created_at >= CURRENT_DATE`).Scan(&todayThreads)
+	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE created_at >= CURRENT_DATE`).Scan(&todayRuns)
+
+	// Active employees
+	var activeEmployees, readyEmployees int
+	var list dev1alpha1.DigitalEmployeeList
+	if err := p.k8s.List(ctx, &list, client.InNamespace(p.cfg.namespace)); err == nil {
+		activeEmployees = len(list.Items)
+		for i := range list.Items {
+			if list.Items[i].Status.Phase == dev1alpha1.PhaseReady {
+				readyEmployees++
+			}
+		}
+	}
+
+	// Per-department breakdown from employee specs
+	deptStats := make(map[string]map[string]int)
+	for i := range list.Items {
+		team := list.Items[i].Spec.Team
+		if team == "" {
+			team = "(unassigned)"
+		}
+		if deptStats[team] == nil {
+			deptStats[team] = map[string]int{"employees": 0, "ready": 0}
+		}
+		deptStats[team]["employees"]++
+		if list.Items[i].Status.Phase == dev1alpha1.PhaseReady {
+			deptStats[team]["ready"]++
+		}
+	}
+
+	// Threads per department (from PG, last 7 days)
+	threadsByDept := make(map[string]int)
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT COALESCE(tenant_id, '(default)') as dept, COUNT(*) as cnt
+		FROM threads_meta
+		WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
+		GROUP BY COALESCE(tenant_id, '(default)')
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var dept string
+			var cnt int
+			if rows.Scan(&dept, &cnt) == nil {
+				threadsByDept[dept] = cnt
+			}
+		}
+	}
+
+	// Runs per model (last 7 days)
+	modelCalls := make(map[string]int)
+	rows2, err2 := p.db.QueryContext(ctx, `
+		SELECT COALESCE(model_name, '(unknown)') as model, COUNT(*) as cnt
+		FROM runs
+		WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
+		GROUP BY COALESCE(model_name, '(unknown)')
+	`)
+	if err2 == nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var model string
+			var cnt int
+			if rows2.Scan(&model, &cnt) == nil {
+				modelCalls[model] = cnt
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"totals": map[string]int{
+			"conversations": totalThreads,
+			"runs":          totalRuns,
+			"todayConversations": todayThreads,
+			"todayRuns":          todayRuns,
+			"employees":          activeEmployees,
+			"readyEmployees":     readyEmployees,
+		},
+		"byDepartment": deptStats,
+		"threadsByDepartment7d": threadsByDept,
+		"modelCalls7d":          modelCalls,
+	})
 }
