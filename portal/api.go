@@ -49,6 +49,8 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
 	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.handleMemorySearch))
 	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.handleKnowledgeStatus))
+	mux.HandleFunc("/api/v1/knowledge/proxy/{rest...}", p.auth(p.handleKnowledgeProxy))
+	mux.HandleFunc("GET /api/v1/knowledge/bases", p.auth(p.handleKnowledgeListBases))
 	mux.HandleFunc("GET /api/v1/employees/{name}", p.auth(p.getEmployee))
 	mux.HandleFunc("DELETE /api/v1/employees/{name}", p.auth(p.deleteEmployee))
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))
