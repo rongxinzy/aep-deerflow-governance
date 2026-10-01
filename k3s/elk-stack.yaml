@@ -1,0 +1,170 @@
+# ELK stack (single-node ES, Kibana, Fluent Bit) for unified zhiyuan log
+# management. Scoped to the zhiyuan namespaces only: files are tailed by
+# namespace-glob path, NOT by a grep on kubernetes metadata (the field
+# name differs between filter-stage and Replace_Dots output-stage, which
+# silently drops everything). Key compatibility note: ES 8.x rejects the
+# `_type` parameter in bulk requests — `Suppress_Type_Name On` is REQUIRED.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: logging
+spec:
+  selector: {app: elasticsearch}
+  ports: [{port: 9200, targetPort: 9200, name: http}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: logging
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels: {app: elasticsearch}
+  template:
+    metadata:
+      labels: {app: elasticsearch}
+    spec:
+      containers:
+        - name: elasticsearch
+          image: 172.18.5.251:8081/zhiyuan/elasticsearch:8.18.3
+          env:
+            - {name: discovery.type, value: single-node}
+            - {name: xpack.security.enabled, value: "false"}
+            - {name: ES_JAVA_OPTS, value: "-Xms1g -Xmx1g"}
+          ports: [{containerPort: 9200}]
+          readinessProbe:
+            httpGet: {path: /_cluster/health, port: 9200}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 200m, memory: 1536Mi}
+            limits: {memory: 2.5Gi}
+          volumeMounts:
+            - {name: data, mountPath: /usr/share/elasticsearch/data}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 20Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: logging
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kibana}
+  template:
+    metadata:
+      labels: {app: kibana}
+    spec:
+      containers:
+        - name: kibana
+          image: 172.18.5.251:8081/zhiyuan/kibana:8.18.3
+          env:
+            - {name: ELASTICSEARCH_HOSTS, value: "http://elasticsearch.logging.svc.cluster.local:9200"}
+          ports: [{containerPort: 5601}]
+          readinessProbe:
+            httpGet: {path: /api/status, port: 5601}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1.5Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: logging
+spec:
+  type: NodePort
+  selector: {app: kibana}
+  ports: [{port: 5601, targetPort: 5601, nodePort: 30160}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        # Scoped to zhiyuan namespaces via path globs (files are named
+        # <pod>_<ns>_<container>.log). Shared-cluster discipline: rtl-*/,
+        # argocd, new-api are NOT ours. Path scoping is also why there's no
+        # grep filter — the nested kubernetes.namespace_name field is
+        # inaccessible to grep before Replace_Dots, silently dropping all.
+        Path              /var/log/containers/*_aep-system_*.log, /var/log/containers/*_digital-employees_*.log, /var/log/containers/*_memory-system_*.log, /var/log/containers/*_higress-system_*.log, /var/log/containers/*_weknora_*.log
+        Tag               kube.*
+        Read_from_Head    true
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+
+    [FILTER]
+        Name    kubernetes
+        Match   kube.*
+        Kube_URL https://kubernetes.default.svc:443
+        Merge_Log On
+        Keep_Log Off
+
+    [OUTPUT]
+        Name    es
+        Match   kube.*
+        Host    elasticsearch.logging.svc.cluster.local
+        Port    9200
+        Index   logstash
+        Logstash_Format On
+        Logstash_Prefix logstash
+        Replace_Dots On
+        # ES 8.x rejects _type in bulk API; without this every batch 400s.
+        Suppress_Type_Name On
+        Retry_Limit False
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+spec:
+  selector:
+    matchLabels: {app: fluent-bit}
+  template:
+    metadata:
+      labels: {app: fluent-bit}
+    spec:
+      tolerations:
+        - {key: node-role.kubernetes.io/controlplane, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: fluent-bit
+          image: 172.18.5.251:8081/zhiyuan/fluent-bit:3.2.10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 192Mi}
+          volumeMounts:
+            - {name: varlog, mountPath: /var/log/pods}
+            - {name: varlogcontainers, mountPath: /var/log/containers}
+            - {name: config, mountPath: /fluent-bit/etc}
+      volumes:
+        - {name: varlog, hostPath: {path: /var/log/pods}}
+        - {name: varlogcontainers, hostPath: {path: /var/log/containers}}
+        - {name: config, configMap: {name: fluent-bit-config}}
