@@ -1,0 +1,166 @@
+# Audit-event shipper: polls AEP admin APIs and the DE portal for structured
+# audit data, bulk-indexing into the zhiyuan-audit-* ES index. This is the
+# business-layer audit trail; infra-layer logs are already in ES via Fluent Bit.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-shipper-script
+  namespace: logging
+data:
+  ship.py: |
+    """Poll AEP + portal admin APIs; bulk-index structured audit docs into ES."""
+    import json, os, sys, time, urllib.request
+
+    AEP = os.environ.get("AEP_BASE_URL", "http://aep-control-service.aep-system.svc.cluster.local:8080")
+    PORTAL = os.environ.get("PORTAL_BASE_URL", "http://de-portal.digital-employees.svc.cluster.local:8090")
+    ES = os.environ.get("ES_URL", "http://elasticsearch.logging.svc.cluster.local:9200")
+    DEPLOYMENT = os.environ.get("AEP_DEPLOYMENT_ID", "demo")
+    USER = os.environ.get("AEP_ADMIN_USER", "admin")
+    PASS = os.environ.get("AEP_ADMIN_PASSWORD", "")
+
+    def api(base, method, path, token=None, body=None):
+        headers = {"Content-Type": "application/json", "X-AEP-Protocol-Version": "1.0"}
+        if token: headers["Authorization"] = "Bearer " + token
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read()) if resp.status == 200 else {}
+
+    def es_bulk(docs):
+        if not docs: return 0
+        idx = f"zhiyuan-audit-{time.strftime('%Y.%m.%d')}"
+        lines = []
+        meta = json.dumps({"index": {"_index": idx}})
+        for doc in docs:
+            lines.append(meta)
+            lines.append(json.dumps(doc, ensure_ascii=False, default=str))
+        body = "\n".join(lines) + "\n"
+        req = urllib.request.Request(ES + "/_bulk", data=body.encode(), method="POST",
+                                     headers={"Content-Type": "application/x-ndjson"})
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read())
+        errors = [i for i in result.get("items", []) if "error" in i.get("index", {})]
+        return len(docs) - len(errors)
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    docs = []
+
+    # Login to AEP for admin credentials
+    token = api(AEP, "POST", "/aep/v1/auth/password/login", body={
+        "deploymentId": DEPLOYMENT, "sessionId": f"audit-{int(time.time())}",
+        "username": USER, "password": PASS,
+    }).get("accessToken", "")
+    if not token:
+        print("ERROR: AEP login failed", file=sys.stderr); sys.exit(1)
+
+    # 1. AEP control events (lifecycle commands, approvals)
+    try:
+        events = api(AEP, "GET", "/aep/v1/admin/events?limit=200", token)
+        for ev in (events.get("items") or []):
+            docs.append({
+                "@timestamp": ev.get("createdAt", now),
+                "audit_type": "control_event",
+                "event_id": ev.get("eventId") or ev.get("id"),
+                "event_type": ev.get("type"),
+                "state": ev.get("state"),
+                "created_by": ev.get("createdBy"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: events: {e}", file=sys.stderr)
+
+    # 2. AEP users snapshot
+    try:
+        users = api(AEP, "GET", "/aep/v1/admin/users?limit=100", token)
+        for u in (users.get("users") or users.get("items") or []):
+            docs.append({
+                "@timestamp": now,
+                "audit_type": "user_snapshot",
+                "user_id": u.get("id"),
+                "username": u.get("username"),
+                "display_name": u.get("displayName"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: users: {e}", file=sys.stderr)
+
+    # 3. Portal digital-employee snapshots (the real workload state)
+    try:
+        emps = api(PORTAL, "GET", "/api/v1/employees", token)
+        for e in (emps.get("employees") or []):
+            docs.append({
+                "@timestamp": now,
+                "audit_type": "employee_snapshot",
+                "name": e.get("name"),
+                "display_name": e.get("displayName"),
+                "phase": e.get("phase"),
+                "model": e.get("model"),
+                "runtime_account": e.get("runtimeAccount"),
+                "wecom": (e.get("channels") or {}).get("wecom", False),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: portal employees: {e}", file=sys.stderr)
+
+    # 4. Portal requests (approval workflow audit trail)
+    try:
+        reqs = api(PORTAL, "GET", "/api/v1/employees/requests?limit=100", token)
+        for r in (reqs.get("requests") or []):
+            docs.append({
+                "@timestamp": r.get("createdAt", now),
+                "audit_type": "employee_request",
+                "request_id": r.get("id"),
+                "employee_name": r.get("employeeName"),
+                "state": r.get("state"),
+                "decided_by": r.get("decidedBy"),
+                "decision_reason": r.get("decisionReason"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: portal requests: {e}", file=sys.stderr)
+
+    indexed = es_bulk(docs)
+    print(f"OK: {indexed}/{len(docs)} audit docs indexed")
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: audit-shipper-creds
+  namespace: logging
+type: Opaque
+stringData:
+  AEP_ADMIN_PASSWORD: ""  # filled at deploy time; see k3s/cicd/README
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-shipper
+  namespace: logging
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector: {kubernetes.io/hostname: rtl-control}
+          containers:
+            - name: shipper
+              image: 172.18.5.251:8081/zhiyuan/python:3.12-slim-bookworm
+              command: ["python3", "/script/ship.py"]
+              env:
+                - {name: AEP_BASE_URL, value: "http://aep-control-service.aep-system.svc.cluster.local:8080"}
+                - {name: PORTAL_BASE_URL, value: "http://de-portal.digital-employees.svc.cluster.local:8090"}
+                - {name: ES_URL, value: "http://elasticsearch.logging.svc.cluster.local:9200"}
+                - {name: AEP_ADMIN_PASSWORD, valueFrom: {secretKeyRef: {name: audit-shipper-creds, key: AEP_ADMIN_PASSWORD}}}
+              volumeMounts:
+                - {name: script, mountPath: /script}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {memory: 64Mi}
+          volumes:
+            - name: script
+              configMap: {name: audit-shipper-script}
