@@ -1,5 +1,6 @@
 # Packages the zhiyuan-stack chart and publishes it to the ghcr OCI
-# registry on v-tags (v0.2.0 -> chart 0.2.0). Source-of-truth stays in this
+# registry on chart-v tags (chart-v0.2.0 -> chart 0.2.0 — the prefix keeps
+# image-building v tags from colliding). Source-of-truth stays in this
 # repo; the OCI artifact is what versioned environments consume:
 #   helm upgrade --install zhiyuan oci://ghcr.io/rongxinzy/zhiyuan-stack \
 #     --version <x.y.z> -f values-<env>.local.yaml -n digital-employees
@@ -7,7 +8,7 @@ name: release-chart
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["chart-v*"]
 
 permissions:
   contents: read
@@ -25,7 +26,7 @@ jobs:
 
       - name: Resolve chart version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF_NAME#chart-v}" >> "$GITHUB_OUTPUT"
 
       - name: Align chart version with the tag
         working-directory: charts/zhiyuan-stack
