@@ -40,6 +40,10 @@ func (p *portal) routes() http.Handler {
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
 	mux.HandleFunc("GET /api/v1/departments", p.auth(p.handleListDepartments))
+	mux.HandleFunc("PATCH /api/v1/departments/{id}", p.auth(p.handleUpdateDepartment))
+	mux.HandleFunc("DELETE /api/v1/departments/{id}", p.auth(p.handleDeleteDepartment))
+	mux.HandleFunc("GET /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
+	mux.HandleFunc("PUT /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
 	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.handleMemorySearch))

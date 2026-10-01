@@ -349,3 +349,221 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"departments": out})
 }
+
+// handleUpdateDepartment renames a department (AEP team name; the OV/WeKnora
+// mappings keep their original IDs). Admin only.
+func (p *portal) handleUpdateDepartment(w http.ResponseWriter, r *http.Request, ident identity) {
+	if !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	deptID := r.PathValue("id")
+	var body struct {
+		Name *string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if body.Name == nil || *body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	// Update the AEP team name
+	adminToken := p.adminToken(r.Context())
+	if adminToken == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin token unavailable"})
+		return
+	}
+	reqBody, _ := json.Marshal(map[string]string{"name": *body.Name})
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPatch,
+		p.cfg.aepBaseURL+"/aep/v1/admin/teams/"+deptID, bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		writeJSON(w, resp.StatusCode, map[string]string{"error": fmt.Sprintf("aep: %s", string(raw))})
+		return
+	}
+	p.logger.Info("department renamed", "id", deptID, "name", *body.Name)
+	writeJSON(w, http.StatusOK, map[string]any{"id": deptID, "name": *body.Name})
+}
+
+// handleDeleteDepartment removes a department's AEP team. OV/WeKnora
+// artifacts are left in place (they contain user data). Admin only.
+func (p *portal) handleDeleteDepartment(w http.ResponseWriter, r *http.Request, ident identity) {
+	if !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	deptID := r.PathValue("id")
+	adminToken := p.adminToken(r.Context())
+	if adminToken == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin token unavailable"})
+		return
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodDelete,
+		p.cfg.aepBaseURL+"/aep/v1/admin/teams/"+deptID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		writeJSON(w, resp.StatusCode, map[string]string{"error": fmt.Sprintf("aep: %s", string(raw))})
+		return
+	}
+	p.logger.Info("department deleted", "id", deptID)
+	writeJSON(w, http.StatusOK, map[string]any{"id": deptID, "deleted": true})
+}
+
+// handleDepartmentMembers lists users in a department and supports adding
+///removing members via PUT (mirrors AEP's user RBAC replace).
+func (p *portal) handleDepartmentMembers(w http.ResponseWriter, r *http.Request, ident identity) {
+	if !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	deptID := r.PathValue("id")
+	adminToken := p.adminToken(r.Context())
+	if adminToken == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin token unavailable"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		// List members: fetch all users, filter by team
+		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet,
+			p.cfg.aepBaseURL+"/aep/v1/admin/users?limit=200", nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-AEP-Protocol-Version", "1.0")
+		resp, err := serviceProbeClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Items []struct {
+				ID          string  `json:"id"`
+				Username    string  `json:"username"`
+				DisplayName string  `json:"displayName"`
+				TeamIDs     []string `json:"teamIds"`
+			} `json:"items"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&result) != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream"})
+			return
+		}
+		members := make([]map[string]any, 0)
+		for _, u := range result.Items {
+			for _, t := range u.TeamIDs {
+				if t == deptID {
+					members = append(members, map[string]any{
+						"userId": u.ID, "username": u.Username, "displayName": u.DisplayName,
+					})
+					break
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"members": members})
+
+	case http.MethodPut:
+		// Replace member list: set team membership for listed users,
+		// remove for others currently in the team.
+		var body struct {
+			UserIDs []string `json:"userIds"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		// Fetch current members to compute adds/removes
+		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet,
+			p.cfg.aepBaseURL+"/aep/v1/admin/users?limit=200", nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-AEP-Protocol-Version", "1.0")
+		resp, err := serviceProbeClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		var result struct {
+			Items []struct {
+				ID      string   `json:"id"`
+				TeamIDs []string `json:"teamIds"`
+				RoleIDs []string `json:"roleIds"`
+			} `json:"items"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&result) != nil {
+			resp.Body.Close()
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream"})
+			return
+		}
+		resp.Body.Close()
+
+		desired := make(map[string]bool)
+		for _, id := range body.UserIDs {
+			desired[id] = true
+		}
+		var added, removed int
+		for _, u := range result.Items {
+			currentlyIn := false
+			for _, t := range u.TeamIDs {
+				if t == deptID {
+					currentlyIn = true
+					break
+				}
+			}
+			should := desired[u.ID]
+			if currentlyIn == should {
+				continue
+			}
+			// Compute new team list
+			newTeams := make([]string, 0)
+			for _, t := range u.TeamIDs {
+				if t != deptID {
+					newTeams = append(newTeams, t)
+				}
+			}
+			if should {
+				newTeams = append(newTeams, deptID)
+			}
+			// Preserve existing roles
+			newRoles := u.RoleIDs
+			if newRoles == nil {
+				newRoles = []string{}
+			}
+			rb, _ := json.Marshal(map[string][]string{"roleIds": newRoles, "teamIds": newTeams})
+			putReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPut,
+				p.cfg.aepBaseURL+"/aep/v1/admin/users/"+u.ID+"/rbac", bytes.NewReader(rb))
+			putReq.Header.Set("Content-Type", "application/json")
+			putReq.Header.Set("Authorization", "Bearer "+adminToken)
+			putReq.Header.Set("X-AEP-Protocol-Version", "1.0")
+			putResp, err := serviceProbeClient.Do(putReq)
+			if err != nil {
+				p.logger.Warn("department member update failed", "userId", u.ID, "error", err)
+				continue
+			}
+			putResp.Body.Close()
+			if should {
+				added++
+			} else {
+				removed++
+			}
+		}
+		p.logger.Info("department members updated", "id", deptID, "added", added, "removed", removed)
+		writeJSON(w, http.StatusOK, map[string]any{"id": deptID, "added": added, "removed": removed})
+	}
+}
