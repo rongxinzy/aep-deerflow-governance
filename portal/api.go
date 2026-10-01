@@ -36,8 +36,10 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /api/v1/employees", p.auth(p.applyForEmployee))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
+	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
+	mux.HandleFunc("GET /api/v1/departments", p.auth(p.handleListDepartments))
 	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
 	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.handleMemorySearch))
@@ -91,6 +93,7 @@ func (p *portal) adminOnly(next func(http.ResponseWriter, *http.Request, identit
 type applyRequest struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
+	Team        string `json:"team"` // department scoping; empty = unscoped
 }
 
 func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -131,7 +134,7 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 
-	spec := p.renderSpec(body.Name, body.DisplayName, ident)
+	spec := p.renderSpec(body.Name, body.DisplayName, ident, body.Team)
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
 		if err != nil {
@@ -159,11 +162,12 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 	})
 }
 
-func (p *portal) renderSpec(name, displayName string, owner identity) dev1alpha1.DigitalEmployee {
+func (p *portal) renderSpec(name, displayName string, owner identity, team string) dev1alpha1.DigitalEmployee {
 	return dev1alpha1.DigitalEmployee{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.cfg.namespace},
 		Spec: dev1alpha1.DigitalEmployeeSpec{
 			DisplayName: displayName,
+			Team:        team,
 			Runtime:     dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Model: p.cfg.model},
 			Memory: &dev1alpha1.MemorySpec{
 				Type: "openviking", ServerURL: p.cfg.memoryServer, AccountID: p.cfg.memoryAccount,
@@ -225,10 +229,16 @@ func (p *portal) listEmployees(w http.ResponseWriter, r *http.Request, ident ide
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Optional team filter: ?team=rd-dept returns only that department's
+	// employees (admin can filter to any team; non-admin is already scoped).
+	teamFilter := r.URL.Query().Get("team")
 	admin := ident.isAdmin(p.cfg)
 	out := make([]map[string]any, 0, len(list.Items))
 	for i := range list.Items {
 		item := &list.Items[i]
+		if teamFilter != "" && item.Spec.Team != teamFilter {
+			continue
+		}
 		if !admin && !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
 			continue
 		}
@@ -250,6 +260,42 @@ func (p *portal) getEmployee(w http.ResponseWriter, r *http.Request, ident ident
 	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
 }
 
+
+// updateEmployee patches an employee's displayName and/or team. Admin or
+// owner only; the operator reconciles spec changes (config update + memory
+// account re-derivation) on the next reconcile pass.
+func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
+	name := r.PathValue("name")
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Team        *string `json:"team"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	var item dev1alpha1.DigitalEmployee
+	if err := p.k8s.Get(r.Context(), client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &item); err != nil {
+		writeJSON(w, statusOf(err), map[string]string{"error": err.Error()})
+		return
+	}
+	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to modify this employee"})
+		return
+	}
+	if body.DisplayName != nil && *body.DisplayName != "" {
+		item.Spec.DisplayName = *body.DisplayName
+	}
+	if body.Team != nil {
+		item.Spec.Team = *body.Team
+	}
+	if err := p.k8s.Update(r.Context(), &item); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	p.logger.Info("employee updated", "name", name, "team", item.Spec.Team, "by", ident.UserID)
+	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
+}
 func (p *portal) deleteEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
 	name := r.PathValue("name")
 	var item dev1alpha1.DigitalEmployee

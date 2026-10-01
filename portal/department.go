@@ -310,3 +310,42 @@ func (p *portal) refreshSessionTeams(sessionToken string, ident identity) {
 	p.sessions.updateIdentity(sessionToken, ident)
 	p.logger.Info("refreshed session teams", "userId", ident.UserID, "teams", ident.Teams)
 }
+
+// handleListDepartments returns all AEP teams (departments) with their
+// provisioning status, for the admin console's team selector.
+func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, ident identity) {
+	adminToken := p.adminToken(r.Context())
+	if adminToken == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin token unavailable"})
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		p.cfg.aepBaseURL+"/aep/v1/admin/teams?limit=100", nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Teams []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"teams"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream response"})
+		return
+	}
+	out := make([]map[string]any, 0, len(result.Teams))
+	for _, team := range result.Teams {
+		out = append(out, map[string]any{"id": team.ID, "name": team.Name})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"departments": out})
+}
