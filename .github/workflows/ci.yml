@@ -32,11 +32,13 @@ jobs:
       - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:
+          version: v2.6.2
           working-directory: operator
           args: --timeout=5m
       - name: golangci-lint (portal)
         uses: golangci/golangci-lint-action@v8
         with:
+          version: v2.6.2
           working-directory: portal
           args: --timeout=5m
       - name: Coverage floors (portal, operator ≥ 80%)
