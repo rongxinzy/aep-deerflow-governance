@@ -93,7 +93,7 @@ func (c *runtimeClient) do(ctx context.Context, method, path, contentType string
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, payload, err
 }

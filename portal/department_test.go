@@ -129,7 +129,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
 			strings.NewReader(`{"id":"rd-dept","name":"研发部"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleCreateDepartment(w, req, adminIdentity())
+		h.handleCreateDepartment(w, req, adminIdentity())
 
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		var status departmentStatus
@@ -137,7 +137,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		assert.Equal(t, "ready", status.Phase)
 		assert.Equal(t, "rd-dept", status.AepTeamID)
 		assert.Equal(t, "tenant-rd-dept", status.OvAccountID)
-		assert.Equal(t, stubs.aep.URL, h.portal.cfg.aepBaseURL)
+		assert.Equal(t, stubs.aep.URL, h.cfg.aepBaseURL)
 		assert.GreaterOrEqual(t, stubs.ovCalls, 1)
 		assert.GreaterOrEqual(t, stubs.wkCalls, 1)
 	})
@@ -148,7 +148,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
 			strings.NewReader(`{"id":"rd","name":"x"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleCreateDepartment(w, req, identity{UserID: "user-x"})
+		h.handleCreateDepartment(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -161,7 +161,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
 			strings.NewReader(`{"id":"rd-dept","name":"研发部"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleCreateDepartment(w, req, adminIdentity())
+		h.handleCreateDepartment(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		var status departmentStatus
 		require.NoError(t, jsonUnmarshal(w.Body.String(), &status))
@@ -174,7 +174,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		h := newDepartmentHarness(t, stubs)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/departments", nil)
 		w := httptest.NewRecorder()
-		h.portal.handleListDepartments(w, req, adminIdentity())
+		h.handleListDepartments(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "研发部")
 	})
@@ -186,7 +186,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 			strings.NewReader(`{"name":"平台研发部"}`))
 		req.SetPathValue("id", "rd-dept")
 		w := httptest.NewRecorder()
-		h.portal.handleUpdateDepartment(w, req, adminIdentity())
+		h.handleUpdateDepartment(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	})
 
@@ -196,7 +196,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/departments/rd-dept", nil)
 		req.SetPathValue("id", "rd-dept")
 		w := httptest.NewRecorder()
-		h.portal.handleDeleteDepartment(w, req, adminIdentity())
+		h.handleDeleteDepartment(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	})
 
@@ -206,7 +206,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/departments/rd-dept/members", nil)
 		req.SetPathValue("id", "rd-dept")
 		w := httptest.NewRecorder()
-		h.portal.handleDepartmentMembers(w, req, adminIdentity())
+		h.handleDepartmentMembers(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "zhangsan")
 	})
@@ -215,7 +215,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		stubs := newDepartmentStubs(t)
 		h := newDepartmentHarness(t, stubs)
 		ident := identity{UserID: "u1", Token: "user-token"}
-		h.portal.enrichTeams(context.Background(), &ident)
+		h.enrichTeams(context.Background(), &ident)
 		assert.Equal(t, []string{"rd-dept"}, ident.Teams)
 	})
 }

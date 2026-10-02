@@ -73,7 +73,7 @@ func TestSummarizeCoversChannelShapes(t *testing.T) {
 func TestAdminOnlyGate(t *testing.T) {
 	h := newAPIHarness(t)
 	reached := false
-	gated := h.portal.adminOnly(func(_ http.ResponseWriter, _ *http.Request, _ identity) { reached = true })
+	gated := h.adminOnly(func(_ http.ResponseWriter, _ *http.Request, _ identity) { reached = true })
 
 	w := httptest.NewRecorder()
 	gated(w, httptest.NewRequest(http.MethodPost, "/x", nil), identity{UserID: "user-x"})
@@ -89,7 +89,7 @@ func TestChatEntryPage(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/chat", nil)
 	req.Host = "portal.example:30190"
 	w := httptest.NewRecorder()
-	h.portal.handleChatEntry(w, req)
+	h.handleChatEntry(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	assert.Contains(t, w.Body.String(), "30195")
@@ -99,11 +99,11 @@ func TestSessionLoginFlow(t *testing.T) {
 	t.Run("bad credentials are rejected", func(t *testing.T) {
 		h := newAPIHarness(t)
 		// No AEP stub: verification fails closed.
-		h.portal.aep = &aepAuthenticator{baseURL: "http://127.0.0.1:1", http: http.DefaultClient}
+		h.aep = &aepAuthenticator{baseURL: "http://127.0.0.1:1", http: http.DefaultClient}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/session",
 			strings.NewReader(`{"username":"u","password":"wrong"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleSessionLogin(w, req)
+		h.handleSessionLogin(w, req)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
@@ -112,7 +112,7 @@ func TestSessionLoginFlow(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/logout", nil)
 		req.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "tok"})
 		w := httptest.NewRecorder()
-		h.portal.handleSessionLogout(w, req)
+		h.handleSessionLogout(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Header().Get("Set-Cookie"), "Max-Age=0")
 	})
@@ -122,7 +122,7 @@ func TestSessionLoginFlow(t *testing.T) {
 		ident := adminIdentity()
 		ident.Token = "tok"
 		w := httptest.NewRecorder()
-		h.portal.handleSessionWhoami(w, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil), ident)
+		h.handleSessionWhoami(w, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil), ident)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "admin-user")
 	})
@@ -138,7 +138,7 @@ func TestDecideRequestApprovesAndCreates(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests/req-9/approve", nil)
 	req.SetPathValue("id", "req-9")
 	w := httptest.NewRecorder()
-	h.portal.decideRequest("approved")(w, req, adminIdentity())
+	h.decideRequest("approved")(w, req, adminIdentity())
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	var item dev1alpha1.DigitalEmployee
 	require.NoError(t, h.k8s.Get(t.Context(), objectKey("parked-helper"), &item))
@@ -149,17 +149,17 @@ func TestKnowledgeUIURLDerivation(t *testing.T) {
 	h := newAPIHarness(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "ops.example:30190"
-	assert.Equal(t, "http://ops.example:30163", h.portal.knowledgeUIURL(req))
+	assert.Equal(t, "http://ops.example:30163", h.knowledgeUIURL(req))
 	req.Host = "ops.example:30196"
-	assert.Equal(t, "http://ops.example:30163", h.portal.knowledgeUIURL(req))
-	h.portal.cfg.knowledgeUIURL = "http://override"
-	assert.Equal(t, "http://override", h.portal.knowledgeUIURL(req))
+	assert.Equal(t, "http://ops.example:30163", h.knowledgeUIURL(req))
+	h.cfg.knowledgeUIURL = "http://override"
+	assert.Equal(t, "http://override", h.knowledgeUIURL(req))
 }
 
 func TestMarkActivityAndHibernating(t *testing.T) {
 	h := newAPIHarness(t)
 	h.dbmock.ExpectExec(`INSERT INTO employee_activity`).WillReturnResult(sqlmock.NewResult(1, 1))
-	h.portal.markActivity("sales-helper")
+	h.markActivity("sales-helper")
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 
 	on := true

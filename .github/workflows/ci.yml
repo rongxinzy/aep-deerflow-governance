@@ -29,10 +29,15 @@ jobs:
           fi
       - name: go vet
         run: (cd operator && go vet ./...) && (cd portal && go vet ./...)
-      - name: golangci-lint
+      - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:
           working-directory: operator
+          args: --timeout=5m
+      - name: golangci-lint (portal)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: portal
           args: --timeout=5m
       - name: Coverage floors (portal, operator ≥ 80%)
         run: |

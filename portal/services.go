@@ -53,7 +53,7 @@ func (p *portal) handleMemoryStatus(w http.ResponseWriter, r *http.Request, _ id
 		if err == nil {
 			request.Header.Set("X-API-Key", rootKey)
 			if response, err := serviceProbeClient.Do(request); err == nil {
-				defer response.Body.Close()
+				defer func() { _ = response.Body.Close() }()
 				var payload struct {
 					Accounts []struct {
 						AccountID string `json:"account_id"`
@@ -122,7 +122,7 @@ func (p *portal) openvikingSessionStats(ctx context.Context, userKey string) map
 	if err != nil {
 		return nil
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	var payload struct {
 		Sessions []struct {
 			ModTime string `json:"mod_time"`
@@ -170,7 +170,7 @@ func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ id
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	var result struct {
 		Status string `json:"status"`
 		Error  *struct {

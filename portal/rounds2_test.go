@@ -63,11 +63,11 @@ func TestSessionStorePersistence(t *testing.T) {
 	t.Run("bad bearer and csrf mismatch paths", func(t *testing.T) {
 		h := newAPIHarness(t)
 		// Bearer failure: the AEP stub refuses.
-		h.portal.aep = &aepAuthenticator{baseURL: "http://127.0.0.1:1", http: http.DefaultClient}
+		h.aep = &aepAuthenticator{baseURL: "http://127.0.0.1:1", http: http.DefaultClient}
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/employees", nil)
 		req.Header.Set("Authorization", "Bearer bad")
 		w := httptest.NewRecorder()
-		h.portal.auth(func(http.ResponseWriter, *http.Request, identity) {})(w, req)
+		h.auth(func(http.ResponseWriter, *http.Request, identity) {})(w, req)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 
 		// CSRF mismatch on a cookie-authenticated write.
@@ -76,7 +76,7 @@ func TestSessionStorePersistence(t *testing.T) {
 		post.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: token})
 		post.Header.Set("X-CSRF-Token", "wrong")
 		w2 := httptest.NewRecorder()
-		h.portal.auth(func(http.ResponseWriter, *http.Request, identity) {})(w2, post)
+		h.auth(func(http.ResponseWriter, *http.Request, identity) {})(w2, post)
 		assert.Equal(t, http.StatusForbidden, w2.Code)
 	})
 }
@@ -89,7 +89,7 @@ func TestDepartmentMembersReplace(t *testing.T) {
 			strings.NewReader(`{"userIds":["u1","u2"]}`))
 		req.SetPathValue("id", "rd-dept")
 		w := httptest.NewRecorder()
-		h.portal.handleDepartmentMembers(w, req, adminIdentity())
+		h.handleDepartmentMembers(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Body.String(), `"added"`)
 	})
@@ -100,7 +100,7 @@ func TestDepartmentMembersReplace(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/departments/rd/members", strings.NewReader(`{bad`))
 		req.SetPathValue("id", "rd")
 		w := httptest.NewRecorder()
-		h.portal.handleDepartmentMembers(w, req, identity{UserID: "u"})
+		h.handleDepartmentMembers(w, req, identity{UserID: "u"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 }
@@ -110,7 +110,7 @@ func TestRefreshSessionTeams(t *testing.T) {
 	h := newDepartmentHarness(t, stubs)
 	ident := adminIdentity()
 	ident.Token = "tok"
-	h.portal.refreshSessionTeams("session-token", ident)
+	h.refreshSessionTeams("session-token", ident)
 	// The stub's /user/me returns teamIds [rd-dept]; the refreshed identity
 	// keeps them even though updateIdentity is a no-op without a live store.
 	assert.Equal(t, "admin-user", ident.UserID)
@@ -121,7 +121,7 @@ func TestKnowledgeListBases(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), identity{UserID: "u"})
+		h.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), identity{UserID: "u"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -129,7 +129,7 @@ func TestKnowledgeListBases(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), adminIdentity())
+		h.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Body.String(), "企业知识库")
 	})
@@ -138,9 +138,9 @@ func TestKnowledgeListBases(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
 		// Remove the WeKnora admin credentials from the platform secret.
-		h.portal.cfg.credentialsSecret = "missing-secret"
+		h.cfg.credentialsSecret = "missing-secret"
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), adminIdentity())
+		h.handleKnowledgeListBases(w, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/bases", nil), adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), `"knowledgeBases":[]`)
 	})
@@ -153,7 +153,7 @@ func TestChatWakeAndProxyErrors(t *testing.T) {
 		req.SetPathValue("name", "ghost")
 		req.SetPathValue("rest", "threads")
 		w := httptest.NewRecorder()
-		h.portal.handleChat(w, req, adminIdentity())
+		h.handleChat(w, req, adminIdentity())
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
@@ -165,7 +165,7 @@ func TestChatWakeAndProxyErrors(t *testing.T) {
 		req.SetPathValue("name", "broken-helper")
 		req.SetPathValue("rest", "threads")
 		w := httptest.NewRecorder()
-		h.portal.handleChat(w, req, adminIdentity())
+		h.handleChat(w, req, adminIdentity())
 		assert.Equal(t, http.StatusConflict, w.Code)
 	})
 
@@ -174,16 +174,16 @@ func TestChatWakeAndProxyErrors(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
 			strings.NewReader(`{"name":"Bad Name"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleSessionEmployee(w, req, adminIdentity())
+		h.handleSessionEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
 	t.Run("hibernate wake times out when nothing wakes", func(t *testing.T) {
 		h := newAPIHarness(t, scaledZeroDeployment("sales-helper"))
-		h.portal.cfg.wakeTimeout = 10 * time.Millisecond
+		h.cfg.wakeTimeout = 10 * time.Millisecond
 		// Deployment exists but never becomes ready; wake row insert is
 		// best-effort with a nil-safe db mock.
-		code, msg := h.portal.wakeRuntime(context.Background(), "sales-helper")
+		code, msg := h.wakeRuntime(context.Background(), "sales-helper")
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 		assert.Contains(t, msg, "waking up")
 	})
@@ -204,7 +204,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/employees/e", strings.NewReader("{bad"))
 		req.SetPathValue("name", "e")
 		w := httptest.NewRecorder()
-		h.portal.updateEmployee(w, req, adminIdentity())
+		h.updateEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
@@ -213,7 +213,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/employees/e", strings.NewReader(`{"displayName":"x"}`))
 		req.SetPathValue("name", "e")
 		w := httptest.NewRecorder()
-		h.portal.updateEmployee(w, req, identity{UserID: "user-x"})
+		h.updateEmployee(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -222,7 +222,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/employees/e", nil)
 		req.SetPathValue("name", "e")
 		w := httptest.NewRecorder()
-		h.portal.deleteEmployee(w, req, identity{UserID: "user-x"})
+		h.deleteEmployee(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -233,7 +233,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/requests/req-x/approve", nil)
 		req.SetPathValue("id", "req-x")
 		w := httptest.NewRecorder()
-		h.portal.decideRequest("approved")(w, req, adminIdentity())
+		h.decideRequest("approved")(w, req, adminIdentity())
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
@@ -244,7 +244,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		})
 		h := newDepartmentHarness(t, stubs)
 		w := httptest.NewRecorder()
-		h.portal.handleListDepartments(w, httptest.NewRequest(http.MethodGet, "/api/v1/departments", nil), adminIdentity())
+		h.handleListDepartments(w, httptest.NewRequest(http.MethodGet, "/api/v1/departments", nil), adminIdentity())
 		assert.Equal(t, http.StatusBadGateway, w.Code)
 	})
 
@@ -254,7 +254,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/departments/rd", strings.NewReader(`{}`))
 		req.SetPathValue("id", "rd")
 		w := httptest.NewRecorder()
-		h.portal.handleUpdateDepartment(w, req, adminIdentity())
+		h.handleUpdateDepartment(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
@@ -267,7 +267,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/departments/rd", nil)
 		req.SetPathValue("id", "rd")
 		w := httptest.NewRecorder()
-		h.portal.handleDeleteDepartment(w, req, adminIdentity())
+		h.handleDeleteDepartment(w, req, adminIdentity())
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -280,7 +280,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/departments/rd/members", nil)
 		req.SetPathValue("id", "rd")
 		w := httptest.NewRecorder()
-		h.portal.handleDepartmentMembers(w, req, adminIdentity())
+		h.handleDepartmentMembers(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadGateway, w.Code)
 	})
 
@@ -289,13 +289,13 @@ func TestHandlerErrorBranches(t *testing.T) {
 		h := newServicesHarness(t, stub)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/", nil)
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeProxy(w, req, identity{UserID: "u"})
+		h.handleKnowledgeProxy(w, req, identity{UserID: "u"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 
 		req2 := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/", nil)
 		req2.SetPathValue("rest", "")
 		w2 := httptest.NewRecorder()
-		h.portal.handleKnowledgeProxy(w2, req2, adminIdentity())
+		h.handleKnowledgeProxy(w2, req2, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w2.Code)
 	})
 
@@ -308,7 +308,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/memory/search",
 			strings.NewReader(`{"employee":"sales-helper","query":"q"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleMemorySearch(w, req, adminIdentity())
+		h.handleMemorySearch(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadGateway, w.Code)
 		assert.Contains(t, w.Body.String(), "bad key")
 	})
@@ -319,7 +319,7 @@ func TestHandlerErrorBranches(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/memory/search",
 			strings.NewReader(`{"employee":"ghost","query":"q"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleMemorySearch(w, req, adminIdentity())
+		h.handleMemorySearch(w, req, adminIdentity())
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
@@ -332,7 +332,7 @@ func TestDepartmentMembersFullReplace(t *testing.T) {
 			strings.NewReader(`{"userIds":["u2"]}`))
 		req.SetPathValue("id", "rd-dept")
 		w := httptest.NewRecorder()
-		h.portal.handleDepartmentMembers(w, req, adminIdentity())
+		h.handleDepartmentMembers(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		body := w.Body.String()
 		assert.Contains(t, body, `"removed":1`)
@@ -388,7 +388,7 @@ func TestSessionEmployeeSelection(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
 			strings.NewReader(`{"name":"sales-helper"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleSessionEmployee(w, req, adminIdentity())
+		h.handleSessionEmployee(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=sales-helper")
 	})
@@ -398,7 +398,7 @@ func TestSessionEmployeeSelection(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
 			strings.NewReader(`{"name":"sales-helper"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleSessionEmployee(w, req, identity{UserID: "user-x"})
+		h.handleSessionEmployee(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 }
@@ -406,20 +406,20 @@ func TestSessionEmployeeSelection(t *testing.T) {
 func TestAuthenticateBearerSuccess(t *testing.T) {
 	stub := newDepartmentStubs(t) // carries /aep/v1/user/me
 	h := newAPIHarness(t)
-	h.portal.aep = &aepAuthenticator{baseURL: stub.aep.URL, http: stub.aep.Client()}
+	h.aep = &aepAuthenticator{baseURL: stub.aep.URL, http: stub.aep.Client()}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/employees", nil)
 	req.Header.Set("Authorization", "Bearer good-token")
 	w := httptest.NewRecorder()
 	reached := false
-	h.portal.auth(func(_ http.ResponseWriter, _ *http.Request, ident identity) { reached = ident.UserID == "admin-user" })(w, req)
+	h.auth(func(_ http.ResponseWriter, _ *http.Request, ident identity) { reached = ident.UserID == "admin-user" })(w, req)
 	assert.True(t, reached)
 }
 
 func TestAuthenticateRefreshesStaleTeams(t *testing.T) {
 	stub := newDepartmentStubs(t)
 	h := newAPIHarness(t)
-	h.portal.aep = &aepAuthenticator{baseURL: stub.aep.URL, http: stub.aep.Client()}
-	h.portal.cfg.aepBaseURL = stub.aep.URL
+	h.aep = &aepAuthenticator{baseURL: stub.aep.URL, http: stub.aep.Client()}
+	h.cfg.aepBaseURL = stub.aep.URL
 	ident := adminIdentity()
 	ident.Token = "good-token"
 	ident.TeamsFetchedAt = time.Time{} // stale: triggers a synchronous refresh
@@ -429,7 +429,7 @@ func TestAuthenticateRefreshesStaleTeams(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: token})
 	w := httptest.NewRecorder()
 	sawFreshTeams := false
-	h.portal.auth(func(_ http.ResponseWriter, _ *http.Request, id identity) {
+	h.auth(func(_ http.ResponseWriter, _ *http.Request, id identity) {
 		sawFreshTeams = len(id.Teams) == 1 && id.Teams[0] == "rd-dept"
 	})(w, req)
 	assert.True(t, sawFreshTeams, "stale team memberships must refresh before the handler runs")
@@ -443,9 +443,9 @@ func TestAdminTokenCache(t *testing.T) {
 	// and the cached path via the public entry point.
 	adminTokenCache.token = ""
 	adminTokenCache.expires = time.Time{}
-	first := h.portal.adminToken(context.Background())
+	first := h.adminToken(context.Background())
 	require.NotEmpty(t, first)
-	second := h.portal.adminToken(context.Background())
+	second := h.adminToken(context.Background())
 	assert.Equal(t, first, second, "second call must hit the in-process cache")
 }
 
@@ -457,7 +457,7 @@ func TestMemoryStatusDegraded(t *testing.T) {
 		})
 		h := newServicesHarness(t, stub)
 		w := httptest.NewRecorder()
-		h.portal.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
+		h.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), `"healthy":false`)
 		assert.Contains(t, w.Body.String(), `"accounts":[]`)
@@ -466,9 +466,9 @@ func TestMemoryStatusDegraded(t *testing.T) {
 	t.Run("missing platform secret degrades to empty accounts", func(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
-		h.portal.cfg.credentialsSecret = "no-such-secret"
+		h.cfg.credentialsSecret = "no-such-secret"
 		w := httptest.NewRecorder()
-		h.portal.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
+		h.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), `"accounts":[]`)
 	})
@@ -476,14 +476,14 @@ func TestMemoryStatusDegraded(t *testing.T) {
 
 func TestRuntimeBaseURLAndEntryTemplate(t *testing.T) {
 	h := newAPIHarness(t)
-	assert.Equal(t, "http://de-sales-helper.digital-employees.svc.cluster.local:8001", h.portal.runtimeBaseURL("sales-helper"))
-	h.portal.chatBaseOverride = "http://upstream.test"
-	assert.Equal(t, "http://upstream.test", h.portal.runtimeBaseURL("any"))
+	assert.Equal(t, "http://de-sales-helper.digital-employees.svc.cluster.local:8001", h.runtimeBaseURL("sales-helper"))
+	h.chatBaseOverride = "http://upstream.test"
+	assert.Equal(t, "http://upstream.test", h.runtimeBaseURL("any"))
 
 	// The /chat entry page derives the chat URL from the request host.
 	req := httptest.NewRequest(http.MethodGet, "/chat", nil)
 	req.Host = "portal.example:30190"
 	w := httptest.NewRecorder()
-	h.portal.handleChatEntry(w, req)
+	h.handleChatEntry(w, req)
 	assert.Contains(t, w.Body.String(), "http://portal.example:30195/workspace")
 }

@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"context"
 	"net/http"
 	"time"
 )
@@ -15,19 +15,19 @@ import (
 // (knowledge isolation). Admin-only.
 
 type departmentRequest struct {
-	ID       string `json:"id"`       // e.g. "rd-dept" (URL-safe)
-	Name     string `json:"name"`     // e.g. "研发部"
+	ID       string   `json:"id"`       // e.g. "rd-dept" (URL-safe)
+	Name     string   `json:"name"`     // e.g. "研发部"
 	AdminIDs []string `json:"adminIds"` // AEP user IDs who manage this department
 }
 
 type departmentStatus struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	AepTeamID    string `json:"aepTeamId"`
-	OvAccountID  string `json:"ovAccountId"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	AepTeamID     string `json:"aepTeamId"`
+	OvAccountID   string `json:"ovAccountId"`
 	WeKnoraTenant string `json:"weknoraTenant,omitempty"`
-	Phase        string `json:"phase"` // provisioning | ready | partial
-	Message      string `json:"message,omitempty"`
+	Phase         string `json:"phase"` // provisioning | ready | partial
+	Message       string `json:"message,omitempty"`
 }
 
 func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -101,7 +101,7 @@ func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("aep returned %d: %s", resp.StatusCode, string(raw))
@@ -122,7 +122,7 @@ func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (str
 		return "", fmt.Errorf("root key not configured")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"account_id":   "tenant-" + accountID,
+		"account_id":    "tenant-" + accountID,
 		"admin_user_id": "portal",
 	})
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
@@ -136,7 +136,7 @@ func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (str
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("openviking returned %d: %s", resp.StatusCode, string(raw))
@@ -160,7 +160,7 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 	if err != nil {
 		return "", fmt.Errorf("weknora login: %w", err)
 	}
-	defer loginResp.Body.Close()
+	defer func() { _ = loginResp.Body.Close() }()
 	var loginResult struct {
 		Token string `json:"token"`
 	}
@@ -182,7 +182,7 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("weknora returned %d: %s", resp.StatusCode, string(raw))
@@ -233,7 +233,7 @@ func (p *portal) adminToken(ctx context.Context) string {
 		p.logger.Error("department: AEP admin login failed", "error", err)
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var result struct {
 		AccessToken string `json:"accessToken"`
 	}
@@ -276,7 +276,7 @@ func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
 		p.logger.Warn("enrichTeams: /user/me unreachable", "error", err)
 		return // keep cached teams; next request retries
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		p.logger.Warn("enrichTeams: /user/me returned non-OK", "status", resp.StatusCode)
 		return
@@ -332,7 +332,7 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var result struct {
 		Teams []struct {
 			ID   string `json:"id"`
@@ -386,7 +386,7 @@ func (p *portal) handleUpdateDepartment(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		writeJSON(w, resp.StatusCode, map[string]string{"error": fmt.Sprintf("aep: %s", string(raw))})
@@ -418,7 +418,7 @@ func (p *portal) handleDeleteDepartment(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		writeJSON(w, resp.StatusCode, map[string]string{"error": fmt.Sprintf("aep: %s", string(raw))})
@@ -429,7 +429,7 @@ func (p *portal) handleDeleteDepartment(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleDepartmentMembers lists users in a department and supports adding
-///removing members via PUT (mirrors AEP's user RBAC replace).
+// /removing members via PUT (mirrors AEP's user RBAC replace).
 func (p *portal) handleDepartmentMembers(w http.ResponseWriter, r *http.Request, ident identity) {
 	if !ident.isAdmin(p.cfg) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
@@ -453,12 +453,12 @@ func (p *portal) handleDepartmentMembers(w http.ResponseWriter, r *http.Request,
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		var result struct {
 			Items []struct {
-				ID          string  `json:"id"`
-				Username    string  `json:"username"`
-				DisplayName string  `json:"displayName"`
+				ID          string   `json:"id"`
+				Username    string   `json:"username"`
+				DisplayName string   `json:"displayName"`
 				TeamIDs     []string `json:"teamIds"`
 			} `json:"items"`
 		}
@@ -507,11 +507,11 @@ func (p *portal) handleDepartmentMembers(w http.ResponseWriter, r *http.Request,
 			} `json:"items"`
 		}
 		if json.NewDecoder(resp.Body).Decode(&result) != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream"})
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		desired := make(map[string]bool)
 		for _, id := range body.UserIDs {
@@ -556,7 +556,7 @@ func (p *portal) handleDepartmentMembers(w http.ResponseWriter, r *http.Request,
 				p.logger.Warn("department member update failed", "userId", u.ID, "error", err)
 				continue
 			}
-			putResp.Body.Close()
+			_ = putResp.Body.Close()
 			if should {
 				added++
 			} else {

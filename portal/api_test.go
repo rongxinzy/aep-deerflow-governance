@@ -54,15 +54,6 @@ func newAPIHarness(t *testing.T, objects ...runtime.Object) *apiTestPortal {
 	return &apiTestPortal{portal: p, dbmock: mock}
 }
 
-func (h *apiTestPortal) serve(method, target, body string, ident identity) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	w := httptest.NewRecorder()
-	// Route through the real mux so path values and middleware are exercised.
-	h.portal.routes().ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), struct{}{}, nil)))
-	_ = ident
-	return w
-}
-
 func readyCR(name, owner string) *dev1alpha1.DigitalEmployee {
 	return &dev1alpha1.DigitalEmployee{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "digital-employees"},
@@ -86,7 +77,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/employees/sales-helper", nil)
 		req.SetPathValue("name", "sales-helper")
 		w := httptest.NewRecorder()
-		h.portal.getEmployee(w, req, adminIdentity())
+		h.getEmployee(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		var out struct {
 			Employee map[string]any `json:"employee"`
@@ -100,11 +91,11 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/employees/sales-helper", nil)
 		req.SetPathValue("name", "sales-helper")
 		w := httptest.NewRecorder()
-		h.portal.getEmployee(w, req, adminIdentity())
+		h.getEmployee(w, req, adminIdentity())
 		// admin bypasses; use a plain identity instead
 		plain := identity{UserID: "user-x"}
 		w = httptest.NewRecorder()
-		h.portal.getEmployee(w, req, plain)
+		h.getEmployee(w, req, plain)
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 
@@ -114,7 +105,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 			strings.NewReader(`{"displayName":"销售专员","team":"rd-dept"}`))
 		req.SetPathValue("name", "sales-helper")
 		w := httptest.NewRecorder()
-		h.portal.updateEmployee(w, req, adminIdentity())
+		h.updateEmployee(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		var item dev1alpha1.DigitalEmployee
 		require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "sales-helper"}, &item))
@@ -127,7 +118,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/employees/old-helper", nil)
 		req.SetPathValue("name", "old-helper")
 		w := httptest.NewRecorder()
-		h.portal.deleteEmployee(w, req, adminIdentity())
+		h.deleteEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		var item dev1alpha1.DigitalEmployee
 		err := h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "old-helper"}, &item)
@@ -140,7 +131,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
 			strings.NewReader(`{"name":"new-helper","displayName":"新员工","team":"rd-dept"}`))
 		w := httptest.NewRecorder()
-		h.portal.applyForEmployee(w, req, adminIdentity())
+		h.applyForEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 		var item dev1alpha1.DigitalEmployee
 		require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "new-helper"}, &item))
@@ -152,7 +143,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
 			strings.NewReader(`{"name":"Bad Name!"}`))
 		w := httptest.NewRecorder()
-		h.portal.applyForEmployee(w, req, adminIdentity())
+		h.applyForEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
@@ -161,20 +152,20 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
 			strings.NewReader(`{"name":"dup-helper"}`))
 		w := httptest.NewRecorder()
-		h.portal.applyForEmployee(w, req, adminIdentity())
+		h.applyForEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusConflict, w.Code)
 	})
 
 	t.Run("apply parks a request in approval mode", func(t *testing.T) {
 		h := newAPIHarness(t)
-		h.portal.cfg.policyMode = "approval"
+		h.cfg.policyMode = "approval"
 		h.dbmock.ExpectQuery(`SELECT id FROM requests WHERE employee_name=`).
 			WithArgs("parked-helper").WillReturnError(errNoRowsForMock)
 		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
 			strings.NewReader(`{"name":"parked-helper"}`))
 		w := httptest.NewRecorder()
-		h.portal.applyForEmployee(w, req, identity{UserID: "user-x", Kind: "human"})
+		h.applyForEmployee(w, req, identity{UserID: "user-x", Kind: "human"})
 		assert.Equal(t, http.StatusAccepted, w.Code)
 	})
 
@@ -187,7 +178,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/employees?team=rd-dept", nil)
 		w := httptest.NewRecorder()
 		member := identity{UserID: "user-x", Teams: []string{"rd-dept"}}
-		h.portal.listEmployees(w, req, member)
+		h.listEmployees(w, req, member)
 		assert.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
 		assert.Contains(t, body, "in-helper")
@@ -203,7 +194,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 			strings.NewReader(`{"reason":"容量不足"}`))
 		req.SetPathValue("id", "req-1")
 		w := httptest.NewRecorder()
-		h.portal.decideRequest("rejected")(w, req, adminIdentity())
+		h.decideRequest("rejected")(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
@@ -214,7 +205,7 @@ func TestAPICRUDHandlers(t *testing.T) {
 		h.dbmock.ExpectQuery(`SELECT id, employee_name`).WithArgs("pending").WillReturnRows(rows)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/requests", nil)
 		w := httptest.NewRecorder()
-		h.portal.listRequests(w, req, identity{UserID: "user-x"})
+		h.listRequests(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "helper")
 	})
@@ -233,9 +224,6 @@ func schemeAddK8s(scheme *runtime.Scheme) error {
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func jsonUnmarshal(raw string, out any) error { return json.Unmarshal([]byte(raw), out) }
-
-// aepBaseURLRefForTest exists solely to keep the stub URL assertion honest.
-func (p *portal) aepBaseURLRefForTest() *string { return &p.cfg.aepBaseURL }
 
 func objectKey(name string) client.ObjectKey {
 	return client.ObjectKey{Namespace: "digital-employees", Name: name}

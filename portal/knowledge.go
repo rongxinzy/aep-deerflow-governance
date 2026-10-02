@@ -7,7 +7,6 @@ import (
 	"net/http"
 )
 
-
 // handleKnowledgeProxy forwards WeKnora knowledge-base API requests with
 // server-side authentication. The browser never sees WeKnora credentials.
 // Routes: /api/v1/knowledge/{path...} → WeKnora /api/v1/{path...}
@@ -37,7 +36,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "weknora unreachable: " + err.Error()})
 		return
 	}
-	defer loginResp.Body.Close()
+	defer func() { _ = loginResp.Body.Close() }()
 	var login struct {
 		Token string `json:"token"`
 	}
@@ -64,7 +63,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "weknora forward failed: " + err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Copy response
 	for k, v := range map[string]string{
@@ -76,7 +75,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleKnowledgeStatusEnhanced returns per-tenant knowledge base inventory
@@ -101,11 +100,11 @@ func (p *portal) handleKnowledgeListBases(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]any{"knowledgeBases": []any{}, "error": err.Error()})
 		return
 	}
-	defer loginResp.Body.Close()
+	defer func() { _ = loginResp.Body.Close() }()
 	var login struct {
 		Token string `json:"token"`
 	}
-	json.NewDecoder(loginResp.Body).Decode(&login)
+	_ = json.NewDecoder(loginResp.Body).Decode(&login)
 	if login.Token == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"knowledgeBases": []any{}, "error": "auth failed"})
 		return
@@ -120,9 +119,9 @@ func (p *portal) handleKnowledgeListBases(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]any{"knowledgeBases": []any{}, "error": err.Error()})
 		return
 	}
-	defer listResp.Body.Close()
+	defer func() { _ = listResp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(listResp.Body, 1<<20))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(listResp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body)
 }

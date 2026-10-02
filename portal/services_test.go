@@ -29,14 +29,14 @@ func newServicesStubs(t *testing.T) *servicesStub {
 	t.Helper()
 	stub := &servicesStub{}
 	stub.ov = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/health":
+		switch r.URL.Path {
+		case "/health":
 			w.WriteHeader(http.StatusOK)
-		case r.URL.Path == "/api/v1/admin/accounts":
+		case "/api/v1/admin/accounts":
 			_, _ = w.Write([]byte(`{"result":[{"account_id":"zhiyuan","user_count":3,"created_at":"2026-09-01"}]}`))
-		case r.URL.Path == "/api/v1/sessions":
+		case "/api/v1/sessions":
 			_, _ = w.Write([]byte(`{"result":[{"mod_time":"2026-09-28T10:00:00"},{"mod_time":"2026-09-29T11:00:00"}]}`))
-		case r.URL.Path == "/api/v1/search/find":
+		case "/api/v1/search/find":
 			_, _ = w.Write([]byte(`{"status":"ok","result":{"memories":[{"uri":"mem://a","score":0.9,"abstract":"alpha"}]}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -115,7 +115,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		h.dbmock.ExpectQuery(`SELECT count`).WillReturnRows(rows2)
 
 		w := httptest.NewRecorder()
-		h.portal.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
+		h.handleMemoryStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/memory/status", nil), adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
 		assert.Contains(t, body, `"healthy":true`)
@@ -128,7 +128,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/memory/search",
 			strings.NewReader(`{"employee":"sales-helper","query":"报价"}`))
 		w := httptest.NewRecorder()
-		h.portal.handleMemorySearch(w, req, adminIdentity())
+		h.handleMemorySearch(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "mem://a")
 	})
@@ -138,7 +138,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		h := newServicesHarness(t, stub)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/memory/search", strings.NewReader(`{}`))
 		w := httptest.NewRecorder()
-		h.portal.handleMemorySearch(w, req, adminIdentity())
+		h.handleMemorySearch(w, req, adminIdentity())
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
@@ -148,7 +148,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/status", nil)
 		req.Host = "console.example:30196"
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeStatus(w, req, adminIdentity())
+		h.handleKnowledgeStatus(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		body := w.Body.String()
 		assert.Contains(t, body, `"healthy":true`)
@@ -173,7 +173,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		h.dbmock.ExpectQuery(`SELECT COALESCE\(model_name`).WillReturnRows(rows2)
 
 		w := httptest.NewRecorder()
-		h.portal.handleUsageStats(w, httptest.NewRequest(http.MethodGet, "/api/v1/usage/stats", nil), adminIdentity())
+		h.handleUsageStats(w, httptest.NewRequest(http.MethodGet, "/api/v1/usage/stats", nil), adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Body.String(), "byDepartment")
 	})
@@ -182,7 +182,7 @@ func TestServiceStatusHandlers(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
 		w := httptest.NewRecorder()
-		h.portal.handleUsageStats(w, httptest.NewRequest(http.MethodGet, "/api/v1/usage/stats", nil), identity{UserID: "user-x"})
+		h.handleUsageStats(w, httptest.NewRequest(http.MethodGet, "/api/v1/usage/stats", nil), identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 }
@@ -228,7 +228,7 @@ func TestKnowledgeProxy(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases", nil)
 		req.SetPathValue("rest", "knowledge-bases")
 		w := httptest.NewRecorder()
-		h.portal.handleKnowledgeProxy(w, req, adminIdentity())
+		h.handleKnowledgeProxy(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.True(t, sawLogin, "proxy must authenticate server-side first")
 		assert.Contains(t, seenPath, "knowledge-bases")

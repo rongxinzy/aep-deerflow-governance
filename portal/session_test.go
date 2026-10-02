@@ -94,7 +94,7 @@ func postJSON(t *testing.T, client *http.Client, url, body string) (*http.Respon
 		t.Fatal(err)
 	}
 	payload, _ := io.ReadAll(response.Body)
-	response.Body.Close()
+	_ = response.Body.Close()
 	return response, string(payload)
 }
 
@@ -156,7 +156,7 @@ func TestSessionPasswordLoginSetsCookies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response2.Body.Close()
+	defer func() { _ = response2.Body.Close() }()
 	if response2.StatusCode != http.StatusOK {
 		t.Fatalf("whoami status = %d", response2.StatusCode)
 	}
@@ -205,7 +205,7 @@ func TestSessionCSRFEnforcedOnMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("GET without csrf: status=%d", response.StatusCode)
 	}
@@ -216,7 +216,7 @@ func TestSessionCSRFEnforcedOnMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("POST without csrf must 403, got %d", response.StatusCode)
 	}
@@ -230,7 +230,7 @@ func TestSessionCSRFEnforcedOnMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, _ := io.ReadAll(response.Body)
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.StatusCode, payload)
 	}
@@ -261,7 +261,7 @@ func TestSessionEmployeeSelectionEnforcesOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-owner must get 403, got %d", response.StatusCode)
 	}
@@ -292,7 +292,7 @@ func TestSessionLogoutDropsSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("logout status = %d", response.StatusCode)
 	}
@@ -305,7 +305,7 @@ func TestSessionLogoutDropsSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("replayed session must 401, got %d", response.StatusCode)
 	}
