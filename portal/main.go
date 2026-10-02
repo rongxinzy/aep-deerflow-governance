@@ -33,8 +33,8 @@ type config struct {
 	memoryServer      string
 	memoryAccount     string
 	knowledgeMCPURL   string
-	knowledgeAPIURL  string
-	knowledgeUIURL   string // browser-facing WeKnora URL override; default derives per request
+	knowledgeAPIURL   string
+	knowledgeUIURL    string // browser-facing WeKnora URL override; default derives per request
 	credentialsSecret string
 	a2aImage          string
 

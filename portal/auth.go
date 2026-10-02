@@ -11,13 +11,13 @@ import (
 
 // identity is the authenticated caller resolved from an AEP access token.
 type identity struct {
-	Token       string   `json:"-"`
-	UserID      string   `json:"id"`
-	Username    string   `json:"-"`
-	DisplayName string   `json:"displayName"`
-	Kind        string   `json:"kind"`
-	Roles       []string `json:"roles"`
-	Teams       []string `json:"-"` // AEP team ids; used for department scoping
+	Token          string    `json:"-"`
+	UserID         string    `json:"id"`
+	Username       string    `json:"-"`
+	DisplayName    string    `json:"displayName"`
+	Kind           string    `json:"kind"`
+	Roles          []string  `json:"roles"`
+	Teams          []string  `json:"-"` // AEP team ids; used for department scoping
 	TeamsFetchedAt time.Time `json:"-"` // when Teams was last refreshed
 }
 
@@ -90,7 +90,7 @@ func (a *aepAuthenticator) verify(ctx context.Context, token string) (identity, 
 	if err != nil {
 		return identity{}, fmt.Errorf("aep verify: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return identity{}, fmt.Errorf("aep verify returned %d", response.StatusCode)
 	}

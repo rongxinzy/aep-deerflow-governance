@@ -267,7 +267,6 @@ func (p *portal) getEmployee(w http.ResponseWriter, r *http.Request, ident ident
 	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
 }
 
-
 // updateEmployee patches an employee's displayName and/or team. Admin or
 // owner only; the operator reconciles spec changes (config update + memory
 // account re-derivation) on the next reconcile pass.
@@ -334,7 +333,7 @@ func (p *portal) listRequests(w http.ResponseWriter, r *http.Request, ident iden
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, name, ownerID, ownerName, displayName, requestState, reason string
@@ -416,7 +415,7 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 		"name": item.Name, "displayName": item.Spec.DisplayName, "phase": item.Status.Phase,
 		"runtime": item.Spec.Runtime.Type, "model": item.Spec.Runtime.Model,
 		"owner": item.Spec.OwnerName, "ownerId": item.Spec.Owner,
-		"team": item.Spec.Team,
+		"team":       item.Spec.Team,
 		"memoryUser": item.Status.MemoryUser, "createdAt": item.CreationTimestamp,
 		"channels": channels,
 	}
@@ -454,13 +453,13 @@ func (p *portal) handleUsageStats(w http.ResponseWriter, r *http.Request, ident 
 
 	// Total conversations and messages (all time)
 	var totalThreads, totalRuns int
-	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta`).Scan(&totalThreads)
-	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&totalRuns)
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta`).Scan(&totalThreads)
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs`).Scan(&totalRuns)
 
 	// Today's activity
 	var todayThreads, todayRuns int
-	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta WHERE created_at >= CURRENT_DATE`).Scan(&todayThreads)
-	p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE created_at >= CURRENT_DATE`).Scan(&todayRuns)
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM threads_meta WHERE created_at >= CURRENT_DATE`).Scan(&todayThreads)
+	_ = p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE created_at >= CURRENT_DATE`).Scan(&todayRuns)
 
 	// Active employees
 	var activeEmployees, readyEmployees int
@@ -499,7 +498,7 @@ func (p *portal) handleUsageStats(w http.ResponseWriter, r *http.Request, ident 
 		GROUP BY COALESCE(tenant_id, '(default)')
 	`)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var dept string
 			var cnt int
@@ -518,7 +517,7 @@ func (p *portal) handleUsageStats(w http.ResponseWriter, r *http.Request, ident 
 		GROUP BY COALESCE(model_name, '(unknown)')
 	`)
 	if err2 == nil {
-		defer rows2.Close()
+		defer func() { _ = rows2.Close() }()
 		for rows2.Next() {
 			var model string
 			var cnt int
@@ -530,14 +529,14 @@ func (p *portal) handleUsageStats(w http.ResponseWriter, r *http.Request, ident 
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totals": map[string]int{
-			"conversations": totalThreads,
-			"runs":          totalRuns,
+			"conversations":      totalThreads,
+			"runs":               totalRuns,
 			"todayConversations": todayThreads,
 			"todayRuns":          todayRuns,
 			"employees":          activeEmployees,
 			"readyEmployees":     readyEmployees,
 		},
-		"byDepartment": deptStats,
+		"byDepartment":          deptStats,
 		"threadsByDepartment7d": threadsByDept,
 		"modelCalls7d":          modelCalls,
 	})

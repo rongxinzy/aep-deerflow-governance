@@ -103,10 +103,7 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 		// ${prefix}/api/...; strip the redundant api/ so the runtime sees
 		// its native path. LangGraph SDK paths (${prefix}/threads/...)
 		// carry no api/ segment and pass through untouched.
-		stripped := rest
-		if strings.HasPrefix(stripped, "api/") {
-			stripped = stripped[len("api/"):]
-		}
+		stripped := strings.TrimPrefix(rest, "api/")
 		req.URL.Path = "/api/" + stripped
 		req.Header.Set("X-DeerFlow-Internal-Token", token)
 		req.Header.Set(ownerHeaderName, ident.UserID)

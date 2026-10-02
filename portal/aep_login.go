@@ -32,7 +32,7 @@ func (a *aepAuthenticator) passwordLogin(ctx context.Context, deploymentID, user
 	if err != nil {
 		return "", fmt.Errorf("aep login: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("aep login returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))

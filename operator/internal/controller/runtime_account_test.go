@@ -140,14 +140,14 @@ var _ = Describe("runtime account provisioning", func() {
 		fx2.runtimeURL = fx2.runtimeSrv.URL
 		employee2 := fx2.employeeFixture("charlie-helper")
 		Expect(fx2.client.Create(ctx, employee2)).To(Succeed())
-		result, err := fx2.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee2.Namespace, Name: employee2.Name}})
+		_, err := fx2.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee2.Namespace, Name: employee2.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		markReady := &appsv1.Deployment{}
 		Expect(fx2.client.Get(ctx, types.NamespacedName{Namespace: employee2.Namespace, Name: deploymentName(employee2)}, markReady)).To(Succeed())
 		markReady.Status.ObservedGeneration = markReady.Generation
 		markReady.Status.ReadyReplicas = *markReady.Spec.Replicas
 		Expect(fx2.client.Status().Update(ctx, markReady)).To(Succeed())
-		result, err = fx2.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee2.Namespace, Name: employee2.Name}})
+		result, err := fx2.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee2.Namespace, Name: employee2.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(result.RequeueAfter).To(BeNumerically(">", time.Duration(0)), "upgrade self-heal needs a retry")
