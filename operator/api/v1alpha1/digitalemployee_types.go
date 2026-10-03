@@ -20,32 +20,69 @@ type RuntimeSpec struct {
 	// governance middleware and MCP tooling).
 	Image string `json:"image"`
 
+	// Models lists the LLM routes the runtime may use, in priority order:
+	// the first entry is the default the runtime picks when a caller does
+	// not name one, later entries are selectable by name (DeerFlow resolves
+	// per-request and per-subagent model choices against this list — it is
+	// selection, not automatic failover). When empty the legacy singular
+	// fields below define the single model.
+	// +optional
+	Models []RuntimeModel `json:"models,omitempty"`
+
 	// Model is the wire model id routed by the Higress model gateway
-	// (e.g. bench-glm). Never a provider-native model name.
+	// (e.g. bench-glm). Never a provider-native model name. Legacy form of
+	// Models[0]; kept for existing CRs.
 	Model string `json:"model"`
 
 	// ModelBaseURL is the model API base URL. Defaults to the in-cluster
-	// Higress gateway when empty.
+	// Higress gateway when empty. Legacy form of Models[0].baseURL.
 	// +optional
 	ModelBaseURL string `json:"modelBaseURL,omitempty"`
 
 	// Provider selects the model protocol family. "openai" (default) keeps
-	// the Higress-routed OpenAI-compatible path; "anthropic" connects the
-	// runtime directly to an Anthropic-protocol endpoint (emergency
-	// fallback when the in-cluster route is unavailable — the AEP model
-	// registry only models openai-compatible providers).
+	// the Higress-routed OpenAI-compatible path; "anthropic" speaks the
+	// Anthropic wire protocol — the AEP model registry serves it under a
+	// per-model path prefix (http://<gateway>/<model-id>).
 	// +optional
 	// +kubebuilder:validation:Enum=openai;anthropic
 	Provider string `json:"provider,omitempty"`
 
 	// NativeModel is the provider-native model id behind the wire name
 	// (Model stays the stable wire id agents and threads reference).
-	// Defaults to Model (Higress passthrough).
+	// Defaults to Model (Higress passthrough). Legacy form of
+	// Models[0].nativeModel.
 	// +optional
 	NativeModel string `json:"nativeModel,omitempty"`
 
 	// ApiKeyEnv names the credentials-Secret env var holding the provider
-	// API key. Defaults to DEER_BENCH_API_KEY.
+	// API key. Defaults to DEER_BENCH_API_KEY. Legacy form of
+	// Models[0].apiKeyEnv.
+	// +optional
+	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
+}
+
+// RuntimeModel is one LLM route in the runtime's model list.
+type RuntimeModel struct {
+	// Name is the wire model id (AEP model id) agents and threads
+	// reference; also the selection key inside the runtime config.
+	Name string `json:"name"`
+
+	// Provider selects the protocol family: "openai" or "anthropic".
+	// +kubebuilder:validation:Enum=openai;anthropic
+	Provider string `json:"provider"`
+
+	// NativeModel is the provider-native model id sent upstream. Defaults
+	// to Name.
+	// +optional
+	NativeModel string `json:"nativeModel,omitempty"`
+
+	// BaseURL is the model API base URL. For anthropic models served by
+	// the AEP registry this is <gateway>/<model-id>.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+
+	// ApiKeyEnv names the credentials-Secret env var holding the provider
+	// API key.
 	// +optional
 	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
 }
