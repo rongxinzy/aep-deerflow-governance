@@ -76,7 +76,10 @@ jobs:
         run: |
           extract() {
             dir="$1"; rev="$2"
-            git checkout --quiet "$rev" -- "$dir"
+            # Whole-tree checkout: a per-directory checkout leaves files the
+            # base revision does not track (e.g. newly added test files) in
+            # the worktree, breaking the base build.
+            git checkout --quiet "$rev"
             (cd "$dir" && go test ./... -coverprofile=/tmp/c.cov >/dev/null && \
              go tool cover -func=/tmp/c.cov | awk '/^total:/ {sub(/%/, "", $3); print $3}')
           }
