@@ -37,6 +37,10 @@ func fullEmployee() *v1alpha1.DigitalEmployee {
 			Runtime: v1alpha1.RuntimeSpec{
 				Type: "deerflow", Image: "img", Model: "m",
 				Provider: "anthropic", NativeModel: "glm", ApiKeyEnv: "K",
+				Models: []v1alpha1.RuntimeModel{
+					{Name: "bench-anthropic", Provider: "anthropic", NativeModel: "glm-5.3-flash", BaseURL: "http://gw/bench-anthropic", ApiKeyEnv: "BIGMODEL_API_KEY"},
+					{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://gw/bench-qwen"},
+				},
 			},
 			Memory: &v1alpha1.MemorySpec{
 				Type: "openviking", ServerURL: "http://ov", AccountID: "acc",

@@ -256,7 +256,6 @@ func TestApplyWithModelSelection(t *testing.T) {
 		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
 			strings.NewReader(`{"name":"model-helper","displayName":"模型员工","team":"","models":`+models+`}`))
-		req = req.WithContext(context.WithValue(req.Context(), struct{}{}, nil))
 		w := httptest.NewRecorder()
 		h.applyForEmployee(w, req, identity{Token: "admin-token", UserID: "admin-user", DisplayName: "Admin", Kind: "human"})
 		if w.Code != http.StatusCreated {
