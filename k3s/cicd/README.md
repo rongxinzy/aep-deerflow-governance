@@ -39,7 +39,11 @@ AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-s
 3. Higress → `bigmodel-anthropic-route.yaml`（VLM 转换子路由）→ AEP 注册
    anthropic 模型并 `data-plane/publish`（`aepctl model create --protocol
    anthropic`，凭证走 AEP credential + `aep-credential-<id>` Secret），员工 CR
-   的 `modelBaseURL` 加 `/<模型ID>` 前缀
+   的 `modelBaseURL` 加 `/<模型ID>` 前缀。已注册模型：
+   - `bench-anthropic` → 在线 BigModel（glm-5.3-flash，凭证走 AEP）
+   - `bench-qwen` → l20 节点 llama.cpp（`http://172.18.5.123:8000`，
+     Qwen3.6-35B-A3B，双协议无需凭证；llama-server 原生支持 /v1/messages，
+     故按 anthropic 协议注册，走 /bench-qwen 前缀路由）
 4. `memory-stack.yaml` → root key 调 accounts API 建 `zhiyuan` 账号
    （员工级 user 由 operator 自动开）
 5. `operator/deploy/crd.yaml` + `operator.yaml` → Secret →
