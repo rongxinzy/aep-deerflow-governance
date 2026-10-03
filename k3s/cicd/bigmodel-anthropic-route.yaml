@@ -1,35 +1,21 @@
-# Online-GLM (Zhipu BigModel, Anthropic-protocol endpoint) routed through
-# Higress with server-side credential injection — the runtime speaks native
-# Anthropic (ChatAnthropic via spec.runtime.provider=anthropic), and this
-# route passes the protocol through unchanged.
+# OpenAI→Anthropic 转换子路由（OpenViking VLM 使用）——经 Higress ai-proxy
+# claude provider 双向转换并注入凭证。历史使命已完成：Anthropic 原生透传
+# 已收编进 AEP 模型目录（protocol: anthropic，gateway-reconciler 渲染
+# EnvoyFilter，客户端 baseURL 为 http://<gateway>/<模型ID>，如
+# http://higress-gateway.../bench-anthropic）。本清单自 2026-10-03 起只保留
+# 转换子路由；新增 anthropic 模型请走 AEP（aepctl model create --protocol
+# anthropic + data-plane publish），不要再扩展本文件。
 #
-# ai-proxy cannot serve this route: its claude provider hardcodes
-# Host=api.anthropic.com (Aliyun CDN then answers 421 "Direct IP access is
-# not allowed") and its openai provider remarshals every body to OpenAI
-# shape. Instead the EnvoyFilter below does exactly three things:
-#   1. Host rewritten to open.bigmodel.cn (the CDN routes by Host)
-#   2. path /v1/* -> /api/anthropic/v1/* (BigModel anthropic endpoint)
-#   3. credential injected server-side as x-api-key, overwriting any client
-#      value — the runtime only ever holds a dummy
-# Body and response stream through untouched. The runtime CR uses
-# modelBaseURL=http://higress-gateway.higress-system.svc.cluster.local so
-# ChatAnthropic posts to /v1/messages, which this route matches.
+# 坑位备忘（勿再踩）：
+#   - ai-proxy 只认标准路径（/v1/chat/completions 等），故本路由用 Exact
+#     精确路径；透传时代靠它压过 /v1 前缀，现在前缀路由已不存在。
+#   - BigModel 双鉴权头并存时优先 Authorization，dummy Bearer 会 401 →
+#     补丁把 authorization 与 x-api-key 都覆写真值。
+#   - request_headers_to_add 必须放 Route 层（route: 下 istiod 静默丢弃）。
+#   - dns 型 registry 动态解析 open.bigmodel.cn，抗 CDN 地址轮换。
 #
-# A second, exact-path route serves OpenAI-protocol callers (OpenViking's
-# VLM): ai-proxy's claude provider converts openai<->anthropic in both
-# directions and injects the credential, while its route patch (below)
-# applies the same Host/path rewrite plus an authorization overwrite —
-# BigModel prefers Authorization over x-api-key when both are present, and
-# the caller's dummy Bearer would 401. The exact path beats the /v1 prefix,
-# and ai-proxy only engages on the standard /v1/chat/completions path, so
-# the two routes never interfere.
-#
-# The dns-type registry re-resolves open.bigmodel.cn, so CDN address
-# rotation needs no Endpoints patching. The API key is a deploy-time secret:
-# render with
+# The API key is a deploy-time secret: render with
 #   BIGMODEL_API_KEY=... envsubst < bigmodel-anthropic-route.yaml | kubectl apply -f -
-# Long-term this route belongs in the AEP model registry once the protocol
-# enum grows an anthropic value.
 apiVersion: networking.higress.io/v1
 kind: McpBridge
 metadata:
@@ -41,29 +27,6 @@ spec:
       name: bigmodel
       domain: open.bigmodel.cn
       port: 443
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: aep-model-gateway-bigmodel
-  namespace: higress-system
-  annotations:
-    higress.io/backend-protocol: HTTPS
-    higress.io/destination: bigmodel.dns
-    higress.io/proxy-ssl-name: open.bigmodel.cn
-    higress.io/proxy-ssl-server-name: "on"
-spec:
-  ingressClassName: higress
-  rules:
-    - http:
-        paths:
-          - backend:
-              resource:
-                apiGroup: networking.higress.io
-                kind: McpBridge
-                name: default
-            path: /v1
-            pathType: Prefix
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -118,34 +81,12 @@ spec:
         routeConfiguration:
           vhost:
             route:
-              name: aep-model-gateway-bigmodel
+              name: aep-model-gateway-bigmodel-vlm
       patch:
         operation: MERGE
         value:
           # request_headers_to_add lives on the Route, not the RouteAction —
           # nesting it under `route` makes istiod silently drop it.
-          request_headers_to_add:
-            - header:
-                key: x-api-key
-                value: "${BIGMODEL_API_KEY}"
-              append: false
-          route:
-            host_rewrite_literal: open.bigmodel.cn
-            regex_rewrite:
-              pattern:
-                google_re2: {}
-                regex: "^/v1/(.*)$"
-              substitution: "/api/anthropic/v1/\\1"
-    - applyTo: HTTP_ROUTE
-      match:
-        context: GATEWAY
-        routeConfiguration:
-          vhost:
-            route:
-              name: aep-model-gateway-bigmodel-vlm
-      patch:
-        operation: MERGE
-        value:
           request_headers_to_add:
             - header:
                 key: authorization
