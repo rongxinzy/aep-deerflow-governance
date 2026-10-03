@@ -15,8 +15,7 @@ import (
 // (knowledge isolation). Admin-only.
 
 type departmentRequest struct {
-	ID       string   `json:"id"`       // e.g. "rd-dept" (URL-safe)
-	Name     string   `json:"name"`     // e.g. "研发部"
+	Name     string   `json:"name"`     // e.g. "研发部"; the AEP team id is server-generated from it
 	AdminIDs []string `json:"adminIds"` // AEP user IDs who manage this department
 }
 
@@ -40,24 +39,23 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if req.ID == "" || req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id and name are required"})
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
 
-	status := departmentStatus{ID: req.ID, Name: req.Name, Phase: "provisioning"}
-	var partials []string
-
-	// 1. AEP team (identity)
+	// 1. AEP team (identity) — the id is server-generated from the name and
+	// keys the downstream OpenViking/WeKnora provisioning as well.
 	teamID, err := p.createAepTeam(r, req)
 	if err != nil {
-		partials = append(partials, fmt.Sprintf("aep-team: %v", err))
-	} else {
-		status.AepTeamID = teamID
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("aep-team: %v", err)})
+		return
 	}
+	status := departmentStatus{ID: teamID, Name: req.Name, Phase: "provisioning", AepTeamID: teamID}
+	var partials []string
 
 	// 2. OpenViking account (memory isolation boundary)
-	ovAccount, err := p.createOpenVikingAccount(r, req.ID)
+	ovAccount, err := p.createOpenVikingAccount(r, teamID)
 	if err != nil {
 		partials = append(partials, fmt.Sprintf("openviking: %v", err))
 	} else {
@@ -80,13 +78,12 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 		status.Phase = "partial"
 		status.Message = fmt.Sprintf("partially provisioned: %v", partials)
 	}
-	p.logger.Info("department provisioned", "id", req.ID, "phase", status.Phase, "partials", partials)
+	p.logger.Info("department provisioned", "id", status.ID, "phase", status.Phase, "partials", partials)
 	writeJSON(w, http.StatusOK, status)
 }
 
 func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, error) {
 	body, _ := json.Marshal(map[string]any{
-		"id":   req.ID,
 		"name": req.Name,
 	})
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
@@ -110,9 +107,6 @@ func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, 
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(raw, &result)
-	if result.ID == "" {
-		result.ID = req.ID // AEP may echo the team in a different shape
-	}
 	return result.ID, nil
 }
 
@@ -187,7 +181,11 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("weknora returned %d: %s", resp.StatusCode, string(raw))
 	}
-	return req.ID, nil
+	var tenant struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &tenant)
+	return tenant.ID, nil
 }
 
 // platformSecretKeyOrEmpty reads a key from the platform Secret without erroring.

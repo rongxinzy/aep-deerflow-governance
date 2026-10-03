@@ -127,7 +127,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		stubs := newDepartmentStubs(t)
 		h := newDepartmentHarness(t, stubs)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
-			strings.NewReader(`{"id":"rd-dept","name":"研发部"}`))
+			strings.NewReader(`{"name":"研发部"}`))
 		w := httptest.NewRecorder()
 		h.handleCreateDepartment(w, req, adminIdentity())
 
@@ -146,7 +146,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		stubs := newDepartmentStubs(t)
 		h := newDepartmentHarness(t, stubs)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
-			strings.NewReader(`{"id":"rd","name":"x"}`))
+			strings.NewReader(`{"name":"x"}`))
 		w := httptest.NewRecorder()
 		h.handleCreateDepartment(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
@@ -159,7 +159,7 @@ func TestDepartmentOrchestration(t *testing.T) {
 		})
 		h := newDepartmentHarness(t, stubs)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
-			strings.NewReader(`{"id":"rd-dept","name":"研发部"}`))
+			strings.NewReader(`{"name":"研发部"}`))
 		w := httptest.NewRecorder()
 		h.handleCreateDepartment(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code)

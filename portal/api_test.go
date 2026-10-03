@@ -234,3 +234,67 @@ func objectKey(name string) client.ObjectKey {
 func (i identity) IsAdminForTest() bool {
 	return i.isAdmin(config{adminUsers: map[string]bool{"admin-user": true}, adminRoles: map[string]bool{"admin": true}})
 }
+
+func TestApplyWithModelSelection(t *testing.T) {
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/aep/v1/admin/models", r.URL.Path)
+		assert.Equal(t, "Bearer admin-token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[
+			{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
+			{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
+			{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}
+		]}`))
+	}))
+	t.Cleanup(catalog.Close)
+
+	apply := func(t *testing.T, models string) (*httptest.ResponseRecorder, *dev1alpha1.DigitalEmployee) {
+		h := newAPIHarness(t)
+		h.cfg.aepBaseURL = catalog.URL
+		h.cfg.gatewayBaseURL = "http://higress-gateway.higress-system.svc.cluster.local"
+		h.cfg.modelKeyEnv = "BIGMODEL_API_KEY"
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+			strings.NewReader(`{"name":"model-helper","displayName":"模型员工","team":"","models":`+models+`}`))
+		req = req.WithContext(context.WithValue(req.Context(), struct{}{}, nil))
+		w := httptest.NewRecorder()
+		h.applyForEmployee(w, req, identity{Token: "admin-token", UserID: "admin-user", DisplayName: "Admin", Kind: "human"})
+		if w.Code != http.StatusCreated {
+			return w, nil
+		}
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "model-helper"}, item))
+		return w, item
+	}
+
+	t.Run("derives runtime routes from the catalog", func(t *testing.T) {
+		_, item := apply(t, `["bench-anthropic","bench-qwen"]`)
+		require.NotNil(t, item)
+		require.Len(t, item.Spec.Runtime.Models, 2)
+		first := item.Spec.Runtime.Models[0]
+		assert.Equal(t, "bench-anthropic", first.Name)
+		assert.Equal(t, "anthropic", first.Provider)
+		assert.Equal(t, "glm-5.3-flash", first.NativeModel)
+		assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic", first.BaseURL)
+		assert.Equal(t, "BIGMODEL_API_KEY", first.ApiKeyEnv)
+		second := item.Spec.Runtime.Models[1]
+		assert.Equal(t, "openai", second.Provider)
+		assert.Equal(t, "http://172.18.5.123:8000/v1", second.BaseURL)
+		assert.Equal(t, "Qwen3.6-35B-A3B", second.NativeModel)
+		assert.Empty(t, item.Spec.Runtime.Model, "legacy singular fields stay empty when models are explicit")
+	})
+
+	t.Run("rejects unknown or disabled models", func(t *testing.T) {
+		w, _ := apply(t, `["missing-model"]`)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "not an enabled gateway model")
+		w, _ = apply(t, `["disabled-model"]`)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("deduplicates repeated ids", func(t *testing.T) {
+		_, item := apply(t, `["bench-qwen","bench-qwen"]`)
+		require.NotNil(t, item)
+		assert.Len(t, item.Spec.Runtime.Models, 1)
+	})
+}

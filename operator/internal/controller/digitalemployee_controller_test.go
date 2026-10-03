@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -445,5 +446,67 @@ var _ = Describe("DigitalEmployee hibernation P2", func() {
 		}
 		Expect(env["DEERFLOW_CHANNEL_GATEWAY_URL"]).To(Equal("http://gw:8899"))
 		Expect(env["DEERFLOW_EMPLOYEE_NAME"]).To(Equal("wecom-helper"))
+	})
+})
+
+var _ = Describe("DigitalEmployee runtime model list", func() {
+	var fx *fixture
+
+	BeforeEach(func(ctx context.Context) {
+		fx = newFixture(ctx)
+	})
+
+	reconcileAndGetConfig := func(ctx context.Context, employee *v1alpha1.DigitalEmployee) string {
+		Expect(fx.client.Create(ctx, employee)).To(Succeed())
+		_, err := fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		config := &corev1.ConfigMap{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+		return config.Data["config.yaml"]
+	}
+
+	It("renders every entry in order and shapes each provider family", func(ctx context.Context) {
+		employee := fx.employeeFixture("multi-model-helper")
+		employee.Spec.Runtime.Models = []v1alpha1.RuntimeModel{
+			{Name: "bench-anthropic", Provider: "anthropic", NativeModel: "glm-5.3-flash", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic", ApiKeyEnv: "BIGMODEL_API_KEY"},
+			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-qwen", ApiKeyEnv: "DEER_BENCH_API_KEY"},
+		}
+		employee.Spec.Runtime.Model = ""
+
+		config := reconcileAndGetConfig(ctx, employee)
+		var parsed struct {
+			Models []map[string]any `json:"models"`
+		}
+		Expect(json.Unmarshal([]byte(config), &parsed)).To(Succeed())
+		Expect(parsed.Models).To(HaveLen(2))
+		// models[0] is the runtime default and carries the anthropic client
+		// shape (timeout, not request_timeout) with the native wire id.
+		Expect(parsed.Models[0]).To(SatisfyAll(
+			HaveKeyWithValue("name", "bench-anthropic"),
+			HaveKeyWithValue("model", "glm-5.3-flash"),
+			HaveKeyWithValue("use", "langchain_anthropic:ChatAnthropic"),
+			HaveKeyWithValue("timeout", 300.0),
+			HaveKeyWithValue("api_key", "$BIGMODEL_API_KEY"),
+			HaveKeyWithValue("base_url", "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic"),
+		))
+		Expect(parsed.Models[0]).NotTo(HaveKey("request_timeout"))
+		Expect(parsed.Models[1]).To(SatisfyAll(
+			HaveKeyWithValue("name", "bench-qwen"),
+			HaveKeyWithValue("model", "Qwen3.6-35B-A3B"),
+			HaveKeyWithValue("use", "langchain_openai:ChatOpenAI"),
+			HaveKeyWithValue("request_timeout", 300.0),
+		))
+		Expect(parsed.Models[1]).NotTo(HaveKey("timeout"))
+	})
+
+	It("synthesizes a one-entry list from the legacy singular fields", func(ctx context.Context) {
+		employee := fx.employeeFixture("legacy-model-helper")
+		employee.Spec.Runtime.Provider = "anthropic"
+		employee.Spec.Runtime.NativeModel = "glm-5.3-flash"
+
+		config := reconcileAndGetConfig(ctx, employee)
+		Expect(config).To(ContainSubstring(`"name": "bench-glm"`))
+		Expect(config).To(ContainSubstring(`"use": "langchain_anthropic:ChatAnthropic"`))
+		Expect(config).To(ContainSubstring(`"model": "glm-5.3-flash"`))
 	})
 })

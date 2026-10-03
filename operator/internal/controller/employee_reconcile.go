@@ -142,6 +142,40 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 // renderConfig produces the DeerFlow config.yaml (JSON form) from the CR.
 // databaseConfig renders the DeerFlow database section for the selected
 // conversation store backend.
+// renderModelEntry shapes one route for the runtime config: the wire name
+// (Name) stays stable for agents and threads; provider/nativeModel/apiKeyEnv
+// shape the actual client behind it.
+func renderModelEntry(route v1alpha1.RuntimeModel) map[string]any {
+	base := route.BaseURL
+	if base == "" {
+		base = defaultModelBaseURL
+	}
+	entry := map[string]any{
+		"name":         route.Name,
+		"display_name": route.Name,
+		"model":        route.Name,
+		"api_key":      "$DEER_BENCH_API_KEY",
+		"base_url":     base,
+	}
+	if route.NativeModel != "" {
+		entry["model"] = route.NativeModel
+	}
+	if route.ApiKeyEnv != "" {
+		entry["api_key"] = "$" + route.ApiKeyEnv
+	}
+	// ChatAnthropic's constructor takes `timeout`; ChatOpenAI's is
+	// `request_timeout`.
+	if route.Provider == "anthropic" {
+		entry["use"] = "langchain_anthropic:ChatAnthropic"
+		entry["timeout"] = 300.0
+	} else {
+		entry["use"] = "langchain_openai:ChatOpenAI"
+		entry["request_timeout"] = 300.0
+	}
+	entry["max_retries"] = 2
+	return entry
+}
+
 func databaseConfig(backend string) map[string]any {
 	if backend == "postgres" {
 		return map[string]any{
@@ -155,39 +189,27 @@ func databaseConfig(backend string) map[string]any {
 
 func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 	spec := employee.Spec
-	modelBase := spec.Runtime.ModelBaseURL
-	if modelBase == "" {
-		modelBase = defaultModelBaseURL
+	// The runtime picks models by name; models[0] is the default. Legacy
+	// singular fields synthesize a one-entry list so existing CRs render
+	// unchanged.
+	routes := spec.Runtime.Models
+	if len(routes) == 0 {
+		routes = []v1alpha1.RuntimeModel{{
+			Name:        spec.Runtime.Model,
+			Provider:    spec.Runtime.Provider,
+			NativeModel: spec.Runtime.NativeModel,
+			BaseURL:     spec.Runtime.ModelBaseURL,
+			ApiKeyEnv:   spec.Runtime.ApiKeyEnv,
+		}}
 	}
-	// Wire name (spec.Runtime.Model) stays stable for agents and threads;
-	// provider/nativeModel/apiKeyEnv shape the actual client behind it.
-	modelEntry := map[string]any{
-		"name":         spec.Runtime.Model,
-		"display_name": spec.Runtime.Model,
-		"model":        spec.Runtime.Model,
-		"api_key":      "$DEER_BENCH_API_KEY",
-		"base_url":     modelBase,
+	models := make([]any, 0, len(routes))
+	for _, route := range routes {
+		models = append(models, renderModelEntry(route))
 	}
-	if spec.Runtime.NativeModel != "" {
-		modelEntry["model"] = spec.Runtime.NativeModel
-	}
-	if spec.Runtime.ApiKeyEnv != "" {
-		modelEntry["api_key"] = "$" + spec.Runtime.ApiKeyEnv
-	}
-	// ChatAnthropic's constructor takes `timeout`; ChatOpenAI's is
-	// `request_timeout`.
-	if spec.Runtime.Provider == "anthropic" {
-		modelEntry["use"] = "langchain_anthropic:ChatAnthropic"
-		modelEntry["timeout"] = 300.0
-	} else {
-		modelEntry["use"] = "langchain_openai:ChatOpenAI"
-		modelEntry["request_timeout"] = 300.0
-	}
-	modelEntry["max_retries"] = 2
 	config := map[string]any{
 		"config_version": 46,
 		"log_level":      "info",
-		"models":         []any{modelEntry},
+		"models":         models,
 		"sandbox": map[string]any{
 			"use":             "deerflow.sandbox.local:LocalSandboxProvider",
 			"allow_host_bash": false,

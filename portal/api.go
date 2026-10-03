@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -98,9 +100,10 @@ func (p *portal) adminOnly(next func(http.ResponseWriter, *http.Request, identit
 }
 
 type applyRequest struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	Team        string `json:"team"` // department scoping; empty = unscoped
+	Name        string   `json:"name"`
+	DisplayName string   `json:"displayName"`
+	Team        string   `json:"team"`   // department scoping; empty = unscoped
+	Models      []string `json:"models"` // AEP model ids, first = default; empty = PORTAL_MODEL
 }
 
 func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -141,7 +144,12 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 
-	spec := p.renderSpec(body.Name, body.DisplayName, ident, body.Team)
+	runtimeModels, err := p.resolveRuntimeModels(r.Context(), ident, body.Models)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	spec := p.renderSpec(body.Name, body.DisplayName, ident, body.Team, runtimeModels)
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
 		if err != nil {
@@ -169,13 +177,19 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 	})
 }
 
-func (p *portal) renderSpec(name, displayName string, owner identity, team string) dev1alpha1.DigitalEmployee {
+func (p *portal) renderSpec(name, displayName string, owner identity, team string, models []dev1alpha1.RuntimeModel) dev1alpha1.DigitalEmployee {
+	runtime := dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Model: p.cfg.model}
+	if len(models) > 0 {
+		// Explicit model selection from the AEP catalog: the first entry is
+		// the runtime default, later entries are name-selectable.
+		runtime = dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Models: models}
+	}
 	return dev1alpha1.DigitalEmployee{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.cfg.namespace},
 		Spec: dev1alpha1.DigitalEmployeeSpec{
 			DisplayName: displayName,
 			Team:        team,
-			Runtime:     dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Model: p.cfg.model},
+			Runtime:     runtime,
 			Memory: &dev1alpha1.MemorySpec{
 				Type: "openviking", ServerURL: p.cfg.memoryServer, AccountID: p.cfg.memoryAccount,
 				SingleTenantInstance: true,
@@ -193,6 +207,79 @@ func (p *portal) renderSpec(name, displayName string, owner identity, team strin
 			OwnerName:   identUsername(owner),
 		},
 	}
+}
+
+// catalogModel mirrors the fields the portal derives runtime routes from.
+type catalogModel struct {
+	ID            string `json:"id"`
+	SourceType    string `json:"sourceType"`
+	Protocol      string `json:"protocol"`
+	Endpoint      string `json:"endpoint"`
+	UpstreamModel string `json:"upstreamModel"`
+	Enabled       bool   `json:"enabled"`
+}
+
+// resolveRuntimeModels maps requested AEP model ids onto runtime routes by
+// consulting the model catalog with the requester's own token (the console
+// admin already holds models.read). anthropic models ride the per-model
+// gateway prefix; openai-compatible models use their registered endpoint.
+func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, modelIDs []string) ([]dev1alpha1.RuntimeModel, error) {
+	if len(modelIDs) == 0 {
+		return nil, nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.aepBaseURL+"/aep/v1/admin/models?limit=500", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+ident.Token)
+	request.Header.Set("X-AEP-Protocol-Version", "1.0")
+	response, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("model catalog unavailable: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("model catalog returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var page struct {
+		Models []catalogModel `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return nil, fmt.Errorf("model catalog response was invalid: %w", err)
+	}
+	byID := make(map[string]catalogModel, len(page.Models))
+	for _, model := range page.Models {
+		byID[model.ID] = model
+	}
+	routes := make([]dev1alpha1.RuntimeModel, 0, len(modelIDs))
+	seen := make(map[string]bool, len(modelIDs))
+	for _, id := range modelIDs {
+		model, ok := byID[id]
+		if !ok || !model.Enabled || model.SourceType != "gateway" {
+			return nil, fmt.Errorf("model %q is not an enabled gateway model", id)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		route := dev1alpha1.RuntimeModel{Name: model.ID, NativeModel: model.UpstreamModel, ApiKeyEnv: p.cfg.modelKeyEnv}
+		switch model.Protocol {
+		case "anthropic":
+			route.Provider = "anthropic"
+			route.BaseURL = p.cfg.gatewayBaseURL + "/" + model.ID
+		case "openai-compatible":
+			route.Provider = "openai"
+			route.BaseURL = model.Endpoint
+		default:
+			return nil, fmt.Errorf("model %q uses unsupported protocol %q", id, model.Protocol)
+		}
+		if route.BaseURL == "" {
+			return nil, fmt.Errorf("model %q has no endpoint", id)
+		}
+		routes = append(routes, route)
+	}
+	return routes, nil
 }
 
 func identUsername(ident identity) string {
