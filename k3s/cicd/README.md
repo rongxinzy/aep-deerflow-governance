@@ -21,9 +21,9 @@ rtl-control；l20 的 `/etc/rancher/k3s/registries.yaml` 已配置（与 188 相
 
 | 文件 | 作用 |
 | --- | --- |
-| `bigmodel-anthropic-route.yaml` | 在线 GLM 的 Higress 路由（Anthropic 透传 + openai 协议转换子路由），`BIGMODEL_API_KEY=... envsubst` 渲染后 apply |
+| `bigmodel-anthropic-route.yaml` | 在线 GLM 的 openai↔anthropic 转换子路由（VLM 用；Anthropic 原生透传已收编 AEP，见"已知边界"），`BIGMODEL_API_KEY=... envsubst` 渲染后 apply |
 | `memory-stack.yaml` | 记忆栈（VLM 走 Higress 在线 GLM），`OPENVIKING_ROOT_API_KEY=... envsubst` 渲染后 apply |
-| `sales-helper.yaml` | 首例员工 CR（anthropic provider 经 Higress；企微通道关闭——bot WS 单会话，dev 仍在使用） |
+| `sales-helper.yaml` | 首例员工 CR（anthropic provider 经 Higress 声明式路由 `/bench-anthropic`；企微通道关闭——bot WS 单会话，dev 仍在使用） |
 | `demo-employees.yaml` | 演示员工批量清单（财务/生产/研发/行政，与 sales-helper 同规格） |
 | `seed-aep.sh` | AEP 种子：wecom 身份源、saber 映射、gov-service 账号；密码走 env |
 
@@ -36,7 +36,14 @@ AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-s
 
 1. 两节点 `registries.yaml`（172.18.5.251 http + auth）
 2. AEP 栈 → readyz 200 → postgres 建 `deportal` 库 → `seed-aep.sh`
-3. Higress → `bigmodel-anthropic-route.yaml`
+3. Higress → `bigmodel-anthropic-route.yaml`（VLM 转换子路由）→ AEP 注册
+   anthropic 模型并 `data-plane/publish`（`aepctl model create --protocol
+   anthropic`，凭证走 AEP credential + `aep-credential-<id>` Secret），员工 CR
+   的 `modelBaseURL` 加 `/<模型ID>` 前缀。已注册模型：
+   - `bench-anthropic` → 在线 BigModel（glm-5.3-flash，凭证走 AEP）
+   - `bench-qwen` → l20 节点 llama.cpp（`http://172.18.5.123:8000`，
+     Qwen3.6-35B-A3B，双协议无需凭证；llama-server 原生支持 /v1/messages，
+     故按 anthropic 协议注册，走 /bench-qwen 前缀路由）
 4. `memory-stack.yaml` → root key 调 accounts API 建 `zhiyuan` 账号
    （员工级 user 由 operator 自动开）
 5. `operator/deploy/crd.yaml` + `operator.yaml` → Secret →
@@ -64,6 +71,9 @@ dev 侧故障根因是 redis PVC 的 AOF 文件损坏（`redis-check-aof --fix` 
 - WeKnora 已部署（栈健康、mcp 桥就位），但实例内容初始化未做（见上）。
 - 企微通道在 dev 与 cicd 之间是单选：bot 的 WS 会话只有一个。迁移 =
   dev CR `channels.wecom: false`、cicd CR 置 true 并注入通道凭证。
-- AEP 契约的 model protocol 枚举仅 `openai-compatible`；anthropic 路径目前
-  由 operator 的 `provider: anthropic` + 本目录路由清单承载，契约化后应
-  收编进 AEP 模型目录。
+- ~~AEP 契约的 model protocol 枚举仅 `openai-compatible`~~ **已收编
+  （2026-10-03）**：AEP protocol 枚举含 `anthropic`，gateway-reconciler 按
+  每模型前缀（`http://<gateway>/<模型ID>`）渲染 Ingress+EnvoyFilter 透传，
+  凭证走 AEP credential 体系。本目录手工透传路由已退役，清单只剩 VLM 转换
+  子路由（ai-proxy claude 转换，AEP 暂不承载 openai→anthropic 转换语义）。
+  运行时账号 429 限流问题独立存在（见 operator 日志），与路由无关。
