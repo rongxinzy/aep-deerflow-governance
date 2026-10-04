@@ -176,19 +176,19 @@ func TestConfigMapNamePredicate(t *testing.T) {
 }
 
 func TestDatabaseConfigBackends(t *testing.T) {
-	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$CONVERSATION_DB_URL"}, databaseConfig("postgres", false))
-	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$DE_CONVERSATION_DB_URL"}, databaseConfig("postgres", true))
-	assert.Equal(t, map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}, databaseConfig("sqlite", false))
+	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$DE_CONVERSATION_DB_URL"}, databaseConfig("postgres"))
+	assert.Equal(t, map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}, databaseConfig("sqlite"))
 }
 
 func TestRenderConfigVariants(t *testing.T) {
 	employee := fullEmployee()
 	employee.Spec.NodePort = 30300
-	cfg := renderConfig(employee, "$CONVERSATION_DB_URL")
+	cfg := renderConfig(employee, conversationURLKey(employee))
 	assert.Contains(t, cfg, "ChatAnthropic")
 	assert.Contains(t, cfg, "AepGovernanceMiddleware")
 
-	rendered := (&DigitalEmployeeReconciler{}).renderDeployment(employee)
+	rendered, err := (&DigitalEmployeeReconciler{}).renderDeployment(employee)
+	assert.NoError(t, err)
 	assert.EqualValues(t, 1, *rendered.Spec.Replicas)
 	assert.NotNil(t, rendered.Spec.Template.Spec.Containers[0].ReadinessProbe)
 	svc := renderService(employee)

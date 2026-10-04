@@ -190,6 +190,12 @@ func (p *portal) renderSpec(name, displayName string, owner identity, team strin
 			DisplayName: displayName,
 			Team:        team,
 			Runtime:     runtime,
+			// Conversation threads ride the central postgres instance
+			// (one database per employee — the operator renders the DSN
+			// child Secret). The operator-level sqlite default is for
+			// standalone use; portal employees must be inside the backup
+			// and central-ops perimeter.
+			ConversationStore: dev1alpha1.ConversationStoreSpec{Backend: "postgres"},
 			Memory: &dev1alpha1.MemorySpec{
 				Type: "openviking", ServerURL: p.cfg.memoryServer, AccountID: p.cfg.memoryAccount,
 				SingleTenantInstance: true,

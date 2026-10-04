@@ -17,12 +17,13 @@ import (
 // in one physical database, so the first employee to initialize owns the
 // global admin and every other employee's operator-held credentials are
 // rejected (401 forever — needs_setup can never become true again). The
-// default therefore provisions one database per employee.
+// platform-wide "shared" database was therefore removed entirely: postgres
+// employees always get a database of their own.
 
 const (
 	// conversationDBKey is the env/config key carrying the per-employee DSN.
-	// It deliberately differs from the platform CONVERSATION_DB_URL so both
-	// can coexist in envFrom without precedence games.
+	// It deliberately differs from any platform-wide DSN key so envFrom
+	// order is irrelevant.
 	conversationDBKey = "DE_CONVERSATION_DB_URL"
 	// conversationAdminURLKey is read from the platform credentials Secret
 	// by the db-init init container (CREATE DATABASE needs a maintenance
@@ -31,19 +32,21 @@ const (
 )
 
 // conversationDatabaseName resolves the physical database for an employee.
-// ("", false) means the legacy shared platform database; otherwise the
-// returned name is a database the operator guarantees exists.
-func conversationDatabaseName(employee *dev1alpha1.DigitalEmployee) (string, bool) {
+// "" means no per-employee database (sqlite); otherwise the returned name is
+// a database the operator guarantees exists. The removed legacy value
+// "shared" is rejected with an explicit error rather than silently falling
+// back to a platform-wide database.
+func conversationDatabaseName(employee *dev1alpha1.DigitalEmployee) (string, error) {
 	if employee.Spec.ConversationStore.Backend != "postgres" {
-		return "", false
+		return "", nil
 	}
 	switch database := employee.Spec.ConversationStore.Database; database {
 	case "":
-		return "de_" + strings.ReplaceAll(employee.Name, "-", "_"), true
+		return "de_" + strings.ReplaceAll(employee.Name, "-", "_"), nil
 	case "shared":
-		return "", false
+		return "", fmt.Errorf("conversationStore.database=%q is the removed legacy shared database (shared runtime auth tables); clear it to get the per-employee default", database)
 	default:
-		return database, true
+		return database, nil
 	}
 }
 

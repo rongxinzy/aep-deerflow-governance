@@ -57,7 +57,8 @@ type DigitalEmployeeReconciler struct {
 	// ConversationAdminDBURL enables per-employee conversation databases:
 	// the maintenance DSN (operator env, sourced from the platform
 	// credentials Secret) the rendered child Secret DSNs derive from. Empty
-	// degrades backend=postgres employees to the shared CONVERSATION_DB_URL.
+	// makes backend=postgres employees fail reconciliation loudly instead
+	// of silently sharing a platform-wide database.
 	ConversationAdminDBURL string
 	// ConversationInitImage is the psql-carrying image the db-init init
 	// container uses to CREATE DATABASE before the runtime boots.
