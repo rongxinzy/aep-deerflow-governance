@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestSessionStorePersistence(t *testing.T) {
@@ -400,6 +401,54 @@ func TestSessionEmployeeSelection(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.handleSessionEmployee(w, req, identity{UserID: "user-x"})
 		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("selection waits out a just-created employee instead of 409", func(t *testing.T) {
+		fresh := readyCR("new-helper", "admin-user")
+		fresh.Status.Phase = "" // brand-new CR: operator has not reconciled it yet
+		h := newAPIHarness(t, fresh, memkey("new-helper"))
+		h.cfg.wakeTimeout = 5 * time.Second
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			var item dev1alpha1.DigitalEmployee
+			require.NoError(t, h.k8s.Get(context.Background(),
+				client.ObjectKey{Namespace: "digital-employees", Name: "new-helper"}, &item))
+			item.Status.Phase = dev1alpha1.PhaseReady
+			require.NoError(t, h.k8s.Status().Update(context.Background(), &item))
+		}()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"new-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=new-helper")
+	})
+
+	t.Run("selection surfaces a failed employee without waiting", func(t *testing.T) {
+		broken := readyCR("broken-helper", "admin-user")
+		broken.Status.Phase = dev1alpha1.PhaseError
+		broken.Status.Message = "register memory user: Account not found"
+		h := newAPIHarness(t, broken)
+		h.cfg.wakeTimeout = 5 * time.Second
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"broken-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		assert.Equal(t, http.StatusConflict, w.Code)
+		assert.Contains(t, w.Body.String(), "Account not found")
+	})
+
+	t.Run("selection gives up when the employee never starts", func(t *testing.T) {
+		fresh := readyCR("stuck-helper", "admin-user")
+		fresh.Status.Phase = dev1alpha1.PhasePending
+		h := newAPIHarness(t, fresh)
+		h.cfg.wakeTimeout = 10 * time.Millisecond
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"stuck-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Contains(t, w.Body.String(), "still starting")
 	})
 }
 
