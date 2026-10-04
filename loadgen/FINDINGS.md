@@ -201,3 +201,34 @@ PR #203 迁移改名待并 + 观察项。）
   pg_dumpall 不把 connstring 密码传给子 pg_dump（必须 PG* env）；校验
   用 `head` 提前关管道会撞 SIGPIPE（pipefail 下误报），改 `sed -n`。
   注：备份卷与数据同节点 local-path——误操作/逻辑损坏可恢复，非异地容灾。
+
+## 第三轮：旧数据/旧路径清理（2026-10-04 深夜）
+
+指令：开发环境，激进清理，不为旧数据保留多虑。
+
+### 已执行
+
+- **清理前快照**：手动触发 `pg-backup-pre-cleanup` Job（复用 pg-backup CronJob，02:23 之外的按需份）。
+- **压测遗留清除**：27 个 load-de CR 删除（18/19/20 本就未建）；finalizer GC 零残留——
+  PVC/Secret/Deployment/KEDA ScaledObject/ConfigMap 全部回收；`de_load_de_03` 库 DROP。
+- **代码侧旧路径移除**（PR 待合并）：
+  - governance **#19**：operator 删除 `database=shared` legacy 路径——"shared" 显式报错、
+    无 `CONVERSATION_ADMIN_DB_URL` 时 reconcile loud-fail（不再静默退化到平台级 DSN）、
+    `conversationURLKey` 纯函数化（postgres 恒走子 Secret `DE_CONVERSATION_DB_URL`）。
+  - governance **#20**：portal `renderSpec` 显式 `conversationStore.backend=postgres`
+    （新员工不再落 sqlite/PVC，进备份圈与集中运维）。
+- **镜像预构建**（待授权部署）：`de-operator:0.16.0`、`de-portal:0.15.0`（PR 分支构建）。
+
+### 待用户批准（权限分类器拦截，点名后才执行）
+
+1. **5 个演示 DE 迁 per-DB postgres**：admin/finance/production/rd-helper
+   （sqlite→postgres，sqlite 增量弃）；sales-helper（shared→per-DB，共享库历史弃，
+   replicas 2→1）。迁移后 DROP `de_conversations`、de-platform-creds 移除
+   `CONVERSATION_DB_URL` key。
+2. **aep 库 truncate**：session_control_deliveries(135344)/telemetry_events(36000)/
+   authentication_audit_events(13474)/user_session_tokens(7243)/user_sessions(7091)/
+   control_events(121)/login_rate_limits(10)。
+3. **deportal 库 truncate**：requests(33)/sessions(27)/channel_wake(15)/
+   employee_activity(4)/channel_inbox(1)（channel 两表内容已核过，全是 10-01~10-04
+   e2e 测试残留）。
+4. **部署**：operator 0.16.0 + 新 CRD、portal 0.15.0、`PORTAL_RUNTIME_IMAGE` v18.1→v19。
