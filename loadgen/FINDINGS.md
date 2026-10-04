@@ -130,13 +130,38 @@
 | PR | 内容 |
 |----|------|
 | #8 fix/operator per-DE 对话库 | conversationStore.database + initContainer + 子 Secret |
-| #9 fix/operator PAT-first 探测 | 稳态零登录 + 429 退避 10min |
+| #12 fix/operator PAT-first 探测 | 稳态零登录 + 429 退避 10min（原 #9 因基分支被删重建） |
+| #13 fix/operator Secret upsert | safeCreateOrUpdate 补 Secret 分支（第二次 reconcile 必炸的回归） |
+| #14 fix/operator postgres extras | UV_EXTRAS 渲染（后经查应为构建期参数，见下） |
 | #10 chore/loadgen | 本工具 + 本文档 |
-| #11 fix/portal 配额 0 | envIntNonNegative |
+| #11 fix/portal 配额 0 | envIntNonNegative（portal 镜像未重建，暂未生效） |
 
-## 待授权部署项
+## 部署与修复落地（2026-10-04 当日）
 
-1. control-service 0.7.0（镜像已推 251，digest d813f1ab0a01）——修契约漂移
-2. operator 新镜像（#8+#9 合并后）+ env `CONVERSATION_ADMIN_DB_URL`/
-   `CONVERSATION_INIT_IMAGE`，5 个 demo CR 钉 `database: shared` 或迁 per-DE
-3. （建议）postgres shared_buffers 16MB→512MB（低峰重启）
+- **aep-control-service 0.6.0 → 0.7.0**：新契约（服务端 slug）生效 ✓。
+- **de-operator 0.14.0 → 0.15.2**（#8+#12+#13+#14）：per-DE 对话库落地——
+  load-de-03 切 postgres 后自动建库 `de_load_de_03`（29 表，一次对话
+  24 checkpoints/1 run 落独立库），冷启+首轮 SSE 1.3-3.1s；sales-helper
+  钉 `database: shared` 保历史；operator env `CONVERSATION_ADMIN_DB_URL`/
+  `CONVERSATION_INIT_IMAGE` 已配。
+- **portal**：`PORTAL_RUNTIME_IMAGE` 从 **v10 → v18.1**（发现 #6：portal 一直
+  在给新 DE 发上古镜像 v10——demo CR 是手工滚的，portal env 六天没跟）；
+  `PORTAL_QUOTA_PER_USER=50`（0 无法生效，见 C5）。
+- **postgres**：shared_buffers 16MB→512MB ✓；滚动重启触发 **WAL 校验点
+  损坏 CrashLoop**（local-path 单副本脏关机），经用户授权 `pg_resetwal`
+  恢复，303 用户/遥测数据完好，恢复后浸泡 129rps 零错。
+- 30 个 load DE 全部 v18.1 + hibernation 2m；OV 账号补建 30/30。
+
+## 后续待办（未做）
+
+- portal 镜像重建部署（#11 envInt 修复生效；顺带把 C8 修掉）
+- **C8【中】选休眠员工 409**：portal `/session/employee` 在员工 Sleeping/
+  Pending 时直接 409，唤醒只挂在 chat 代理路径——Console 用户点休眠员工
+  会撞错误而非等待（loadgen 两次复现）。
+- AEP 侧：遥测批写单事务化（B2）、控制事件扇出 INSERT..SELECT（B3）、
+  control_events 补索引、limit clamp、PATCH users 拒绝未知字段（A2/A3/C4）
+- deerflow-gov 镜像：postgres 扩展应在构建期 `--build-arg UV_EXTRAS=postgres`
+  烘进 venv（当前靠治理 Dockerfile 的 pip 补装，v18.1 已含；portal 发镜像
+  时注意别再回到无 pip 补装的基底）
+- postgres 单副本无 PV 备份 + 脏关机即 WAL 损——生产基线需要备库/定期
+  pg_dump（本轮教训）
