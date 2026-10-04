@@ -207,15 +207,24 @@ type PersistenceSpec struct {
 
 // ConversationStoreSpec selects where conversation threads are persisted.
 // "sqlite" (default) stores per-employee on the home volume — single-writer,
-// no multi-replica HA. "postgres" centralizes into the shared PostgreSQL
-// conversation database (URL from the platform credentials Secret's
-// CONVERSATION_DB_URL key), enabling multi-replica employees and
-// cross-employee queries.
+// no multi-replica HA. "postgres" centralizes into PostgreSQL: by default
+// each employee gets its own database (de_<name>, DSN rendered into a child
+// Secret as DE_CONVERSATION_DB_URL) so runtime auth tables and threads are
+// never shared across employees; Database "shared" keeps the single
+// platform database (CONVERSATION_DB_URL from the credentials Secret) for
+// legacy employees.
 type ConversationStoreSpec struct {
 	// +kubebuilder:validation:Enum=sqlite;postgres
 	// +optional
 	// +kubebuilder:default=sqlite
 	Backend string `json:"backend,omitempty"`
+	// Physical database selection when Backend=postgres. Empty provisions a
+	// per-employee database (de_<name>); "shared" uses the platform-wide
+	// CONVERSATION_DB_URL database; any other value names an explicit
+	// database the operator creates on boot.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,40}$`
+	// +optional
+	Database string `json:"database,omitempty"`
 }
 
 // DigitalEmployeeSpec defines the desired state of a digital employee.

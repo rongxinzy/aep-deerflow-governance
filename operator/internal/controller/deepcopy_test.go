@@ -176,14 +176,15 @@ func TestConfigMapNamePredicate(t *testing.T) {
 }
 
 func TestDatabaseConfigBackends(t *testing.T) {
-	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$CONVERSATION_DB_URL"}, databaseConfig("postgres"))
-	assert.Equal(t, map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}, databaseConfig("sqlite"))
+	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$CONVERSATION_DB_URL"}, databaseConfig("postgres", false))
+	assert.Equal(t, map[string]any{"backend": "postgres", "postgres_url": "$DE_CONVERSATION_DB_URL"}, databaseConfig("postgres", true))
+	assert.Equal(t, map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}, databaseConfig("sqlite", false))
 }
 
 func TestRenderConfigVariants(t *testing.T) {
 	employee := fullEmployee()
 	employee.Spec.NodePort = 30300
-	cfg := renderConfig(employee)
+	cfg := renderConfig(employee, "$CONVERSATION_DB_URL")
 	assert.Contains(t, cfg, "ChatAnthropic")
 	assert.Contains(t, cfg, "AepGovernanceMiddleware")
 

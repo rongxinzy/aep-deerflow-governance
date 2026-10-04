@@ -115,6 +115,14 @@ spec:
                     - sqlite
                     - postgres
                     type: string
+                  database:
+                    description: |-
+                      Physical database selection when Backend=postgres. Empty provisions a
+                      per-employee database (de_<name>); "shared" uses the platform-wide
+                      CONVERSATION_DB_URL database; any other value names an explicit
+                      database the operator creates on boot.
+                    pattern: ^[a-z][a-z0-9_]{0,40}$
+                    type: string
                 type: object
               credentials:
                 description: Credentials references the shared platform secret.
