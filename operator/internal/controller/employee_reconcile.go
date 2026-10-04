@@ -106,6 +106,13 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 		return err
 	}
 	switch typed := object.(type) {
+	case *corev1.Secret:
+		previous := existing.(*corev1.Secret)
+		if reflect.DeepEqual(previous.Data, typed.Data) {
+			return nil
+		}
+		previous.Data = typed.Data
+		return c.Update(ctx, previous)
 	case *corev1.ConfigMap:
 		previous := existing.(*corev1.ConfigMap)
 		if reflect.DeepEqual(previous.Data, typed.Data) {
