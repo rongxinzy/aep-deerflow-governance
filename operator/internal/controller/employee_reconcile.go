@@ -371,6 +371,12 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 		{Name: "DEER_FLOW_EXTENSIONS_CONFIG_PATH", Value: "/app/extensions-config/extensions_config.json"},
 		{Name: "DEER_FLOW_HOME", Value: "/var/lib/deerflow"},
 	}
+	// The runtime entrypoint syncs its venv from the config's extras; the
+	// postgres conversation backend needs asyncpg & co. resynced or the
+	// lifespan dies with ImportError on boot (observed on cicd v18.1).
+	if spec.ConversationStore.Backend == "postgres" {
+		environment = append(environment, corev1.EnvVar{Name: "UV_EXTRAS", Value: "postgres"})
+	}
 	// Channel-gateway mode: the platform websockets live in
 	// de-channel-gateway; runtimes poll its inbox instead of dialing out,
 	// which is what makes idle scale-to-zero safe for IM employees.
