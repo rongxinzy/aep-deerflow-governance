@@ -40,6 +40,11 @@ const (
 	// Secret repair) without watch-event dependencies.
 	runtimeAccountRetry   = 15 * time.Second
 	runtimeAccountRequeue = 5 * time.Minute
+	// runtimeAccountRateLimited backs off past the runtime's login lockout
+	// (auth.local.max_login_attempts, default 5 min): retries inside the
+	// window only ever see 429 and a fast retry cadence keeps the lock
+	// alive, so pace the next attempt outside it instead.
+	runtimeAccountRateLimited = 10 * time.Minute
 )
 
 // runtimeOwnerScopes is the full end-user surface: threads, runs, projects.
@@ -54,6 +59,8 @@ var (
 	errRuntimeNoAuthAPI    = errors.New("runtime does not expose the auth API")
 	errRuntimeAlreadyInit  = errors.New("runtime already initialized")
 	errRuntimeAuthRejected = errors.New("runtime rejected the admin credentials")
+	// errRuntimeRateLimited: the runtime's IP login throttle answered 429.
+	errRuntimeRateLimited = errors.New("runtime login throttled")
 )
 
 // runtimeClient talks to one DeerFlow runtime's auth API. The cookie jar
@@ -149,6 +156,8 @@ func (c *runtimeClient) login(ctx context.Context, email, password string) error
 		return nil
 	case http.StatusUnauthorized:
 		return errRuntimeAuthRejected
+	case http.StatusTooManyRequests:
+		return errRuntimeRateLimited
 	default:
 		return fmt.Errorf("login: status %d: %s", code, snippet(body))
 	}
@@ -284,22 +293,33 @@ func (r *DigitalEmployeeReconciler) ensureRuntimeAccount(ctx context.Context, em
 		return ctrl.Result{RequeueAfter: runtimeAccountRequeue}, nil
 	}
 
+	// Zero-login steady state: when the auth DB is initialized and the
+	// stored owner PAT still authenticates, the account is healthy without
+	// a password login. Logging in on every reconcile trips the runtime's
+	// IP throttle (5 failures lock the operator out for the lockout
+	// window), so login is only the repair path.
+	if !needsSetup && ownerPAT != "" && rt.patValid(ctx, ownerPAT) {
+		employee.Status.RuntimeAccount = v1alpha1.RuntimeAccountReady
+		employee.Status.RuntimeAccountMessage = ""
+		return ctrl.Result{}, nil
+	}
+
 	if err := rt.login(ctx, adminEmail, adminPassword); err != nil {
 		if errors.Is(err, errRuntimeAuthRejected) {
 			employee.Status.RuntimeAccount = v1alpha1.RuntimeAccountFailed
 			employee.Status.RuntimeAccountMessage = "runtime rejected the stored admin credentials (password rotated?); restore " + runtimeAdminPasswordKey + " in " + runtimeCredsSecretName(employee) + " or delete the runtime pod to rebuild the auth DB"
 			return ctrl.Result{RequeueAfter: runtimeAccountRequeue}, nil
 		}
+		if errors.Is(err, errRuntimeRateLimited) {
+			employee.Status.RuntimeAccount = v1alpha1.RuntimeAccountPending
+			employee.Status.RuntimeAccountMessage = "runtime login throttled (too many attempts); backing off past the lockout window"
+			return ctrl.Result{RequeueAfter: runtimeAccountRateLimited}, nil
+		}
 		return ctrl.Result{}, errWrap("runtime admin login: ", err)
 	}
 
-	// Zero-write convergence: a PAT that still authenticates is left alone.
-	if ownerPAT != "" && !needsSetup && rt.patValid(ctx, ownerPAT) {
-		employee.Status.RuntimeAccount = v1alpha1.RuntimeAccountReady
-		employee.Status.RuntimeAccountMessage = ""
-		return ctrl.Result{}, nil
-	}
-
+	// Reaching here means the stored PAT is missing or dead: re-provision
+	// (idempotent per account) after the fresh admin session above.
 	provisioned, code, body, err := rt.provision(ctx, ownerEmail, runtimeOwnerScopes)
 	if err != nil {
 		return ctrl.Result{}, errWrap("provision runtime owner: ", err)

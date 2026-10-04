@@ -23,6 +23,15 @@ import (
 	"github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
 
+// revokePATs simulates PAT revocation on an initialized DB: the admin
+// password still works but every owner PAT is dead, forcing the reconciler
+// down the login repair path.
+func (s *runtimeStub) revokePATs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accounts = map[string]string{}
+}
+
 var _ = Describe("runtime account provisioning", func() {
 	var fx *fixture
 	var employee *v1alpha1.DigitalEmployee
@@ -80,13 +89,27 @@ var _ = Describe("runtime account provisioning", func() {
 
 	It("is idempotent: a PAT that still authenticates means zero runtime writes", func(ctx context.Context) {
 		pat := string(getCreds(ctx).Data[runtimeOwnerPATKey])
+		logins := fx.runtime.logins
 
 		reconcile(ctx)
 
 		Expect(fx.runtime.provisions).To(Equal(1), "no re-provision when the PAT validates")
 		Expect(fx.runtime.initializations).To(Equal(1))
+		Expect(fx.runtime.logins).To(Equal(logins), "steady state must not log in at all — logins feed the runtime's IP throttle")
 		Expect(string(getCreds(ctx).Data[runtimeOwnerPATKey])).To(Equal(pat), "the PAT must not rotate")
 		Expect(getEmployee(ctx).Status.RuntimeAccount).To(Equal(v1alpha1.RuntimeAccountReady))
+	})
+
+	It("backs off past the runtime's login lockout instead of hot-looping on 429", func(ctx context.Context) {
+		fx.runtime.revokePATs()
+		fx.runtime.rateLimitLogin = true
+
+		result := reconcile(ctx)
+
+		Expect(result.RequeueAfter).To(Equal(runtimeAccountRateLimited))
+		fresh := getEmployee(ctx)
+		Expect(fresh.Status.RuntimeAccount).To(Equal(v1alpha1.RuntimeAccountPending))
+		Expect(fresh.Status.RuntimeAccountMessage).To(ContainSubstring("throttled"))
 	})
 
 	It("stays Pending with a requeue while the runtime auth API is unreachable", func(ctx context.Context) {
@@ -116,8 +139,18 @@ var _ = Describe("runtime account provisioning", func() {
 		Expect(getEmployee(ctx).Status.RuntimeAccount).To(Equal(v1alpha1.RuntimeAccountReady))
 	})
 
-	It("reports Failed when the stored admin password was rotated out-of-band", func(ctx context.Context) {
+	It("stays Ready on an admin password rotation while the owner PAT still validates", func(ctx context.Context) {
 		fx.runtime.rotateAdminPassword("someone-else-set-this")
+		reconcile(ctx)
+
+		fresh := getEmployee(ctx)
+		Expect(fresh.Status.RuntimeAccount).To(Equal(v1alpha1.RuntimeAccountReady),
+			"the PAT is the day-to-day credential; an admin rotation must not log the account out")
+	})
+
+	It("reports Failed when the admin password rotated out-of-band and the PAT is dead", func(ctx context.Context) {
+		fx.runtime.rotateAdminPassword("someone-else-set-this")
+		fx.runtime.revokePATs()
 		reconcile(ctx)
 
 		fresh := getEmployee(ctx)
