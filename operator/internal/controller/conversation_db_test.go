@@ -16,7 +16,8 @@ import (
 // Conversation-database isolation: a shared conversation database gave every
 // runtime the same `users` table, so the first employee owned the global
 // admin and every other employee's credentials were rejected forever. These
-// specs pin the per-employee default and the "shared" escape hatch.
+// specs pin the per-employee default and the removal of the legacy shared
+// database.
 var _ = Describe("conversation database isolation", func() {
 	setup := func(ctx context.Context, database string, adminURL string) (*fixture, *dev1alpha1.DigitalEmployee) {
 		fx := newFixture(ctx)
@@ -27,6 +28,11 @@ var _ = Describe("conversation database isolation", func() {
 		_, err := fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		return fx, employee
+	}
+
+	reconcileEmployee := func(ctx context.Context, fx *fixture, employee *dev1alpha1.DigitalEmployee) error {
+		_, err := fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+		return err
 	}
 
 	fetchDeployment := func(ctx context.Context, fx *fixture, employee *dev1alpha1.DigitalEmployee) *appsv1.Deployment {
@@ -43,8 +49,8 @@ var _ = Describe("conversation database isolation", func() {
 
 	It("defaults to a per-employee database with secret, init container and env key", func(ctx context.Context) {
 		fx, employee := setup(ctx, "", "postgres://aep:pw@pg:5432/aep")
-		name, perDB := conversationDatabaseName(employee)
-		Expect(perDB).To(BeTrue())
+		name, err := conversationDatabaseName(employee)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(name).To(Equal("de_bruce_helper"))
 
 		secret := &corev1.Secret{}
@@ -95,32 +101,46 @@ var _ = Describe("conversation database isolation", func() {
 		Expect(string(fresh.Data[conversationDBKey])).To(Equal("postgres://aep:pw@pg:5432/de_bruce_helper"))
 	})
 
-	It("keeps the shared platform database for database=shared", func(ctx context.Context) {
-		fx, employee := setup(ctx, "shared", "postgres://aep:pw@pg:5432/aep")
-		_, perDB := conversationDatabaseName(employee)
-		Expect(perDB).To(BeFalse())
+	It("rejects the removed legacy database=shared", func(ctx context.Context) {
+		fx := newFixture(ctx)
+		fx.convAdminURL = "postgres://aep:pw@pg:5432/aep"
+		employee := fx.employeeFixture("bruce-helper")
+		employee.Spec.ConversationStore = dev1alpha1.ConversationStoreSpec{Backend: "postgres", Database: "shared"}
+		Expect(fx.client.Create(ctx, employee)).To(Succeed())
+
+		err := reconcileEmployee(ctx, fx, employee)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("legacy shared database"))
 
 		secret := &corev1.Secret{}
-		err := fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, secret)
+		err = fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, secret)
 		Expect(err).To(HaveOccurred())
-
-		Expect(fetchConfig(ctx, fx, employee)).To(ContainSubstring(`"$CONVERSATION_DB_URL"`))
-		Expect(fetchDeployment(ctx, fx, employee).Spec.Template.Spec.InitContainers).To(BeEmpty())
 	})
 
 	It("supports an explicit database name", func(ctx context.Context) {
 		fx, employee := setup(ctx, "tenant_a_chats", "postgres://aep:pw@pg:5432/aep")
-		name, _ := conversationDatabaseName(employee)
+		name, err := conversationDatabaseName(employee)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(name).To(Equal("tenant_a_chats"))
 		secret := &corev1.Secret{}
 		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, secret)).To(Succeed())
 		Expect(string(secret.Data[conversationDBKey])).To(HaveSuffix("/tenant_a_chats"))
 	})
 
-	It("degrades to the shared URL when the operator lacks an admin DSN", func(ctx context.Context) {
-		fx, employee := setup(ctx, "", "")
-		Expect(fetchConfig(ctx, fx, employee)).To(ContainSubstring(`"$CONVERSATION_DB_URL"`))
-		Expect(fetchDeployment(ctx, fx, employee).Spec.Template.Spec.InitContainers).To(BeEmpty())
+	It("fails loudly when the operator lacks an admin DSN", func(ctx context.Context) {
+		fx := newFixture(ctx)
+		fx.convAdminURL = ""
+		employee := fx.employeeFixture("bruce-helper")
+		employee.Spec.ConversationStore = dev1alpha1.ConversationStoreSpec{Backend: "postgres"}
+		Expect(fx.client.Create(ctx, employee)).To(Succeed())
+
+		err := reconcileEmployee(ctx, fx, employee)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("CONVERSATION_ADMIN_DB_URL"))
+
+		secret := &corev1.Secret{}
+		err = fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, secret)
+		Expect(err).To(HaveOccurred())
 	})
 
 	It("keeps sqlite employees untouched", func(ctx context.Context) {

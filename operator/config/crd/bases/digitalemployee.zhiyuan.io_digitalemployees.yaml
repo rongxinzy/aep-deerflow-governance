@@ -118,9 +118,9 @@ spec:
                   database:
                     description: |-
                       Physical database selection when Backend=postgres. Empty provisions a
-                      per-employee database (de_<name>); "shared" uses the platform-wide
-                      CONVERSATION_DB_URL database; any other value names an explicit
-                      database the operator creates on boot.
+                      per-employee database (de_<name>); any other value names an explicit
+                      database the operator creates on boot. The reserved word "shared" is
+                      rejected at reconciliation (the legacy shared database is gone).
                     pattern: ^[a-z][a-z0-9_]{0,40}$
                     type: string
                 type: object
