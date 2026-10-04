@@ -11,3 +11,16 @@
 ARG BASE=172.18.5.251:8081/zhiyuan/deerflow-gov:v11
 FROM ${BASE}
 COPY aep_deerflow_governance /opt/governance/aep_deerflow_governance
+# Guarantee the postgres conversation-store drivers regardless of which base
+# tag this layer lands on. Bases built through the upstream Dockerfile need
+# --build-arg UV_EXTRAS=postgres to carry them; bases refreshed via
+# Dockerfile.deerflow-gov get them from its pip layer. This check-first
+# install is a no-op (~seconds, no network) when the base already has the
+# drivers — the scale round saw a base published without them and every
+# postgres-backed employee crash-looped on `import asyncpg`.
+RUN /app/backend/.venv/bin/python -c "import asyncpg, psycopg, alembic" 2>/dev/null \
+ || (/app/backend/.venv/bin/python -m ensurepip --upgrade \
+  && /app/backend/.venv/bin/python -m pip install --no-cache-dir \
+       asyncpg "psycopg[binary]" psycopg-pool \
+       "langgraph-checkpoint-postgres>=3.1.2,<3.2" alembic \
+       -i https://pypi.org/simple)
