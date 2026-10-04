@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	dev1alpha1 "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Portal sessions bridge the AEP identity model onto the cookie-based
@@ -339,6 +343,44 @@ func (p *portal) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "logged out"})
 }
 
+// awaitStartup covers the select-employee race where the employee was just
+// created or approved and the operator has not reconciled it yet (phase
+// Pending, or empty on a brand-new CR). Bouncing that state to the console
+// as a 409 forces the user to retry by hand; waiting out provisioning
+// (bounded by the wake timeout, same budget as a cold hibernation wake)
+// makes the click land on a usable chat. Any settled phase returns
+// immediately — this helper never waits on Ready/Sleeping/Error.
+func (p *portal) awaitStartup(ctx context.Context, name string) (int, string) {
+	deadline := time.Now().Add(p.cfg.wakeTimeout)
+	for {
+		var item dev1alpha1.DigitalEmployee
+		if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &item); err != nil {
+			return statusOf(err), err.Error()
+		}
+		switch item.Status.Phase {
+		case dev1alpha1.PhasePending, "":
+			// Still provisioning — fall through to the wait below.
+		case dev1alpha1.PhaseError:
+			// Provisioning already failed; waiting cannot help.
+			msg := item.Status.Message
+			if msg == "" {
+				msg = "no error detail recorded"
+			}
+			return http.StatusConflict, "digital employee failed to provision: " + msg
+		default:
+			return 0, ""
+		}
+		if !time.Now().Before(deadline) {
+			return http.StatusServiceUnavailable, "digital employee is still starting; try again shortly"
+		}
+		select {
+		case <-ctx.Done():
+			return http.StatusGatewayTimeout, "request cancelled while waiting for employee startup"
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 // handleSessionEmployee selects the digital employee to chat with. The
 // ownership check reuses authorizeChat (owner/admin + Ready + credentials
 // present) so the cookie can never name an employee the caller cannot use.
@@ -353,6 +395,10 @@ func (p *portal) handleSessionEmployee(w http.ResponseWriter, r *http.Request, i
 	body.Name = normalizeEmployeeName(body.Name)
 	if !namePattern.MatchString(body.Name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid employee name"})
+		return
+	}
+	if code, errMsg := p.awaitStartup(r.Context(), body.Name); code != 0 {
+		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
 	}
 	if _, code, errMsg := p.authorizeChat(r.Context(), body.Name, ident); code != 0 {
