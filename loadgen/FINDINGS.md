@@ -165,3 +165,17 @@
   时注意别再回到无 pip 补装的基底）
 - postgres 单副本无 PV 备份 + 脏关机即 WAL 损——生产基线需要备库/定期
   pg_dump（本轮教训）
+
+### 第三轮收尾（同夜，用户批准迁移+部署后）
+
+- **5 个演示 DE 全部 per-DB postgres**：4 个 sqlite 切换 + sales-helper 解除 shared 钉死
+  （replicas 2→1）；finance/sales 走 portal select 唤醒后端到端验证（建线程 28ms、
+  冷唤醒 SSE 6.9s、runs 落各自库）；**de_conversations 共享库已 DROP**，
+  de-platform-creds 的 `CONVERSATION_DB_URL` 旧 key 已删，`CONVERSATION_ADMIN_DB_URL`
+  路径从 /de_conversations 改指 /postgres 维护库（db-init 依赖此路径，删库后必须改）。
+- **operator 0.16.0 + 新 CRD / portal 0.15.0 + PORTAL_RUNTIME_IMAGE=v19 已上 cicd**；
+  一次性探针 DE 验证 portal 新默认：CR `backend=postgres`、镜像 v19、自动建库 29 表、
+  Ready 后 API 删除零残留、探针库已 DROP。演示 CR 镜像同步 v19，
+  k3s/cicd 两个清单补 conversationStore（本 PR）。
+- 在役版本：control-service 0.8.0 / operator 0.16.0 / portal 0.15.0 / deerflow-gov v19。
+- 未批准执行（保留现状）：aep/deportal 测试数据 truncate。
