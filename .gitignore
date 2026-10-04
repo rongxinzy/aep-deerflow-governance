@@ -6,3 +6,7 @@ portal/portal
 operator/de-operator
 operator/image/
 bin/
+
+# loadgen 本地凭证与结果
+loadgen/.env.local
+loadgen/results/
