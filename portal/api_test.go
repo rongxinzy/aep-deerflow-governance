@@ -297,3 +297,10 @@ func TestApplyWithModelSelection(t *testing.T) {
 		assert.Len(t, item.Spec.Runtime.Models, 1)
 	})
 }
+
+func TestRenderSpecDefaultsToPostgresConversations(t *testing.T) {
+	p := &portal{cfg: config{namespace: "digital-employees"}}
+	spec := p.renderSpec("probe-helper", "Probe", identity{UserID: "u1", DisplayName: "U"}, "team-a", nil)
+	assert.Equal(t, "postgres", spec.Spec.ConversationStore.Backend)
+	assert.Empty(t, spec.Spec.ConversationStore.Database, "portal employees take the per-employee database default")
+}
