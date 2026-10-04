@@ -74,6 +74,21 @@ var _ = Describe("conversation database isolation", func() {
 		Expect(names).To(ContainElement(conversationSecretName(employee)))
 	})
 
+	It("converges a drifted conversation Secret instead of erroring", func(ctx context.Context) {
+		fx, employee := setup(ctx, "", "postgres://aep:pw@pg:5432/aep")
+		secret := &corev1.Secret{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, secret)).To(Succeed())
+		secret.Data[conversationDBKey] = []byte("postgres://wrong:wrong@elsewhere:5432/other")
+		Expect(fx.client.Update(ctx, secret)).To(Succeed())
+
+		_, err := fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		fresh := &corev1.Secret{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: conversationSecretName(employee)}, fresh)).To(Succeed())
+		Expect(string(fresh.Data[conversationDBKey])).To(Equal("postgres://aep:pw@pg:5432/de_bruce_helper"))
+	})
+
 	It("keeps the shared platform database for database=shared", func(ctx context.Context) {
 		fx, employee := setup(ctx, "shared", "postgres://aep:pw@pg:5432/aep")
 		_, perDB := conversationDatabaseName(employee)
