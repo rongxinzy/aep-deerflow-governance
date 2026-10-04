@@ -55,12 +55,14 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		addr:         env("PORTAL_ADDR", ":8090"),
-		aepBaseURL:   strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
-		policyMode:   env("PORTAL_POLICY_MODE", "approval"),
-		adminUsers:   set(env("PORTAL_ADMIN_USERS", "")),
-		adminRoles:   set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
-		quotaPerUser: envInt("PORTAL_QUOTA_PER_USER", 2),
+		addr:       env("PORTAL_ADDR", ":8090"),
+		aepBaseURL: strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
+		policyMode: env("PORTAL_POLICY_MODE", "approval"),
+		adminUsers: set(env("PORTAL_ADMIN_USERS", "")),
+		adminRoles: set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
+		// 0 is a meaningful value here (unlimited), which envInt rejects as
+		// unset — use the non-negative parser.
+		quotaPerUser: envIntNonNegative("PORTAL_QUOTA_PER_USER", 2),
 		namespace:    env("PORTAL_NAMESPACE", "digital-employees"),
 
 		runtimeImage:      env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v10"),
@@ -191,15 +193,27 @@ func env(key, fallback string) string {
 }
 
 func envInt(key string, fallback int) int {
+	value := envIntNonNegative(key, fallback)
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
+// envIntNonNegative parses an integer env var where 0 is a meaningful
+// setting (e.g. PORTAL_QUOTA_PER_USER=0 disables the quota). Unset or
+// malformed values still fall back.
+func envIntNonNegative(key string, fallback int) int {
+	raw := strings.TrimSpace(env(key, ""))
+	if raw == "" {
+		return fallback
+	}
 	value := 0
-	for _, c := range env(key, "") {
+	for _, c := range raw {
 		if c < '0' || c > '9' {
 			return fallback
 		}
 		value = value*10 + int(c-'0')
-	}
-	if value == 0 {
-		return fallback
 	}
 	return value
 }

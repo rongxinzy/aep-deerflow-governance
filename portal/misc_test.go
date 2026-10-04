@@ -168,3 +168,14 @@ func TestMarkActivityAndHibernating(t *testing.T) {
 	assert.True(t, hibernating(item))
 	assert.False(t, hibernating(readyCR("y", "u")))
 }
+
+func TestEnvIntNonNegativeAllowsZero(t *testing.T) {
+	t.Setenv("PORTAL_TEST_ZERO_INT", "0")
+	assert.Equal(t, 0, envIntNonNegative("PORTAL_TEST_ZERO_INT", 7), "explicit 0 must survive (quota=unlimited)")
+	assert.Equal(t, 7, envIntNonNegative("PORTAL_MISSING_INT", 7))
+	t.Setenv("PORTAL_TEST_BAD_INT", "4x")
+	assert.Equal(t, 7, envIntNonNegative("PORTAL_TEST_BAD_INT", 7))
+	// envInt keeps its legacy contract: 0 falls back.
+	t.Setenv("PORTAL_TEST_ZERO_INT2", "0")
+	assert.Equal(t, 7, envInt("PORTAL_TEST_ZERO_INT2", 7))
+}
