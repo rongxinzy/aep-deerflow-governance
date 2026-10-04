@@ -24,7 +24,7 @@ import (
 
 func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configName(employee), Namespace: employee.Namespace}}
-	configMap.Data = map[string]string{"config.yaml": renderConfig(employee)}
+	configMap.Data = map[string]string{"config.yaml": renderConfig(employee, r.conversationURLKey(employee))}
 	if err := controllerutil.SetControllerReference(employee, configMap, r.Scheme); err != nil {
 		return err
 	}
@@ -44,6 +44,14 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 	if employee.Spec.Persistence.Enabled {
 		if err := r.ensurePVC(ctx, employee); err != nil {
 			return fmt.Errorf("home pvc: %w", err)
+		}
+	}
+
+	// Per-employee conversation database: child Secret with the rendered
+	// DSN (a no-op for sqlite and "shared" employees).
+	if database, perDB := conversationDatabaseName(employee); perDB {
+		if err := r.ensureConversationSecret(ctx, employee, database); err != nil {
+			return fmt.Errorf("conversation db: %w", err)
 		}
 	}
 
@@ -176,18 +184,37 @@ func renderModelEntry(route v1alpha1.RuntimeModel) map[string]any {
 	return entry
 }
 
-func databaseConfig(backend string) map[string]any {
+func databaseConfigWithURL(backend, conversationURLKey string) map[string]any {
 	if backend == "postgres" {
 		return map[string]any{
 			"backend":      "postgres",
-			"postgres_url": "$CONVERSATION_DB_URL",
+			"postgres_url": conversationURLKey,
 		}
 	}
 	// Default: per-employee SQLite on the home volume.
 	return map[string]any{"sqlite_dir": "/var/lib/deerflow/data"}
 }
 
-func renderConfig(employee *v1alpha1.DigitalEmployee) string {
+// databaseConfig keeps the legacy (boolean) shape for unit tests.
+func databaseConfig(backend string, perEmployeeDB bool) map[string]any {
+	urlKey := "$CONVERSATION_DB_URL"
+	if perEmployeeDB {
+		urlKey = "$" + conversationDBKey
+	}
+	return databaseConfigWithURL(backend, urlKey)
+}
+
+// conversationURLKey resolves the postgres_url env key: the per-employee
+// DSN key when the operator can render child Secret DSNs, the platform-wide
+// key otherwise (spec "shared" or no admin DSN configured).
+func (r *DigitalEmployeeReconciler) conversationURLKey(employee *v1alpha1.DigitalEmployee) string {
+	if _, perDB := conversationDatabaseName(employee); perDB && r.ConversationAdminDBURL != "" {
+		return "$" + conversationDBKey
+	}
+	return "$CONVERSATION_DB_URL"
+}
+
+func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string) string {
 	spec := employee.Spec
 	// The runtime picks models by name; models[0] is the default. Legacy
 	// singular fields synthesize a one-entry list so existing CRs render
@@ -217,9 +244,10 @@ func renderConfig(employee *v1alpha1.DigitalEmployee) string {
 		// Threads/checkpointer DB: centralized PostgreSQL enables
 		// multi-replica employees and cross-employee queries; per-employee
 		// SQLite on the home volume remains the default (single-writer).
-		// The CONVERSATION_DB_URL env var is injected from the platform
-		// credentials Secret when backend=postgres.
-		"database": databaseConfig(spec.ConversationStore.Backend),
+		// With backend=postgres the default is one database per employee
+		// (DE_CONVERSATION_DB_URL from a child Secret); "shared" keeps the
+		// platform-wide CONVERSATION_DB_URL database.
+		"database": databaseConfigWithURL(spec.ConversationStore.Backend, conversationURLKey),
 		// Custom agents (delegation targets) default to disabled upstream;
 		// without this every get_agent/list_agents tool call 403s and the
 		// agent reports "智能体服务连续调用失败" instead of answering.
@@ -352,6 +380,13 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 	if spec.Memory != nil {
 		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: memkeySecretName(employee)})
 	}
+	// Per-employee conversation DSN rides in its own child Secret (a key
+	// distinct from the platform CONVERSATION_DB_URL, so envFrom order is
+	// irrelevant).
+	convDatabase, convPerDB := conversationDatabaseName(employee)
+	if convPerDB && r.ConversationAdminDBURL != "" {
+		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: conversationSecretName(employee)})
+	}
 	container := corev1.Container{
 		Name:  "runtime",
 		Image: spec.Runtime.Image,
@@ -392,6 +427,12 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels(employee)},
 				Spec: corev1.PodSpec{
+					InitContainers: func() []corev1.Container {
+						if init := r.conversationInitContainer(employee, convDatabase); init != nil {
+							return []corev1.Container{*init}
+						}
+						return nil
+					}(),
 					Containers: []corev1.Container{container},
 					Volumes:    volumes(employee),
 				},

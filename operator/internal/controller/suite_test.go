@@ -113,6 +113,7 @@ type runtimeStub struct {
 	provisions      int
 	failProvision   int  // non-zero: provision answers this status instead
 	hideAuthAPI     bool // simulate an image that predates the auth API
+	rateLimitLogin  bool // login answers 429 (IP throttle) regardless of credentials
 }
 
 func newRuntimeStub() *runtimeStub {
@@ -169,6 +170,10 @@ func (s *runtimeStub) handler() http.Handler {
 		defer s.mu.Unlock()
 		_ = r.ParseForm()
 		s.logins++
+		if s.rateLimitLogin {
+			writeRuntimeJSON(w, http.StatusTooManyRequests, map[string]any{"detail": "Too many login attempts. Try again later."})
+			return
+		}
 		if s.needsSetup || r.Form.Get("username") != s.adminEmail || r.Form.Get("password") != s.adminPassword {
 			writeRuntimeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "incorrect email or password"})
 			return
@@ -272,14 +277,15 @@ func writeRuntimeJSON(w http.ResponseWriter, status int, body any) {
 // fixture wires a reconciler against a fake cluster plus the OpenViking and
 // runtime auth stubs.
 type fixture struct {
-	client     client.Client
-	stub       *ovStub
-	server     *httptest.Server
-	runtime    *runtimeStub
-	runtimeSrv *httptest.Server
-	runtimeURL string // overrides the runtime auth base (dead URL specs)
-	wakeDBURL  string // non-empty enables the hibernation wake-db source
-	gatewayURL string // non-empty enables channel-gateway mode
+	client       client.Client
+	stub         *ovStub
+	server       *httptest.Server
+	runtime      *runtimeStub
+	runtimeSrv   *httptest.Server
+	runtimeURL   string // overrides the runtime auth base (dead URL specs)
+	wakeDBURL    string // non-empty enables the hibernation wake-db source
+	gatewayURL   string // non-empty enables channel-gateway mode
+	convAdminURL string // non-empty enables per-employee conversation databases
 }
 
 func newFixture(ctx context.Context, objects ...client.Object) *fixture {
@@ -308,6 +314,8 @@ func (f *fixture) reconciler() *DigitalEmployeeReconciler {
 		r.WakeDBFn = func(context.Context, string) (string, error) { return f.wakeDBURL, nil }
 	}
 	r.ChannelGatewayURL = f.gatewayURL
+	r.ConversationAdminDBURL = f.convAdminURL
+	r.ConversationInitImage = "reg/postgres:17-alpine"
 	r.DefaultIdleSeconds = 1800
 	return r
 }

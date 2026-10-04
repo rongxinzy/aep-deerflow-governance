@@ -79,8 +79,10 @@ func main() {
 		WakeDBFn: func(ctx context.Context, namespace string) (string, error) {
 			return readSecretKey(ctx, mgr.GetClient(), namespace, wakeDBSecret, "PORTAL_DB_URL")
 		},
-		DefaultIdleSeconds: int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
-		ChannelGatewayURL:  envOrDefault("CHANNEL_GATEWAY_URL", ""),
+		DefaultIdleSeconds:     int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
+		ChannelGatewayURL:      envOrDefault("CHANNEL_GATEWAY_URL", ""),
+		ConversationAdminDBURL: envOrDefault("CONVERSATION_ADMIN_DB_URL", ""),
+		ConversationInitImage:  envOrDefault("CONVERSATION_INIT_IMAGE", "postgres:17.6-alpine"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")

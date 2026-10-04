@@ -54,6 +54,14 @@ type DigitalEmployeeReconciler struct {
 	// mode (the platform websockets live in de-channel-gateway) and lifts
 	// the WeCom hibernation refusal.
 	ChannelGatewayURL string
+	// ConversationAdminDBURL enables per-employee conversation databases:
+	// the maintenance DSN (operator env, sourced from the platform
+	// credentials Secret) the rendered child Secret DSNs derive from. Empty
+	// degrades backend=postgres employees to the shared CONVERSATION_DB_URL.
+	ConversationAdminDBURL string
+	// ConversationInitImage is the psql-carrying image the db-init init
+	// container uses to CREATE DATABASE before the runtime boots.
+	ConversationInitImage string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
