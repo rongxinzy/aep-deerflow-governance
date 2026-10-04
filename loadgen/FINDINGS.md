@@ -154,14 +154,50 @@
 
 ## 后续待办（未做）
 
-- portal 镜像重建部署（#11 envInt 修复生效；顺带把 C8 修掉）
-- **C8【中】选休眠员工 409**：portal `/session/employee` 在员工 Sleeping/
-  Pending 时直接 409，唤醒只挂在 chat 代理路径——Console 用户点休眠员工
-  会撞错误而非等待（loadgen 两次复现）。
-- AEP 侧：遥测批写单事务化（B2）、控制事件扇出 INSERT..SELECT（B3）、
-  control_events 补索引、limit clamp、PATCH users 拒绝未知字段（A2/A3/C4）
-- deerflow-gov 镜像：postgres 扩展应在构建期 `--build-arg UV_EXTRAS=postgres`
-  烘进 venv（当前靠治理 Dockerfile 的 pip 补装，v18.1 已含；portal 发镜像
-  时注意别再回到无 pip 补装的基底）
-- postgres 单副本无 PV 备份 + 脏关机即 WAL 损——生产基线需要备库/定期
-  pg_dump（本轮教训）
+（2026-10-04 第二轮收尾后，原待办 ①②③④ 已全部落地，见下节；仅余
+PR #203 迁移改名待并 + 观察项。）
+
+- **观察项**：user_sessions 因历轮压测累积到 6402 行且未回收——扇出/
+  心跳路径在万级会话下的表现需复测；生产需确认会话保留策略覆盖
+  未活跃会话的回收。
+
+## 第二轮收尾（2026-10-04 晚）：待办全清 + 前后对照
+
+### 合并部署
+
+- **PR 全并**：governance #16（C8）/ #17（镜像 extras + pg 备份）；
+  AEP #199（B2 批写）/#200（B3 扇出+索引）/#201（limit clamp）/
+  #202（A3 PATCH 拒绝）。AEP main 合并后全量 go test + npm test 复跑
+  全绿（防堆叠合并的语义冲突）。
+- **镜像**：`aep-control-service:0.8.0`（GOPROXY=goproxy.cn 构建）、
+  `de-portal:0.14.0`（#11 envIntNonNegative + C8 修复随镜像生效）、
+  `deerflow-gov:v19`（源刷新层验证构建；load-de-03 实测冷唤醒 1.5s/
+  热轮 767ms）。迁移 025 索引随 0.8.0 自动应用（deployed 后台
+  `idx_control_events_deployment_created`/`idx_control_events_supersedes_active`
+  已确认存在）。
+
+### 量化前后对照（同环境实测）
+
+| 指标 | 修复前 | 修复后 | 说明 |
+|------|--------|--------|------|
+| 遥测批写 100 条（客户端 p50） | 571ms | **97ms** | 5.9×；服务端均值 587→113ms |
+| 全局事件创建 p50 | 135-155ms @383 会话 | **519ms @6402 会话** | 每会话成本 0.37→0.08ms；旧代码外推同规模 ~2.4s |
+| `?limit=500` 实得行数 | 50（静默） | **200（clamp）** | 实测 |
+| PATCH teamIds/roleIds | 200 静默丢弃 | **400 MEMBERSHIP_UPDATE_UNSUPPORTED** | 实测 |
+| 点刚创建员工（select） | 立即 409 | **等待 37.1s 后 200** | C8 实测（provisioning 完成自动放行） |
+| PORTAL_QUOTA_PER_USER=0 | 回落默认（无法不限） | **0=不限** | env=1→409 / env=0→建成功，实测后恢复 50 |
+| 浸泡回归 | — | 86rps 零错误，读 p95≤8ms | 0.8.0+0.14.0 部署后 |
+
+### ③④ 落地
+
+- **镜像 extras 保障**：`Dockerfile.deerflow-gov-governance` 增加
+  check-first 驱动探针 + pip 兜底（基底缺驱动时秒级补装；基底已有则
+  无网络 no-op，govtest 标签实测）。DEVELOPMENT.md 固化发版纪律：
+  基底走上游构建必须 `--build-arg UV_EXTRAS=postgres`。
+- **PG 备份基线**：`k3s/pg-backup.yaml` CronJob（digital-employees ns，
+  凭据走 de-platform-creds）每晚 02:23 `pg_dumpall` → 独立 local-path
+  PVC，保留 7 份。已部署并实跑验证：3.5MB dump 含 4 库（aep/
+  de_conversations/de_load_de_03/deportal）+ 全部角色。**坑**（已修）：
+  pg_dumpall 不把 connstring 密码传给子 pg_dump（必须 PG* env）；校验
+  用 `head` 提前关管道会撞 SIGPIPE（pipefail 下误报），改 `sed -n`。
+  注：备份卷与数据同节点 local-path——误操作/逻辑损坏可恢复，非异地容灾。
