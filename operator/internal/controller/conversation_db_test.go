@@ -65,6 +65,12 @@ var _ = Describe("conversation database isolation", func() {
 		Expect(init.Env[0].ValueFrom.SecretKeyRef.Key).To(Equal(conversationAdminURLKey))
 		Expect(init.Env[0].ValueFrom.SecretKeyRef.Name).To(Equal(employee.Spec.Credentials.Name))
 
+		runtimeEnv := map[string]string{}
+		for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+			runtimeEnv[item.Name] = item.Value
+		}
+		Expect(runtimeEnv["UV_EXTRAS"]).To(Equal("postgres"), "postgres employees must resync the asyncpg extra")
+
 		names := []string{}
 		for _, source := range deployment.Spec.Template.Spec.Containers[0].EnvFrom {
 			if source.SecretRef != nil {
