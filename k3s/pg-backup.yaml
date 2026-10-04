@@ -1,0 +1,91 @@
+# Nightly logical backup of the shared postgres instance (AEP + portal +
+# per-DE conversation databases). Born from the scale-round WAL incident:
+# local-path single-replica postgres loses its checkpoint record on a dirty
+# shutdown, and there was no fallback copy. pg_dumpall covers every database
+# and role in one file; dumps stay on the same node's local-path volume, so
+# this is an accident-recovery baseline, not off-site disaster recovery.
+#
+# Namespace: digital-employees, because the connection string lives in the
+# de-platform-creds secret there (cross-namespace secretRef is not a thing).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pg-backups
+  namespace: digital-employees
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+  namespace: digital-employees
+spec:
+  # Off the :00/:30 marks; 02:2x is the quiet window on this stack.
+  schedule: "23 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pg-backup
+              image: 172.18.5.251:8081/zhiyuan/postgres:17.6-alpine
+              env:
+                - name: ADMIN_DB_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: de-platform-creds
+                      key: CONVERSATION_ADMIN_DB_URL
+              command: ["sh", "-ec"]
+              args:
+                - |
+                  set -eu
+                  # Without pipefail a mid-stream pg_dumpall death is masked
+                  # by gzip's success and ships a truncated "backup".
+                  set -o pipefail
+                  # pg_dumpall does not forward a connstring password to its
+                  # per-database pg_dump children — credentials must arrive
+                  # via the PG* environment.
+                  export PGUSER="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://([^:]+):.*#\1#')"
+                  export PGPASSWORD="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://[^@]+:([^@]+)@.*#\1#')"
+                  export PGHOST="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://[^@]+@([^:/]+).*#\1#')"
+                  export PGPORT="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#.*:([0-9]+)/.*#\1#')"
+                  stamp="$(date -u +%Y-%m-%dT%H%M%SZ)"
+                  target="/backups/aep-all-${stamp}.sql.gz"
+                  # The whole cluster (roles + every database, including
+                  # per-DE conversation stores) lands in one plain-text dump.
+                  pg_dumpall | gzip > "${target}.tmp"
+                  # A failed pg_dumpall must not look like a backup: validate
+                  # the plain-text header before promoting the file. (sed, not
+                  # head: an early-exiting reader raises SIGPIPE under
+                  # pipefail and fails a perfectly good dump.)
+                  gunzip -c "${target}.tmp" | sed -n '1,4p' | grep -q 'database cluster dump' \
+                    || { echo "dump validation failed"; rm -f "${target}.tmp"; exit 1; }
+                  mv "${target}.tmp" "${target}"
+                  echo "wrote ${target} ($(du -h "${target}" | cut -f1))"
+                  # Retention: keep the newest 7 dumps.
+                  ls -1t /backups/aep-all-*.sql.gz | tail -n +8 | xargs -r rm -v
+                  ls -lh /backups
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: pg-backups

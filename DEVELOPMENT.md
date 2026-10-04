@@ -85,6 +85,12 @@ server-side apply——发布 desired state 后真实路由生效（compose dev 
 - `CMD` 显式 `PYTHONPATH=.:/opt/governance`
 - **治理包任何改动都必须重建镜像**（否则构造失败，每回合静默
   "(No response from agent)"）
+- **postgres 会话存储驱动必须随镜像走**：基底若走上游 `backend/Dockerfile`
+  构建，必须 `--build-arg UV_EXTRAS=postgres`（构建期烘进 venv；运行时
+  env 无效）。两个刷新层（`k3s/Dockerfile.deerflow-gov` 与
+  `k3s/Dockerfile.deerflow-gov-governance`）各自带 check-first 的 pip
+  兜底安装——基底缺驱动时 `import asyncpg` 直接 CrashLoop（压测轮实测）。
+  发新 tag 请务必走这两个刷新层之一。
 
 ```bash
 docker build -t ${REG}/deerflow-gov:vN . && docker push ${REG}/deerflow-gov:vN
