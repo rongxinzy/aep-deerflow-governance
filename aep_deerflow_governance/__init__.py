@@ -258,11 +258,51 @@ class AepGovernanceMiddleware(AgentMiddleware):
         )
 
     # ------------------------------------------------------ knowledge scope
+    # The deployed weknora bridges expose two different tool surfaces:
+    # - PyPI tencent-weknora-mcp (cicd): weknora_hybrid_search / wiki_search /
+    #   list_knowledge / get_knowledge_base with a single `kb_id`, plus a wide
+    #   admin surface (create_tenant, delete_knowledge_base, create_model, …).
+    # - WeKnora's own MCP (dev): knowledge_search with `knowledge_base_ids`.
+    # DeerFlow may deliver either with a server-alias prefix (weknora_ /
+    # weknora__). Under an explicit whitelist policy the weknora server is
+    # default-deny: only these kb-scoped read tools pass, and only with an
+    # in-whitelist kb_id / knowledge_base_ids.
+    _WEKNORA_READ_TOOLS = frozenset({
+        "hybrid_search",          # retrieval (kb_id)
+        "wiki_search",            # retrieval (kb_id)
+        "wiki_read_page",         # retrieval (kb_id)
+        "wiki_index_view",        # retrieval (kb_id)
+        "list_knowledge",         # list documents in one kb (kb_id)
+        "get_knowledge_base",     # describe one kb (kb_id)
+        "knowledge_search",       # dsh bridge retrieval (knowledge_base_ids)
+    })
+
+    # Full known surface of both bridges (used to attribute bare,
+    # unprefixed tool names to the weknora server — default-deny there).
+    _WEKNORA_KNOWN_TOOLS = _WEKNORA_READ_TOOLS | frozenset({
+        "create_tenant", "list_tenants", "create_knowledge_base", "list_knowledge_bases",
+        "delete_knowledge_base", "create_knowledge_from_file", "create_knowledge_from_url",
+        "get_knowledge", "delete_knowledge", "list_chunks", "delete_chunk",
+        "create_model", "list_models", "get_model",
+        "create_session", "get_session", "list_sessions", "delete_session",
+        "chat", "agent_chat", "list_agents", "get_agent",
+    })
+
     @staticmethod
-    def _is_knowledge_search(name: str) -> bool:
-        """The weknora MCP server exposes knowledge_search; DeerFlow may
-        prefix MCP tools with the server alias (weknora__knowledge_search)."""
-        return name == "knowledge_search" or name.endswith("__knowledge_search")
+    def _strip_server_prefix(name: str) -> str:
+        """DeerFlow prefixes MCP tools with the server alias; the operator
+        registers the server as 'weknora' (weknora_ or weknora__ variants)."""
+        for prefix in ("weknora__", "weknora_"):
+            if name.startswith(prefix):
+                return name[len(prefix):]
+        return name
+
+    @classmethod
+    def _is_weknora_tool(cls, name: str) -> bool:
+        if name.startswith("weknora_"):
+            return True
+        stripped = cls._strip_server_prefix(name)
+        return stripped != name or name in cls._WEKNORA_KNOWN_TOOLS
 
     def _knowledge_note(self) -> str:
         """Prompt line listing this employee's usable knowledge bases."""
@@ -270,35 +310,53 @@ class AepGovernanceMiddleware(AgentMiddleware):
             return ""
         listing = "、".join(f"{kb}（{name}）" for kb, name in sorted(self.knowledge_bases.items())) or "未连接任何知识库"
         return (f"本数字员工可用的知识库：{listing}。"
-                f"调用 knowledge_search 时必须显式传 knowledge_base_ids 且只使用上述 id；"
-                f"省略该参数或使用范围外 id 会被拒绝。")
+                f"知识检索只允许使用上述知识库：检索类工具（hybrid_search / wiki_search / knowledge_search 等）"
+                f"必须显式传 kb_id 或 knowledge_base_ids，且只使用上述 id；"
+                f"知识库的管理类操作（创建、删除、上传等）一律不可用，不要尝试。")
 
     def _knowledge_whitelist_denial(self, call: Any) -> ToolMessage | None:
         """Denial decision for the employee's knowledge-base whitelist.
 
-        The weknora bridge credential is tenant-wide: omitting
-        knowledge_base_ids searches every base the credential can see, so a
-        configured whitelist must see explicit, in-list ids. Fail closed.
+        The weknora bridge credential is tenant-wide and, on the deployed
+        PyPI bridge, carries admin rights (create/delete tenant, knowledge
+        base, model). Under an explicit whitelist policy the whole weknora
+        server is therefore default-deny: only kb-scoped read tools pass,
+        only with explicit in-whitelist ids (omitting the id would act on
+        everything the credential sees). Everything else on the server —
+        admin writes, session chat, kb-less listings — is refused. Legacy
+        employees (no whitelist configured) keep the unrestricted bridge.
         """
         if self.knowledge_bases is None:
             return None
-        if not self._is_knowledge_search(str(getattr(call, "name", "") or "")):
+        name = str(getattr(call, "name", "") or "")
+        if not self._is_weknora_tool(name):
             return None
+        tool = self._strip_server_prefix(name)
         args = dict(getattr(call, "args", None) or {})
-        requested = args.get("knowledge_base_ids")
-        ids = [str(item) for item in requested if str(item)] if isinstance(requested, list) else []
-        if requested and isinstance(requested, list) and ids and all(i in self.knowledge_bases for i in ids):
-            print(f"[aep-governance] ALLOW knowledge_search ids={ids}", flush=True)
-            return None
         listing = "、".join(f"{kb}（{self.knowledge_bases[kb]}）" for kb in sorted(self.knowledge_bases)) or "（未连接任何知识库）"
-        print(f"[aep-governance] DENY knowledge_search ids={ids} allowed={sorted(self.knowledge_bases)}", flush=True)
-        return ToolMessage(
-            content=(f"DENIED knowledge_search: 本次检索未限定在本数字员工可用的知识库范围内。"
-                     f"可用知识库：{listing}。"
-                     f"调用 knowledge_search 时必须显式传 knowledge_base_ids，且只使用上述 id；"
-                     f"省略该参数会检索全部知识库，一律被拒绝。"),
+        deny = lambda reason: ToolMessage(  # noqa: E731 - local readability
+            content=f"DENIED {name}: {reason} 可用知识库：{listing}。",
             tool_call_id=str(getattr(call, "id", "") or ""),
         )
+        if tool not in self._WEKNORA_READ_TOOLS:
+            print(f"[aep-governance] DENY weknora tool={name} (not a whitelisted read tool)", flush=True)
+            return deny("该知识服务工具不在数字员工可用范围内（仅只读检索类可用）。")
+        # kb_id (single) and knowledge_base_ids (list) are the two id shapes
+        # the two bridges use; both must be explicit and in-whitelist.
+        ids: list[str] = []
+        if isinstance(args.get("kb_id"), str):
+            ids.append(args["kb_id"])
+        requested = args.get("knowledge_base_ids")
+        if isinstance(requested, list):
+            ids.extend(str(item) for item in requested if str(item))
+        if not ids:
+            print(f"[aep-governance] DENY weknora tool={name} (no explicit kb id)", flush=True)
+            return deny("必须显式传 kb_id（或 knowledge_base_ids）指定知识库，省略该参数会被拒绝。")
+        if not all(i in self.knowledge_bases for i in ids):
+            print(f"[aep-governance] DENY weknora tool={name} ids={ids} allowed={sorted(self.knowledge_bases)}", flush=True)
+            return deny("本次访问的知识库不在本数字员工可用范围内。")
+        print(f"[aep-governance] ALLOW weknora tool={name} ids={ids}", flush=True)
+        return None
 
     # ------------------------------------------------------------ hooks
     def _governance_message(self, aep_user: str | None, visible: frozenset[str]) -> SystemMessage:
