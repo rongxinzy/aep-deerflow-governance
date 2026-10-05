@@ -39,6 +39,13 @@ class FakeRequest:
         self.tool_call = call
 
 
+class FakeRequestDict:
+    """langgraph shape: tool_call is a TypedDict, not an object."""
+
+    def __init__(self, call: dict[str, Any]):
+        self.tool_call = call
+
+
 def middleware(knowledge_bases: dict[str, str] | None) -> AepGovernanceMiddleware:
     return AepGovernanceMiddleware(
         aep_base_url="http://unused.invalid",
@@ -70,6 +77,7 @@ def test_absent_kwapp_keeps_legacy_unrestricted() -> None:
 def test_kb_id_read_tools_pass_with_in_whitelist_id() -> None:
     mw = middleware(WHITELIST)
     for name in ("weknora_hybrid_search", "weknora__hybrid_search", "hybrid_search",
+                 "mcp__weknora__hybrid_search",  # ToolNode execution name
                  "weknora_wiki_search", "weknora_list_knowledge", "weknora_get_knowledge_base"):
         assert outcome(mw, FakeCall(name, {"kb_id": "kb-2", "query": "q"})) == "OK", name
 
@@ -108,6 +116,8 @@ def test_admin_and_session_tools_are_denied_under_policy() -> None:
         ("weknora_list_knowledge_bases", {}),
         ("weknora_chat", {"session_id": "s", "query": "q"}),
         ("delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("mcp__weknora__list_knowledge_bases", {}),
         ("weknora_get_knowledge", {"knowledge_id": "k1"}),
     ]:
         result = outcome(mw, FakeCall(name, args))
@@ -119,6 +129,23 @@ def test_non_weknora_tools_are_untouched() -> None:
     mw = middleware(WHITELIST)
     assert outcome(mw, FakeCall("web_search", {"query": "q"})) == "OK"
     assert outcome(mw, FakeCall("other__hybrid_search", {"kb_id": "kb-1"})) == "OK"
+    assert outcome(mw, FakeCall("mcp__weather__hybrid_search", {})) == "OK"
+
+
+def test_langgraph_dict_shaped_tool_calls_are_enforced() -> None:
+    # langgraph hands ToolCallRequest.tool_call as a TypedDict, not an
+    # object — the live runtime bypass that shipped before this regression
+    # test read getattr(call, "name") off the dict and matched nothing.
+    mw = middleware(WHITELIST)
+
+    def dict_outcome(name: str, args: dict[str, Any]) -> ToolMessage | str:
+        request = FakeRequestDict({"name": name, "args": args, "id": "c1"})
+        return mw.wrap_tool_call(request, handler=lambda req: "OK")
+
+    assert dict_outcome("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"}) == "OK"
+    denied_call = dict_outcome("weknora_hybrid_search", {"kb_id": "kb-x", "query": "q"})
+    assert denied(denied_call)
+    assert denied(dict_outcome("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}))
 
 
 def test_governance_message_lists_bases_iff_configured() -> None:

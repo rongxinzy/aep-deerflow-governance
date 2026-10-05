@@ -30,6 +30,14 @@ from langchain_core.messages import SystemMessage, ToolMessage
 _GOVERNANCE_TAG = "aep_governance_v1"
 
 
+def _tool_field(call: Any, key: str, default: Any = None) -> Any:
+    """Read one field off a tool call. langgraph hands ToolCallRequest.tool_call
+    as a TypedDict (name/args/id keys); older shapes and tests may use objects."""
+    if isinstance(call, dict):
+        return call.get(key, default)
+    return getattr(call, key, default)
+
+
 class _AepClient:
     """Minimal sync AEP control-service client: password login + scope."""
 
@@ -171,6 +179,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         # Employee knowledge-base whitelist (kb id -> display name). None =
         # legacy unrestricted bridge credential; {} = deny every search.
         self.knowledge_bases = None if knowledge_bases is None else {str(k): str(v) for k, v in knowledge_bases.items()}
+        print(f"[aep-governance] construct governed={sorted(self.governed)} kb={sorted(self.knowledge_bases) if self.knowledge_bases is not None else None}", flush=True)
         # Display name of this employee's bot on the IM platform: @-mentions
         # of this name address the bot itself, not a delegation target.
         self.im_bot_name = (im_bot_name or "").strip() or None
@@ -290,8 +299,15 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     @staticmethod
     def _strip_server_prefix(name: str) -> str:
-        """DeerFlow prefixes MCP tools with the server alias; the operator
-        registers the server as 'weknora' (weknora_ or weknora__ variants)."""
+        """DeerFlow delivers MCP tools under server-qualified names. The
+        model-visible form is ``weknora_<tool>``/``weknora__<tool>``; the
+        ToolNode execution name is the LangChain MCP adapter form
+        ``mcp__weknora__<tool>``. Normalize every variant to the bare tool
+        name (segment after the weknora token)."""
+        parts = name.split("__")
+        for index, part in enumerate(parts):
+            if part == "weknora" and index + 1 < len(parts):
+                return parts[-1]
         for prefix in ("weknora__", "weknora_"):
             if name.startswith(prefix):
                 return name[len(prefix):]
@@ -299,7 +315,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     @classmethod
     def _is_weknora_tool(cls, name: str) -> bool:
-        if name.startswith("weknora_"):
+        if name.startswith("weknora_") or "weknora" in name.split("__"):
             return True
         stripped = cls._strip_server_prefix(name)
         return stripped != name or name in cls._WEKNORA_KNOWN_TOOLS
@@ -328,15 +344,15 @@ class AepGovernanceMiddleware(AgentMiddleware):
         """
         if self.knowledge_bases is None:
             return None
-        name = str(getattr(call, "name", "") or "")
+        name = str(_tool_field(call, "name", "") or "")
         if not self._is_weknora_tool(name):
             return None
         tool = self._strip_server_prefix(name)
-        args = dict(getattr(call, "args", None) or {})
+        args = dict(_tool_field(call, "args", None) or {})
         listing = "、".join(f"{kb}（{self.knowledge_bases[kb]}）" for kb in sorted(self.knowledge_bases)) or "（未连接任何知识库）"
         deny = lambda reason: ToolMessage(  # noqa: E731 - local readability
             content=f"DENIED {name}: {reason} 可用知识库：{listing}。",
-            tool_call_id=str(getattr(call, "id", "") or ""),
+            tool_call_id=str(_tool_field(call, "id", "") or ""),
         )
         if tool not in self._WEKNORA_READ_TOOLS:
             print(f"[aep-governance] DENY weknora tool={name} (not a whitelisted read tool)", flush=True)
@@ -425,16 +441,16 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     def _check(self, request: Any) -> ToolMessage | None:
         """Denial decision for one governed tool call; None means allowed."""
-        call = getattr(request, "tool_call", None)
+        call = getattr(request, "tool_call", None) or {}
         # Knowledge-base whitelist first: it is per-employee static policy
         # (no AEP round-trip) and independent of the dept-governed set.
         denial = self._knowledge_whitelist_denial(call)
         if denial is not None:
             return denial
-        name = getattr(call, "name", "") or ""
+        name = str(_tool_field(call, "name", "") or "")
         if name not in self.governed:
             return None
-        args = dict(getattr(call, "args", None) or {})
+        args = dict(_tool_field(call, "args", None) or {})
         dept = str(args.get("dept", "")).strip()
         aep_user = self.resolve_aep_user(getattr(request, "runtime", None))
         visible = self.visible_teams(aep_user)
@@ -442,14 +458,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
             print(f"[aep-governance] DENY guest tool={name} dept={dept}", flush=True)
             return ToolMessage(
                 content="DENIED: 当前为访客身份（未绑定企业账号），无法查询企业数据。请联系管理员绑定企业账号后，按你的权限查询。",
-                tool_call_id=getattr(call, "id", "") or "",
+                tool_call_id=str(_tool_field(call, "id", "") or ""),
             )
         team_id = self.name_to_team.get(dept)
         if team_id is not None and team_id in visible:
             print(f"[aep-governance] ALLOW user={aep_user} tool={name} dept={dept}", flush=True)
             return None
         print(f"[aep-governance] DENY user={aep_user} tool={name} dept={dept}", flush=True)
-        return self._denied(getattr(call, "id", "") or "", dept or "?", visible)
+        return self._denied(str(_tool_field(call, "id", "") or ""), dept or "?", visible)
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> ToolMessage:
         denied = self._check(request)
