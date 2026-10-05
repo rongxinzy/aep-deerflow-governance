@@ -133,6 +133,12 @@ spec:
                 required:
                 - name
                 type: object
+              description:
+                description: |-
+                  Description is the business-layer purpose statement (用途说明);
+                  the operator never interprets it.
+                maxLength: 500
+                type: string
               displayName:
                 type: string
               governance:
@@ -182,6 +188,34 @@ spec:
                 description: KnowledgeSpec wires the enterprise knowledge base (WeKnora)
                   via MCP.
                 properties:
+                  bases:
+                    description: |-
+                      Bases is the employee's explicit knowledge-base whitelist (WeKnora
+                      kb ids plus display-name snapshots). Non-nil means an explicit
+                      policy: the operator renders it into the governance middleware,
+                      which denies knowledge_search calls outside the list (an empty
+                      non-nil list denies every search). Nil keeps the legacy behavior of
+                      an unrestricted bridge credential.
+                      No omitempty: an explicitly empty list (deny every search) must
+                      survive JSON round-trips; absent/null decodes back to nil (legacy).
+                    items:
+                      description: |-
+                        KnowledgeBaseRef references one WeKnora knowledge base by id with a
+                        display-name snapshot for the console.
+                      properties:
+                        id:
+                          description: ID is the WeKnora knowledge-base id.
+                          type: string
+                        name:
+                          description: Name is the knowledge-base display name at
+                            assignment time.
+                          type: string
+                      required:
+                      - id
+                      - name
+                      type: object
+                    maxItems: 200
+                    type: array
                   mcpURL:
                     description: MCPURL of the WeKnora MCP bridge endpoint.
                     type: string
@@ -368,6 +402,33 @@ spec:
                 - model
                 - type
                 type: object
+              skills:
+                description: |-
+                  Skills are the AEP skills enabled for this employee (set by the
+                  business layer; the operator never interprets them). Each entry
+                  pins the skill and the published version chosen at creation.
+                items:
+                  description: |-
+                    SkillRef registers one AEP skill enabled for the employee, pinned to the
+                    published version chosen at creation.
+                  properties:
+                    id:
+                      description: ID is the AEP skill identifier (server-generated
+                        slug).
+                      type: string
+                    name:
+                      description: Name is the skill display name at assignment time.
+                      type: string
+                    version:
+                      description: Version is the published skill version to use.
+                      type: string
+                  required:
+                  - id
+                  - name
+                  - version
+                  type: object
+                maxItems: 200
+                type: array
               team:
                 description: |-
                   Team scopes the employee to a department. Members of this AEP team
@@ -375,6 +436,61 @@ spec:
                   admins bypass all team scoping. Empty means visible to everyone
                   (legacy behavior for employees created before team scoping).
                 type: string
+              visibility:
+                description: |-
+                  Visibility is the employee's explicit open scope (who may see and
+                  converse with it), enforced by the business layer. Nil keeps the
+                  legacy owner/team rules.
+                properties:
+                  mode:
+                    description: |-
+                      Mode selects the scope: "all" opens the employee to every user,
+                      "restricted" limits it to the listed teams and users.
+                    enum:
+                    - all
+                    - restricted
+                    type: string
+                  teams:
+                    description: Teams lists AEP teams whose members may use the employee.
+                    items:
+                      description: |-
+                        SubjectRef references one AEP subject (team or user) by id with a
+                        display-name snapshot.
+                      properties:
+                        id:
+                          description: ID is the AEP team or user id.
+                          type: string
+                        name:
+                          description: Name is the display name at assignment time.
+                          type: string
+                      required:
+                      - id
+                      - name
+                      type: object
+                    maxItems: 100
+                    type: array
+                  users:
+                    description: Users lists AEP users who may use the employee.
+                    items:
+                      description: |-
+                        SubjectRef references one AEP subject (team or user) by id with a
+                        display-name snapshot.
+                      properties:
+                        id:
+                          description: ID is the AEP team or user id.
+                          type: string
+                        name:
+                          description: Name is the display name at assignment time.
+                          type: string
+                      required:
+                      - id
+                      - name
+                      type: object
+                    maxItems: 500
+                    type: array
+                required:
+                - mode
+                type: object
             required:
             - credentials
             - governance

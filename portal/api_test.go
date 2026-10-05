@@ -126,10 +126,10 @@ func TestAPICRUDHandlers(t *testing.T) {
 	})
 
 	t.Run("apply creates directly in direct mode", func(t *testing.T) {
-		h := newAPIHarness(t)
+		h := newApplyHarness(t)
 		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
-			strings.NewReader(`{"name":"new-helper","displayName":"新员工","team":"rd-dept"}`))
+			strings.NewReader(`{"name":"new-helper","displayName":"新员工","description":"整理资料","team":"rd-dept","visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
 		w := httptest.NewRecorder()
 		h.applyForEmployee(w, req, adminIdentity())
 		assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
@@ -157,13 +157,13 @@ func TestAPICRUDHandlers(t *testing.T) {
 	})
 
 	t.Run("apply parks a request in approval mode", func(t *testing.T) {
-		h := newAPIHarness(t)
+		h := newApplyHarness(t)
 		h.cfg.policyMode = "approval"
 		h.dbmock.ExpectQuery(`SELECT id FROM requests WHERE employee_name=`).
 			WithArgs("parked-helper").WillReturnError(errNoRowsForMock)
 		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
-			strings.NewReader(`{"name":"parked-helper"}`))
+			strings.NewReader(`{"name":"parked-helper","description":"整理资料","team":"rd-dept","visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
 		w := httptest.NewRecorder()
 		h.applyForEmployee(w, req, identity{UserID: "user-x", Kind: "human"})
 		assert.Equal(t, http.StatusAccepted, w.Code)
@@ -236,26 +236,13 @@ func (i identity) IsAdminForTest() bool {
 }
 
 func TestApplyWithModelSelection(t *testing.T) {
-	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/aep/v1/admin/models", r.URL.Path)
-		assert.Equal(t, "Bearer admin-token", r.Header.Get("Authorization"))
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[
-			{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
-			{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
-			{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}
-		]}`))
-	}))
-	t.Cleanup(catalog.Close)
-
 	apply := func(t *testing.T, models string) (*httptest.ResponseRecorder, *dev1alpha1.DigitalEmployee) {
-		h := newAPIHarness(t)
-		h.cfg.aepBaseURL = catalog.URL
+		h := newApplyHarness(t)
 		h.cfg.gatewayBaseURL = "http://higress-gateway.higress-system.svc.cluster.local"
 		h.cfg.modelKeyEnv = "BIGMODEL_API_KEY"
 		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
-			strings.NewReader(`{"name":"model-helper","displayName":"模型员工","team":"","models":`+models+`}`))
+			strings.NewReader(`{"name":"model-helper","displayName":"模型员工","description":"整理资料","team":"rd-dept","models":`+models+`,"visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
 		w := httptest.NewRecorder()
 		h.applyForEmployee(w, req, identity{Token: "admin-token", UserID: "admin-user", DisplayName: "Admin", Kind: "human"})
 		if w.Code != http.StatusCreated {
@@ -300,7 +287,232 @@ func TestApplyWithModelSelection(t *testing.T) {
 
 func TestRenderSpecDefaultsToPostgresConversations(t *testing.T) {
 	p := &portal{cfg: config{namespace: "digital-employees"}}
-	spec := p.renderSpec("probe-helper", "Probe", identity{UserID: "u1", DisplayName: "U"}, "team-a", nil)
+	spec := p.renderSpec(applyRequest{Name: "probe-helper", DisplayName: "Probe"}, applyContext{OwnerID: "u1", OwnerName: "U"}, nil)
 	assert.Equal(t, "postgres", spec.Spec.ConversationStore.Backend)
 	assert.Empty(t, spec.Spec.ConversationStore.Database, "portal employees take the per-employee database default")
+}
+
+// newApplyHarness wires a portal against fake AEP + WeKnora upstreams and
+// the platform Secret holding their credentials, so the full apply
+// validation path runs offline. The fake AEP serves the admin catalogs the
+// extended create flow validates against; the fake WeKnora answers the
+// tenant-key knowledge-base listing.
+func newApplyHarness(t *testing.T) *apiTestPortal {
+	t.Helper()
+	aep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/aep/v1/auth/password/login":
+			_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
+		case "/aep/v1/admin/teams":
+			_, _ = w.Write([]byte(`{"teams":[{"id":"rd-dept","name":"研发部"},{"id":"sales-dept","name":"销售部"}]}`))
+		case "/aep/v1/admin/users":
+			_, _ = w.Write([]byte(`{"items":[
+				{"id":"u-owner","username":"lisi","displayName":"李四","status":"active","kind":"human"},
+				{"id":"u-x","username":"userx","displayName":"用户甲","status":"active","kind":"human"},
+				{"id":"u-off","username":"off","displayName":"停用者","status":"disabled","kind":"human"},
+				{"id":"u-agent","username":"bot","displayName":"机器人","status":"active","kind":"agent"}]}`))
+		case "/aep/v1/admin/skills":
+			_, _ = w.Write([]byte(`{"skills":[
+				{"id":"report-writer","name":"报告撰写","state":"active","versions":[{"version":"1.0.0","state":"published"},{"version":"1.2.0","state":"published"},{"version":"2.0.0","state":"draft"}]},
+				{"id":"retired","name":"退役技能","state":"withdrawn","versions":[{"version":"1.0.0","state":"published"}]}]}`))
+		case "/aep/v1/admin/models":
+			_, _ = w.Write([]byte(`{"models":[
+				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
+				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
+				{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(aep.Close)
+	weknora := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/knowledge-bases", r.URL.Path)
+		assert.Equal(t, "wk-key", r.Header.Get("X-API-Key"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"kb-1","name":"销售知识库"},{"id":"kb-2","name":"产品知识库"}]}`))
+	}))
+	t.Cleanup(weknora.Close)
+	h := newAPIHarness(t, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "de-platform-creds", Namespace: "digital-employees"},
+		Data: map[string][]byte{
+			"AEP_ADMIN_USER":     []byte("admin"),
+			"AEP_ADMIN_PASSWORD": []byte("pw"),
+			"WEKNORA_API_KEY":    []byte("wk-key"),
+		},
+	})
+	h.cfg.aepBaseURL = aep.URL
+	h.cfg.knowledgeAPIURL = weknora.URL
+	h.cfg.credentialsSecret = "de-platform-creds"
+	h.cfg.model = "bench-glm"
+	return h
+}
+
+func TestApplyExtendedFields(t *testing.T) {
+	apply := func(t *testing.T, h *apiTestPortal, ident identity, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.applyForEmployee(w, req, ident)
+		return w
+	}
+
+	t.Run("full payload lands on the created CR and summary", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w := apply(t, h, adminIdentity(), `{
+			"name":"full-helper","displayName":"全字段员工","description":"整理销售资料并辅助生成周报。",
+			"team":"sales-dept","models":["bench-qwen"],"owner":"u-owner",
+			"knowledgeBases":["kb-1","kb-2"],"skills":[{"id":"report-writer","version":"1.2.0"}],
+			"visibility":{"mode":"restricted","teams":["sales-dept"],"users":["u-x"]}}`)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("full-helper"), item))
+		assert.Equal(t, "整理销售资料并辅助生成周报。", item.Spec.Description)
+		assert.Equal(t, "u-owner", item.Spec.Owner)
+		assert.Equal(t, "李四", item.Spec.OwnerName)
+		assert.Equal(t, "u-owner", item.Spec.Governance.DefaultAEPUser, "the employee acts with the designated owner's scope")
+		require.Len(t, item.Spec.Knowledge.Bases, 2)
+		assert.Equal(t, "kb-1", item.Spec.Knowledge.Bases[0].ID)
+		assert.Equal(t, "销售知识库", item.Spec.Knowledge.Bases[0].Name)
+		require.Len(t, item.Spec.Skills, 1)
+		assert.Equal(t, "1.2.0", item.Spec.Skills[0].Version)
+		require.NotNil(t, item.Spec.Visibility)
+		assert.Equal(t, "restricted", item.Spec.Visibility.Mode)
+		require.Len(t, item.Spec.Visibility.Teams, 1)
+		assert.Equal(t, "销售部", item.Spec.Visibility.Teams[0].Name)
+		var out struct {
+			Employee map[string]any `json:"employee"`
+		}
+		require.NoError(t, jsonUnmarshal(w.Body.String(), &out))
+		assert.Equal(t, "bench-qwen", out.Employee["model"], "first explicit model is the default")
+		assert.NotContains(t, out.Employee, "knowledgeBases-for-typo")
+		assert.NotNil(t, out.Employee["knowledgeBases"])
+		assert.NotNil(t, out.Employee["visibility"])
+		assert.NotNil(t, out.Employee["skills"])
+	})
+
+	t.Run("empty knowledge list is an explicit deny-all policy", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w := apply(t, h, adminIdentity(), `{"name":"deny-helper","displayName":"无知识库","description":"整理资料","team":"rd-dept","knowledgeBases":[],"visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("deny-helper"), item))
+		require.NotNil(t, item.Spec.Knowledge.Bases)
+		assert.Empty(t, item.Spec.Knowledge.Bases)
+	})
+
+	t.Run("empty knowledge list does not require WeKnora to be reachable", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.cfg.knowledgeAPIURL = "http://127.0.0.1:1" // unreachable
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w := apply(t, h, adminIdentity(), `{"name":"nowek-helper","displayName":"无知识服务","description":"整理资料","team":"rd-dept","knowledgeBases":[],"visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("nowek-helper"), item))
+		require.NotNil(t, item.Spec.Knowledge.Bases, "explicit deny-all survives without a WeKnora round-trip")
+		assert.Empty(t, item.Spec.Knowledge.Bases)
+	})
+
+	t.Run("absent knowledge list keeps the legacy unrestricted policy", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w := apply(t, h, adminIdentity(), `{"name":"legacy-helper","displayName":"遗留","description":"整理资料","team":"rd-dept","visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("legacy-helper"), item))
+		assert.Nil(t, item.Spec.Knowledge.Bases)
+		var out struct {
+			Employee map[string]any `json:"employee"`
+		}
+		require.NoError(t, jsonUnmarshal(w.Body.String(), &out))
+		assert.Nil(t, out.Employee["knowledgeBases"])
+	})
+
+	t.Run("owner override by a non-admin is refused", func(t *testing.T) {
+		h := newApplyHarness(t)
+		w := apply(t, h, identity{UserID: "user-x", Kind: "human"}, `{"name":"steal-helper","displayName":"越权","description":"整理资料","team":"rd-dept","owner":"u-owner","visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "管理员")
+	})
+
+	t.Run("visibility all needs admin or approval mode", func(t *testing.T) {
+		h := newApplyHarness(t)
+		w := apply(t, h, identity{UserID: "user-x", Kind: "human"}, `{"name":"all-helper","displayName":"全员","description":"整理资料","team":"rd-dept","visibility":{"mode":"all"}}`)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+
+		h2 := newApplyHarness(t)
+		h2.cfg.policyMode = "approval"
+		h2.dbmock.ExpectQuery(`SELECT id FROM requests WHERE employee_name=`).WithArgs("all-helper").WillReturnError(errNoRowsForMock)
+		h2.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w = apply(t, h2, identity{UserID: "user-x", Kind: "human"}, `{"name":"all-helper","displayName":"全员","description":"整理资料","team":"rd-dept","visibility":{"mode":"all"}}`)
+		assert.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	})
+
+	t.Run("violations report every failed release condition and reference", func(t *testing.T) {
+		h := newApplyHarness(t)
+		w := apply(t, h, adminIdentity(), `{"name":"bad-helper","displayName":"缺项","team":"nope-dept","knowledgeBases":["kb-x"],"skills":[{"id":"report-writer","version":"2.0.0"},{"id":"retired","version":"1.0.0"}],"visibility":{"mode":"restricted","teams":["rd-dept"],"users":["ghost"]}}`)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		var out struct {
+			Violations []violation `json:"violations"`
+		}
+		require.NoError(t, jsonUnmarshal(w.Body.String(), &out))
+		fields := map[string]bool{}
+		for _, item := range out.Violations {
+			fields[item.Field] = true
+		}
+		for _, expected := range []string{"description", "team", "knowledgeBases[0]", "skills[0].id", "skills[1].id", "visibility.users[0]"} {
+			assert.True(t, fields[expected], "expected violation for %s, got %+v", expected, out.Violations)
+		}
+		var item dev1alpha1.DigitalEmployee
+		err := h.k8s.Get(context.Background(), objectKey("bad-helper"), &item)
+		assert.True(t, strings.Contains(err.Error(), "not found"), "no CR may be created on violations")
+	})
+
+	t.Run("upstream unavailability fails closed without creating", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.cfg.aepBaseURL = "http://127.0.0.1:1" // unreachable
+		w := apply(t, h, adminIdentity(), `{"name":"down-helper","displayName":"上游挂","description":"整理资料","team":"rd-dept","visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Contains(t, w.Body.String(), "暂不可用")
+		var item dev1alpha1.DigitalEmployee
+		err := h.k8s.Get(context.Background(), objectKey("down-helper"), &item)
+		assert.True(t, strings.Contains(err.Error(), "not found"))
+	})
+
+	t.Run("empty skill version auto-pins the latest published", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		w := apply(t, h, adminIdentity(), `{"name":"autoskill-helper","displayName":"自动版本","description":"整理资料","team":"rd-dept","skills":[{"id":"report-writer"}],"visibility":{"mode":"restricted","teams":["rd-dept"]}}`)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		item := &dev1alpha1.DigitalEmployee{}
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("autoskill-helper"), item))
+		require.Len(t, item.Spec.Skills, 1)
+		assert.Equal(t, "1.2.0", item.Spec.Skills[0].Version, "draft 2.0.0 must not be picked")
+	})
+}
+
+func TestGetEmployeeVisibility(t *testing.T) {
+	employee := readyCR("scoped-helper", "owner-a")
+	employee.Spec.Visibility = &dev1alpha1.VisibilitySpec{
+		Mode:  "restricted",
+		Teams: []dev1alpha1.SubjectRef{{ID: "rd-dept", Name: "研发部"}},
+		Users: []dev1alpha1.SubjectRef{{ID: "u-x", Name: "用户甲"}},
+	}
+	h := newAPIHarness(t, employee)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/employees/scoped-helper", nil)
+	req.SetPathValue("name", "scoped-helper")
+
+	w := httptest.NewRecorder()
+	h.getEmployee(w, req, identity{UserID: "u-x"})
+	assert.Equal(t, http.StatusOK, w.Code, "listed user may read the detail view")
+
+	w = httptest.NewRecorder()
+	h.getEmployee(w, req, identity{UserID: "stranger"})
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	member := identity{UserID: "stranger", Teams: []string{"rd-dept"}}
+	w = httptest.NewRecorder()
+	h.getEmployee(w, req, member)
+	assert.Equal(t, http.StatusOK, w.Code, "visibility team members may read the detail view")
 }

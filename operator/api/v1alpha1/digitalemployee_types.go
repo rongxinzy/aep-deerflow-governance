@@ -129,6 +129,65 @@ type KnowledgeSpec struct {
 
 	// MCPURL of the WeKnora MCP bridge endpoint.
 	MCPURL string `json:"mcpURL"`
+
+	// Bases is the employee's explicit knowledge-base whitelist (WeKnora
+	// kb ids plus display-name snapshots). Non-nil means an explicit
+	// policy: the operator renders it into the governance middleware,
+	// which denies knowledge_search calls outside the list (an empty
+	// non-nil list denies every search). Nil keeps the legacy behavior of
+	// an unrestricted bridge credential.
+	// +optional
+	// +kubebuilder:validation:MaxItems=200
+	// No omitempty: an explicitly empty list (deny every search) must
+	// survive JSON round-trips; absent/null decodes back to nil (legacy).
+	Bases []KnowledgeBaseRef `json:"bases"`
+}
+
+// KnowledgeBaseRef references one WeKnora knowledge base by id with a
+// display-name snapshot for the console.
+type KnowledgeBaseRef struct {
+	// ID is the WeKnora knowledge-base id.
+	ID string `json:"id"`
+	// Name is the knowledge-base display name at assignment time.
+	Name string `json:"name"`
+}
+
+// SkillRef registers one AEP skill enabled for the employee, pinned to the
+// published version chosen at creation.
+type SkillRef struct {
+	// ID is the AEP skill identifier (server-generated slug).
+	ID string `json:"id"`
+	// Name is the skill display name at assignment time.
+	Name string `json:"name"`
+	// Version is the published skill version to use.
+	Version string `json:"version"`
+}
+
+// VisibilitySpec is the employee's explicit open scope (who may see and
+// converse with it), enforced by the business layer. Admins and the owner
+// always pass regardless of mode.
+type VisibilitySpec struct {
+	// Mode selects the scope: "all" opens the employee to every user,
+	// "restricted" limits it to the listed teams and users.
+	// +kubebuilder:validation:Enum=all;restricted
+	Mode string `json:"mode"`
+	// Teams lists AEP teams whose members may use the employee.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	Teams []SubjectRef `json:"teams,omitempty"`
+	// Users lists AEP users who may use the employee.
+	// +optional
+	// +kubebuilder:validation:MaxItems=500
+	Users []SubjectRef `json:"users,omitempty"`
+}
+
+// SubjectRef references one AEP subject (team or user) by id with a
+// display-name snapshot.
+type SubjectRef struct {
+	// ID is the AEP team or user id.
+	ID string `json:"id"`
+	// Name is the display name at assignment time.
+	Name string `json:"name"`
 }
 
 // GovernanceSpec carries AEP governance middleware parameters.
@@ -230,6 +289,11 @@ type ConversationStoreSpec struct {
 type DigitalEmployeeSpec struct {
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
+	// Description is the business-layer purpose statement (用途说明);
+	// the operator never interprets it.
+	// +optional
+	// +kubebuilder:validation:MaxLength=500
+	Description string `json:"description,omitempty"`
 
 	Runtime RuntimeSpec `json:"runtime"`
 	// +optional
@@ -270,6 +334,18 @@ type DigitalEmployeeSpec struct {
 	// (legacy behavior for employees created before team scoping).
 	// +optional
 	Team string `json:"team,omitempty"`
+
+	// Skills are the AEP skills enabled for this employee (set by the
+	// business layer; the operator never interprets them). Each entry
+	// pins the skill and the published version chosen at creation.
+	// +optional
+	// +kubebuilder:validation:MaxItems=200
+	Skills []SkillRef `json:"skills,omitempty"`
+	// Visibility is the employee's explicit open scope (who may see and
+	// converse with it), enforced by the business layer. Nil keeps the
+	// legacy owner/team rules.
+	// +optional
+	Visibility *VisibilitySpec `json:"visibility,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:Minimum=1

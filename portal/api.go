@@ -99,11 +99,40 @@ func (p *portal) adminOnly(next func(http.ResponseWriter, *http.Request, identit
 	}
 }
 
+type skillInput struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
+type visibilityInput struct {
+	Mode  string   `json:"mode"`  // all | restricted
+	Teams []string `json:"teams"` // AEP team ids
+	Users []string `json:"users"` // AEP user ids
+}
+
 type applyRequest struct {
-	Name        string   `json:"name"`
-	DisplayName string   `json:"displayName"`
-	Team        string   `json:"team"`   // department scoping; empty = unscoped
-	Models      []string `json:"models"` // AEP model ids, first = default; empty = PORTAL_MODEL
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	// Description (用途说明) is a required release condition (≤500 runes).
+	Description string `json:"description"`
+	// Team is the owning department; required for new employees.
+	Team string `json:"team"`
+	// Models are AEP model ids, first = default; empty = PORTAL_MODEL.
+	Models []string `json:"models"`
+	// Owner optionally designates another AEP user as the responsible
+	// owner; empty means the caller. Setting another user requires the
+	// administrator role (enforced in the handler).
+	Owner string `json:"owner"`
+	// KnowledgeBases whitelists WeKnora knowledge bases for this
+	// employee's retrieval. nil keeps the legacy unrestricted credential;
+	// an explicitly empty list denies every knowledge search.
+	KnowledgeBases []string `json:"knowledgeBases"`
+	// Skills pin enabled AEP skills (with published versions) to register
+	// on the employee.
+	Skills []skillInput `json:"skills"`
+	// Visibility is the explicit open scope (who may see and converse).
+	// nil keeps the legacy owner/team rules; the console always sends it.
+	Visibility *visibilityInput `json:"visibility"`
 }
 
 func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -137,6 +166,20 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 
+	// Owner override is an administrator-only action: a regular applicant
+	// always owns what they apply for.
+	if body.Owner != "" && body.Owner != ident.UserID && !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有管理员可以指定其他负责人"})
+		return
+	}
+	// Opening an employee to everyone must stay an explicit, reviewed
+	// choice: administrators create directly, approval mode parks the
+	// request for an administrator to review, self-service is refused.
+	if body.Visibility != nil && body.Visibility.Mode == "all" && !ident.isAdmin(p.cfg) && p.cfg.policyMode != "approval" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "全员开放需要管理员创建或经审批创建"})
+		return
+	}
+
 	quotaUsed := p.countOwned(r.Context(), ident.UserID) + p.countPending(r.Context(), ident.UserID)
 	decisionResult := evaluatePolicy(p.cfg.policyMode, ident.isAdmin(p.cfg), ident.Kind == "human", quotaUsed, p.cfg.quotaPerUser)
 	if !decisionResult.Create && !decisionResult.NeedsApproval {
@@ -149,7 +192,24 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	spec := p.renderSpec(body.Name, body.DisplayName, ident, body.Team, runtimeModels)
+	resolved, violations, err := p.validateApply(r.Context(), ident, body)
+	if err != nil {
+		// Fail closed: never create an employee whose references were not
+		// checked because an upstream was down.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "发布条件校验依赖的服务暂不可用：" + err.Error()})
+		return
+	}
+	if len(body.Models) == 0 && p.cfg.model == "" {
+		violations = append(violations, violation{Field: "models", Message: "使用模型为必填发布条件"})
+	}
+	if len(violations) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":      fmt.Sprintf("发布条件校验未通过（%d 项）", len(violations)),
+			"violations": violations,
+		})
+		return
+	}
+	spec := p.renderSpec(body, resolved, runtimeModels)
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
 		if err != nil {
@@ -177,7 +237,7 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 	})
 }
 
-func (p *portal) renderSpec(name, displayName string, owner identity, team string, models []dev1alpha1.RuntimeModel) dev1alpha1.DigitalEmployee {
+func (p *portal) renderSpec(body applyRequest, resolved applyContext, models []dev1alpha1.RuntimeModel) dev1alpha1.DigitalEmployee {
 	runtime := dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Model: p.cfg.model}
 	if len(models) > 0 {
 		// Explicit model selection from the AEP catalog: the first entry is
@@ -185,10 +245,11 @@ func (p *portal) renderSpec(name, displayName string, owner identity, team strin
 		runtime = dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Models: models}
 	}
 	return dev1alpha1.DigitalEmployee{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.cfg.namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: body.Name, Namespace: p.cfg.namespace},
 		Spec: dev1alpha1.DigitalEmployeeSpec{
-			DisplayName: displayName,
-			Team:        team,
+			DisplayName: body.DisplayName,
+			Description: body.Description,
+			Team:        body.Team,
 			Runtime:     runtime,
 			// Conversation threads ride the central postgres instance
 			// (one database per employee — the operator renders the DSN
@@ -200,17 +261,21 @@ func (p *portal) renderSpec(name, displayName string, owner identity, team strin
 				Type: "openviking", ServerURL: p.cfg.memoryServer, AccountID: p.cfg.memoryAccount,
 				SingleTenantInstance: true,
 			},
-			Knowledge: &dev1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: p.cfg.knowledgeMCPURL},
+			// resolved.KBs is nil for legacy requests (unrestricted) and
+			// non-nil otherwise (empty = deny every knowledge search).
+			Knowledge: &dev1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: p.cfg.knowledgeMCPURL, Bases: resolved.KBs},
 			Governance: dev1alpha1.GovernanceSpec{
 				// The employee acts with its owner's data scope by default.
 				AEPBaseURL:     p.cfg.aepBaseURL,
 				DeploymentID:   "demo",
-				DefaultAEPUser: owner.UserID,
+				DefaultAEPUser: resolved.OwnerID,
 			},
 			Credentials: dev1alpha1.CredentialsRef{Name: p.cfg.credentialsSecret},
 			A2A:         &dev1alpha1.A2ASpec{Image: p.cfg.a2aImage, MaxDepth: 3},
-			Owner:       owner.UserID,
-			OwnerName:   identUsername(owner),
+			Owner:       resolved.OwnerID,
+			OwnerName:   resolved.OwnerName,
+			Skills:      resolved.Skills,
+			Visibility:  resolved.Visibility,
 		},
 	}
 }
@@ -339,7 +404,7 @@ func (p *portal) listEmployees(w http.ResponseWriter, r *http.Request, ident ide
 		if teamFilter != "" && item.Spec.Team != teamFilter {
 			continue
 		}
-		if !admin && !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
+		if !admin && !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner, item.Spec.Visibility) {
 			continue
 		}
 		out = append(out, summarize(item))
@@ -353,8 +418,11 @@ func (p *portal) getEmployee(w http.ResponseWriter, r *http.Request, ident ident
 		writeJSON(w, statusOf(err), map[string]string{"error": err.Error()})
 		return
 	}
-	if !ident.isAdmin(p.cfg) && item.Spec.Owner != ident.UserID {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not the owner"})
+	// Consistent with list/chat authorization: visibility grants use, and
+	// the detail view is what a listed employee links to (owner-only here
+	// would hide details from team members who can already converse).
+	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner, item.Spec.Visibility) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized for this digital employee"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
@@ -378,7 +446,9 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 		writeJSON(w, statusOf(err), map[string]string{"error": err.Error()})
 		return
 	}
-	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
+	// Mutation stays owner/admin-only: visibility grants use of the
+	// employee, not the right to reconfigure it.
+	if !ident.isAdmin(p.cfg) && item.Spec.Owner != ident.UserID {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to modify this employee"})
 		return
 	}
@@ -504,13 +574,46 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 			channels["wecomName"] = item.Spec.Channels.WecomName
 		}
 	}
+	// With an explicit model list the first entry is the runtime default.
+	model := item.Spec.Runtime.Model
+	if model == "" && len(item.Spec.Runtime.Models) > 0 {
+		model = item.Spec.Runtime.Models[0].Name
+	}
+	var knowledgeBases any
+	if item.Spec.Knowledge != nil && item.Spec.Knowledge.Bases != nil {
+		bases := make([]map[string]string, 0, len(item.Spec.Knowledge.Bases))
+		for _, base := range item.Spec.Knowledge.Bases {
+			bases = append(bases, map[string]string{"id": base.ID, "name": base.Name})
+		}
+		knowledgeBases = bases
+	}
+	skills := make([]map[string]string, 0, len(item.Spec.Skills))
+	for _, skill := range item.Spec.Skills {
+		skills = append(skills, map[string]string{"id": skill.ID, "name": skill.Name, "version": skill.Version})
+	}
+	var visibility any
+	if item.Spec.Visibility != nil {
+		teams := make([]map[string]string, 0, len(item.Spec.Visibility.Teams))
+		for _, team := range item.Spec.Visibility.Teams {
+			teams = append(teams, map[string]string{"id": team.ID, "name": team.Name})
+		}
+		users := make([]map[string]string, 0, len(item.Spec.Visibility.Users))
+		for _, user := range item.Spec.Visibility.Users {
+			users = append(users, map[string]string{"id": user.ID, "name": user.Name})
+		}
+		visibility = map[string]any{"mode": item.Spec.Visibility.Mode, "teams": teams, "users": users}
+	}
 	return map[string]any{
 		"name": item.Name, "displayName": item.Spec.DisplayName, "phase": item.Status.Phase,
-		"runtime": item.Spec.Runtime.Type, "model": item.Spec.Runtime.Model,
+		"runtime": item.Spec.Runtime.Type, "model": model,
 		"owner": item.Spec.OwnerName, "ownerId": item.Spec.Owner,
-		"team":       item.Spec.Team,
-		"memoryUser": item.Status.MemoryUser, "createdAt": item.CreationTimestamp,
-		"channels": channels,
+		"team":        item.Spec.Team,
+		"description": item.Spec.Description,
+		"memoryUser":  item.Status.MemoryUser, "createdAt": item.CreationTimestamp,
+		"channels":       channels,
+		"knowledgeBases": knowledgeBases, // nil = legacy unrestricted (not configured)
+		"skills":         skills,
+		"visibility":     visibility, // nil = legacy owner/team rules
 	}
 }
 
