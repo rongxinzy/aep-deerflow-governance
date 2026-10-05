@@ -199,8 +199,8 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 
 	// Owner: empty means the caller; an override must reference an active
 	// human account (privilege is checked in the handler before this).
-	switch {
-	case body.Owner == "":
+	switch body.Owner {
+	case "":
 		resolved.OwnerID = ident.UserID
 		resolved.OwnerName = identUsername(ident)
 	default:
