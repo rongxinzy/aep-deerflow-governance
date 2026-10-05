@@ -377,3 +377,50 @@ func TestRuntimeClientCSRFToken(t *testing.T) {
 	client.base = "://bad url"
 	assert.Empty(t, client.csrfToken())
 }
+
+// controller-gen emits a nil guard on every DeepCopy and standalone
+// DeepCopyInto/DeepCopy pairs for the value-ref types (slices of them are
+// copied element-wise with copy(), so their methods are never reached via
+// the CR graph). Sweep both so new types keep the coverage floor honest.
+func TestDeepCopyNilReceiversAndRefTypes(t *testing.T) {
+	for name, call := range map[string]func() any{
+		"ChannelsSpec":          func() any { return (*v1alpha1.ChannelsSpec)(nil).DeepCopy() },
+		"ConversationStoreSpec": func() any { return (*v1alpha1.ConversationStoreSpec)(nil).DeepCopy() },
+		"CredentialsRef":        func() any { return (*v1alpha1.CredentialsRef)(nil).DeepCopy() },
+		"DigitalEmployee":       func() any { return (*v1alpha1.DigitalEmployee)(nil).DeepCopy() },
+		"DigitalEmployeeList":   func() any { return (*v1alpha1.DigitalEmployeeList)(nil).DeepCopy() },
+		"DigitalEmployeeSpec":   func() any { return (*v1alpha1.DigitalEmployeeSpec)(nil).DeepCopy() },
+		"DigitalEmployeeStatus": func() any { return (*v1alpha1.DigitalEmployeeStatus)(nil).DeepCopy() },
+		"GovernanceSpec":        func() any { return (*v1alpha1.GovernanceSpec)(nil).DeepCopy() },
+		"HibernationSpec":       func() any { return (*v1alpha1.HibernationSpec)(nil).DeepCopy() },
+		"KnowledgeBaseRef":      func() any { return (*v1alpha1.KnowledgeBaseRef)(nil).DeepCopy() },
+		"KnowledgeSpec":         func() any { return (*v1alpha1.KnowledgeSpec)(nil).DeepCopy() },
+		"MemorySpec":            func() any { return (*v1alpha1.MemorySpec)(nil).DeepCopy() },
+		"PersistenceSpec":       func() any { return (*v1alpha1.PersistenceSpec)(nil).DeepCopy() },
+		"RuntimeModel":          func() any { return (*v1alpha1.RuntimeModel)(nil).DeepCopy() },
+		"RuntimeSpec":           func() any { return (*v1alpha1.RuntimeSpec)(nil).DeepCopy() },
+		"SkillRef":              func() any { return (*v1alpha1.SkillRef)(nil).DeepCopy() },
+		"SubjectRef":            func() any { return (*v1alpha1.SubjectRef)(nil).DeepCopy() },
+		"VisibilitySpec":        func() any { return (*v1alpha1.VisibilitySpec)(nil).DeepCopy() },
+	} {
+		assert.Nil(t, call(), "%s DeepCopy must return nil for a nil receiver", name)
+	}
+
+	base := v1alpha1.KnowledgeBaseRef{ID: "kb-1", Name: "销售知识库"}
+	baseInto := v1alpha1.KnowledgeBaseRef{}
+	base.DeepCopyInto(&baseInto)
+	assert.Equal(t, base, baseInto)
+	assert.Equal(t, base, *base.DeepCopy())
+
+	skill := v1alpha1.SkillRef{ID: "report-writer", Name: "报告撰写", Version: "1.2.0"}
+	skillInto := v1alpha1.SkillRef{}
+	skill.DeepCopyInto(&skillInto)
+	assert.Equal(t, skill, skillInto)
+	assert.Equal(t, skill, *skill.DeepCopy())
+
+	subject := v1alpha1.SubjectRef{ID: "sales", Name: "销售团队"}
+	subjectInto := v1alpha1.SubjectRef{}
+	subject.DeepCopyInto(&subjectInto)
+	assert.Equal(t, subject, subjectInto)
+	assert.Equal(t, subject, *subject.DeepCopy())
+}
