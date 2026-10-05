@@ -287,6 +287,18 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			}},
 		},
 	}
+	// Knowledge-base whitelist: an explicit policy (Bases non-nil, even
+	// empty) is rendered into the governance middleware, which denies
+	// knowledge_search calls outside the list ({} denies every search).
+	// A nil Bases keeps the legacy unrestricted bridge credential.
+	if spec.Knowledge != nil && spec.Knowledge.Bases != nil {
+		kwargs := config["extensions"].(map[string]any)["middlewares"].([]any)[0].(map[string]any)["kwargs"].(map[string]any)
+		bases := map[string]any{}
+		for _, base := range spec.Knowledge.Bases {
+			bases[base.ID] = base.Name
+		}
+		kwargs["knowledge_bases"] = bases
+	}
 	// IM channels: the channel-connections feature gate plus the enabled
 	// providers. Only enabled providers are listed (the runtime config
 	// schema defaults every provider to disabled). Credentials never live

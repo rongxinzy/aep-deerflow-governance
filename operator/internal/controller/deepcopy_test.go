@@ -46,7 +46,10 @@ func fullEmployee() *v1alpha1.DigitalEmployee {
 				Type: "openviking", ServerURL: "http://ov", AccountID: "acc",
 				SingleTenantInstance: true, TopK: 8, ScoreThreshold: 0.25, MaxInjectionChars: 12000,
 			},
-			Knowledge:         &v1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: "http://mcp"},
+			Knowledge: &v1alpha1.KnowledgeSpec{
+				Type: "weknora", MCPURL: "http://mcp",
+				Bases: []v1alpha1.KnowledgeBaseRef{{ID: "kb-1", Name: "销售知识库"}},
+			},
 			Channels:          &v1alpha1.ChannelsSpec{Wecom: true, WecomName: "机器人", Feishu: true},
 			Persistence:       v1alpha1.PersistenceSpec{Enabled: true, Size: "4Gi"},
 			ConversationStore: v1alpha1.ConversationStoreSpec{Backend: "postgres"},
@@ -59,6 +62,13 @@ func fullEmployee() *v1alpha1.DigitalEmployee {
 			Replicas:    1,
 			Owner:       "u1",
 			OwnerName:   "用户一",
+			Description: "整理资料",
+			Skills:      []v1alpha1.SkillRef{{ID: "report-writer", Name: "报告撰写", Version: "1.2.0"}},
+			Visibility: &v1alpha1.VisibilitySpec{
+				Mode:  "restricted",
+				Teams: []v1alpha1.SubjectRef{{ID: "sales", Name: "销售团队"}},
+				Users: []v1alpha1.SubjectRef{{ID: "u-9", Name: "李四"}},
+			},
 			NodePort:    30200,
 			Hibernation: &v1alpha1.HibernationSpec{Enabled: &on, IdleTimeout: "30m"},
 		},
@@ -84,12 +94,20 @@ func TestDeepCopyIsolation(t *testing.T) {
 	if clone.Spec.Memory != nil {
 		clone.Spec.Memory.TopK = 1
 	}
+	clone.Spec.Skills[0].Version = "9.9.9"
+	clone.Spec.Knowledge.Bases[0].ID = "kb-mutated"
+	clone.Spec.Visibility.Mode = "all"
+	clone.Spec.Visibility.Teams[0].ID = "mutated"
 	assert.NotEqual(t, original, clone)
 	assert.Equal(t, "t", original.Spec.Governance.GovernedTools[0])
 	assert.True(t, original.Spec.Channels.Wecom)
 	assert.Equal(t, "30m", original.Spec.Hibernation.IdleTimeout)
 	assert.EqualValues(t, 1, original.Spec.Replicas)
 	assert.EqualValues(t, 8, original.Spec.Memory.TopK)
+	assert.Equal(t, "1.2.0", original.Spec.Skills[0].Version)
+	assert.Equal(t, "kb-1", original.Spec.Knowledge.Bases[0].ID)
+	assert.Equal(t, "restricted", original.Spec.Visibility.Mode)
+	assert.Equal(t, "sales", original.Spec.Visibility.Teams[0].ID)
 
 	again := clone.DeepCopyObject().(*v1alpha1.DigitalEmployee)
 	assert.Equal(t, clone, again)
