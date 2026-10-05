@@ -137,7 +137,12 @@ class AepGovernanceMiddleware(AgentMiddleware):
       from run context ``channel_user_id`` resolve through AEP identity
       mappings, unmapped senders fail closed),
       governed_tools (tool names to wrap), team_names (team id -> department
-      name used by the governed tools), scope_cache_seconds.
+      name used by the governed tools), knowledge_bases (kb id -> display
+      name: this employee's knowledge-base whitelist — None keeps the legacy
+      unrestricted bridge credential, {} denies every knowledge_search, and
+      calls must pass explicit in-list knowledge_base_ids because omitting
+      the argument searches everything the credential sees),
+      scope_cache_seconds.
     """
 
     def __init__(
@@ -151,6 +156,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         identity_source_id: str | None = None,
         governed_tools: list[str] | None = None,
         team_names: dict[str, str] | None = None,
+        knowledge_bases: dict[str, str] | None = None,
         im_bot_name: str | None = None,
         scope_cache_seconds: int = 60,
         **kwargs: Any,
@@ -162,6 +168,9 @@ class AepGovernanceMiddleware(AgentMiddleware):
         self.governed = set(governed_tools or ("dept_revenue", "dept_headcount",
                                                 "benchdept__dept_revenue", "benchdept__dept_headcount"))
         self.team_names = team_names or {}
+        # Employee knowledge-base whitelist (kb id -> display name). None =
+        # legacy unrestricted bridge credential; {} = deny every search.
+        self.knowledge_bases = None if knowledge_bases is None else {str(k): str(v) for k, v in knowledge_bases.items()}
         # Display name of this employee's bot on the IM platform: @-mentions
         # of this name address the bot itself, not a delegation target.
         self.im_bot_name = (im_bot_name or "").strip() or None
@@ -248,8 +257,52 @@ class AepGovernanceMiddleware(AgentMiddleware):
             tool_call_id=tool_call_id,
         )
 
+    # ------------------------------------------------------ knowledge scope
+    @staticmethod
+    def _is_knowledge_search(name: str) -> bool:
+        """The weknora MCP server exposes knowledge_search; DeerFlow may
+        prefix MCP tools with the server alias (weknora__knowledge_search)."""
+        return name == "knowledge_search" or name.endswith("__knowledge_search")
+
+    def _knowledge_note(self) -> str:
+        """Prompt line listing this employee's usable knowledge bases."""
+        if self.knowledge_bases is None:
+            return ""
+        listing = "、".join(f"{kb}（{name}）" for kb, name in sorted(self.knowledge_bases.items())) or "未连接任何知识库"
+        return (f"本数字员工可用的知识库：{listing}。"
+                f"调用 knowledge_search 时必须显式传 knowledge_base_ids 且只使用上述 id；"
+                f"省略该参数或使用范围外 id 会被拒绝。")
+
+    def _knowledge_whitelist_denial(self, call: Any) -> ToolMessage | None:
+        """Denial decision for the employee's knowledge-base whitelist.
+
+        The weknora bridge credential is tenant-wide: omitting
+        knowledge_base_ids searches every base the credential can see, so a
+        configured whitelist must see explicit, in-list ids. Fail closed.
+        """
+        if self.knowledge_bases is None:
+            return None
+        if not self._is_knowledge_search(str(getattr(call, "name", "") or "")):
+            return None
+        args = dict(getattr(call, "args", None) or {})
+        requested = args.get("knowledge_base_ids")
+        ids = [str(item) for item in requested if str(item)] if isinstance(requested, list) else []
+        if requested and isinstance(requested, list) and ids and all(i in self.knowledge_bases for i in ids):
+            print(f"[aep-governance] ALLOW knowledge_search ids={ids}", flush=True)
+            return None
+        listing = "、".join(f"{kb}（{self.knowledge_bases[kb]}）" for kb in sorted(self.knowledge_bases)) or "（未连接任何知识库）"
+        print(f"[aep-governance] DENY knowledge_search ids={ids} allowed={sorted(self.knowledge_bases)}", flush=True)
+        return ToolMessage(
+            content=(f"DENIED knowledge_search: 本次检索未限定在本数字员工可用的知识库范围内。"
+                     f"可用知识库：{listing}。"
+                     f"调用 knowledge_search 时必须显式传 knowledge_base_ids，且只使用上述 id；"
+                     f"省略该参数会检索全部知识库，一律被拒绝。"),
+            tool_call_id=str(getattr(call, "id", "") or ""),
+        )
+
     # ------------------------------------------------------------ hooks
     def _governance_message(self, aep_user: str | None, visible: frozenset[str]) -> SystemMessage:
+        note = self._knowledge_note()
         if aep_user is None:
             # Guest mode: the sender is already inside the corporate IM
             # boundary (authenticated by the platform), just not linked to an
@@ -260,12 +313,12 @@ class AepGovernanceMiddleware(AgentMiddleware):
                 f"<{_GOVERNANCE_TAG}>发送者来自企业 IM，但尚未关联企业账号：权限层级未知（访客）。"
                 f"请正常与其对话——通用问题、闲聊、知识问答照常回答，不要主动、反复提及绑定事宜。"
                 f"仅企业数据类工具的调用会被工具层拒绝；当用户询问企业数据而被拒绝时，"
-                f"自然说明：当前账号未绑定企业身份，绑定后即可按其权限查询，请联系管理员完成绑定。</{_GOVERNANCE_TAG}>"))
+                f"自然说明：当前账号未绑定企业身份，绑定后即可按其权限查询，请联系管理员完成绑定。{note}</{_GOVERNANCE_TAG}>"))
         names = ", ".join(sorted(self.team_names.get(t, t) for t in visible)) or "（范围解析失败，按无可见部门处理）"
         return SystemMessage(content=(
             f"<{_GOVERNANCE_TAG}>当前会话代表 AEP 用户 {aep_user} 执行。"
             f"其数据范围仅覆盖：{names}。访问范围外部门的请求会被工具层拒绝；"
-            f"请直接告知用户无权访问，不要尝试绕过。</{_GOVERNANCE_TAG}>"))
+            f"请直接告知用户无权访问，不要尝试绕过。{note}</{_GOVERNANCE_TAG}>"))
 
     def _im_self_note(self, context: Any) -> str | None:
         """Prompt note for IM turns when the bot's display name is known.
@@ -315,6 +368,11 @@ class AepGovernanceMiddleware(AgentMiddleware):
     def _check(self, request: Any) -> ToolMessage | None:
         """Denial decision for one governed tool call; None means allowed."""
         call = getattr(request, "tool_call", None)
+        # Knowledge-base whitelist first: it is per-employee static policy
+        # (no AEP round-trip) and independent of the dept-governed set.
+        denial = self._knowledge_whitelist_denial(call)
+        if denial is not None:
+            return denial
         name = getattr(call, "name", "") or ""
         if name not in self.governed:
             return None
