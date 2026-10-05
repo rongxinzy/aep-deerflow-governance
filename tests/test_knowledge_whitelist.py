@@ -1,4 +1,4 @@
-"""Knowledge-base whitelist enforcement in AepGovernanceMiddleware.
+"""Knowledge-scope enforcement in AepGovernanceMiddleware.
 
 Run (the governance repo has no python env of its own; the DeerFlow backend
 venv provides langchain):
@@ -7,9 +7,13 @@ venv provides langchain):
     PYTHONPATH=../../aep-deerflow-governance .venv/bin/python -m pytest \
         ../../aep-deerflow-governance/tests/test_knowledge_whitelist.py -q
 
-The whitelist is per-employee static policy: these tests construct the
-middleware with ``governed_tools=[]`` so the allow path never touches the
-network, and drive ``_check``/``wrap_tool_call`` with minimal fakes.
+Two deployed weknora MCP surfaces are covered: the PyPI bridge's kb_id
+tools plus its admin surface (default-deny under an explicit whitelist),
+and the dsh bridge's knowledge_search(knowledge_base_ids). Legacy
+employees (no whitelist) keep the unrestricted bridge. These tests
+construct the middleware with ``governed_tools=[]`` so the allow path
+never touches the network, and drive ``wrap_tool_call`` with minimal
+fakes.
 """
 
 from __future__ import annotations
@@ -35,6 +39,13 @@ class FakeRequest:
         self.tool_call = call
 
 
+class FakeRequestDict:
+    """langgraph shape: tool_call is a TypedDict, not an object."""
+
+    def __init__(self, call: dict[str, Any]):
+        self.tool_call = call
+
+
 def middleware(knowledge_bases: dict[str, str] | None) -> AepGovernanceMiddleware:
     return AepGovernanceMiddleware(
         aep_base_url="http://unused.invalid",
@@ -46,61 +57,100 @@ def middleware(knowledge_bases: dict[str, str] | None) -> AepGovernanceMiddlewar
     )
 
 
-def result_of(mw: AepGovernanceMiddleware, call: FakeCall) -> ToolMessage | str:
+def outcome(mw: AepGovernanceMiddleware, call: FakeCall) -> ToolMessage | str:
     return mw.wrap_tool_call(FakeRequest(call), handler=lambda request: "OK")
 
 
-def test_absent_kwarg_keeps_legacy_unrestricted() -> None:
+def denied(result: ToolMessage | str) -> bool:
+    return isinstance(result, ToolMessage)
+
+
+# ---------------------------------------------------------------- legacy
+def test_absent_kwapp_keeps_legacy_unrestricted() -> None:
     mw = middleware(None)
-    # No knowledge_base_ids: legacy behavior must not deny.
-    assert result_of(mw, FakeCall("knowledge_search", {"query": "q"})) == "OK"
-    assert result_of(mw, FakeCall("weknora__knowledge_search", {"query": "q", "knowledge_base_ids": ["any"]})) == "OK"
+    assert outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "any"})) == "OK"
+    assert outcome(mw, FakeCall("weknora_delete_knowledge_base", {"kb_id": "any"})) == "OK"
+    assert outcome(mw, FakeCall("knowledge_search", {"query": "q"})) == "OK"
 
 
-def test_missing_ids_is_denied_when_whitelist_configured() -> None:
+# ------------------------------------------------------------- kb_id read
+def test_kb_id_read_tools_pass_with_in_whitelist_id() -> None:
     mw = middleware(WHITELIST)
-    for name in ("knowledge_search", "weknora__knowledge_search"):
-        outcome = result_of(mw, FakeCall(name, {"query": "q"}))
-        assert isinstance(outcome, ToolMessage)
-        assert "knowledge_base_ids" in outcome.content
+    for name in ("weknora_hybrid_search", "weknora__hybrid_search", "hybrid_search",
+                 "mcp__weknora__hybrid_search",  # ToolNode execution name
+                 "weknora_wiki_search", "weknora_list_knowledge", "weknora_get_knowledge_base"):
+        assert outcome(mw, FakeCall(name, {"kb_id": "kb-2", "query": "q"})) == "OK", name
 
 
-def test_empty_or_non_list_ids_is_denied() -> None:
+def test_kb_id_missing_or_out_of_whitelist_is_denied() -> None:
     mw = middleware(WHITELIST)
-    for args in ({"query": "q", "knowledge_base_ids": []}, {"query": "q", "knowledge_base_ids": "kb-1"}):
-        outcome = result_of(mw, FakeCall("knowledge_search", args))
-        assert isinstance(outcome, ToolMessage)
+    assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"query": "q"})))
+    assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-x", "query": "q"})))
+    assert denied(outcome(mw, FakeCall("hybrid_search", {"kb_id": ""})))
 
 
-def test_out_of_whitelist_ids_is_denied() -> None:
-    mw = middleware(WHITELIST)
-    outcome = result_of(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1", "kb-x"]}))
-    assert isinstance(outcome, ToolMessage)
-    assert "kb-x" not in outcome.content or "可用知识库" in outcome.content
-
-
-def test_subset_of_whitelist_is_allowed() -> None:
-    mw = middleware(WHITELIST)
-    assert result_of(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-2"]})) == "OK"
-    assert result_of(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1", "kb-2"]})) == "OK"
-
-
-def test_empty_whitelist_denies_everything() -> None:
+def test_empty_whitelist_denies_every_read() -> None:
     mw = middleware({})
-    outcome = result_of(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1"]}))
-    assert isinstance(outcome, ToolMessage)
-    assert "未连接任何知识库" in outcome.content
+    result = outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"}))
+    assert denied(result)
+    assert "未连接任何知识库" in result.content
 
 
-def test_non_knowledge_tools_are_untouched() -> None:
+# ----------------------------------------------- knowledge_base_ids (dsh)
+def test_knowledge_search_list_ids_still_enforced() -> None:
     mw = middleware(WHITELIST)
-    assert result_of(mw, FakeCall("web_search", {"query": "q"})) == "OK"
+    assert outcome(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1", "kb-2"]})) == "OK"
+    assert outcome(mw, FakeCall("weknora__knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1"]})) == "OK"
+    assert denied(outcome(mw, FakeCall("knowledge_search", {"query": "q"})))
+    assert denied(outcome(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": []})))
+    assert denied(outcome(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1", "kb-x"]})))
+
+
+# ------------------------------------------------- admin surface default-deny
+def test_admin_and_session_tools_are_denied_under_policy() -> None:
+    mw = middleware(WHITELIST)
+    for name, args in [
+        ("weknora_delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("weknora_create_tenant", {"name": "x"}),
+        ("weknora_create_model", {"name": "m"}),
+        ("weknora_list_knowledge_bases", {}),
+        ("weknora_chat", {"session_id": "s", "query": "q"}),
+        ("delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("mcp__weknora__list_knowledge_bases", {}),
+        ("weknora_get_knowledge", {"knowledge_id": "k1"}),
+    ]:
+        result = outcome(mw, FakeCall(name, args))
+        assert denied(result), name
+        assert "只读检索类" in result.content or "不在本数字员工可用范围" in result.content, name
+
+
+def test_non_weknora_tools_are_untouched() -> None:
+    mw = middleware(WHITELIST)
+    assert outcome(mw, FakeCall("web_search", {"query": "q"})) == "OK"
+    assert outcome(mw, FakeCall("other__hybrid_search", {"kb_id": "kb-1"})) == "OK"
+    assert outcome(mw, FakeCall("mcp__weather__hybrid_search", {})) == "OK"
+
+
+def test_langgraph_dict_shaped_tool_calls_are_enforced() -> None:
+    # langgraph hands ToolCallRequest.tool_call as a TypedDict, not an
+    # object — the live runtime bypass that shipped before this regression
+    # test read getattr(call, "name") off the dict and matched nothing.
+    mw = middleware(WHITELIST)
+
+    def dict_outcome(name: str, args: dict[str, Any]) -> ToolMessage | str:
+        request = FakeRequestDict({"name": name, "args": args, "id": "c1"})
+        return mw.wrap_tool_call(request, handler=lambda req: "OK")
+
+    assert dict_outcome("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"}) == "OK"
+    denied_call = dict_outcome("weknora_hybrid_search", {"kb_id": "kb-x", "query": "q"})
+    assert denied(denied_call)
+    assert denied(dict_outcome("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}))
 
 
 def test_governance_message_lists_bases_iff_configured() -> None:
     configured = middleware(WHITELIST)
-    message = configured._governance_message("u1", frozenset())
-    assert "销售知识库" in str(message.content)
+    assert "销售知识库" in str(configured._governance_message("u1", frozenset()))
     guest = configured._governance_message(None, frozenset())
     assert "kb-1" in str(guest.content)
     legacy = middleware(None)
