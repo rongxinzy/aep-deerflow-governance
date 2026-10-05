@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	dev1alpha1 "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
 
 // identity is the authenticated caller resolved from an AEP access token.
@@ -49,15 +51,39 @@ func (i identity) inTeam(team string) bool {
 	return false
 }
 
-// canAccessEmployee applies the department-scoping rule: admins bypass all
-// team scoping (the "大老板" requirement); owners always can; same-team
-// members can; everyone else cannot.
-func (i identity) canAccessEmployee(cfg config, team, ownerID string) bool {
+// canAccessEmployee applies the open-scope rule: admins bypass everything
+// (the "大老板" requirement) and owners always pass. An explicit
+// spec.visibility then decides — mode "all" opens the employee to every
+// user, mode "restricted" admits members of the listed teams and the
+// listed users, and any unknown mode fails closed. A nil visibility keeps
+// the legacy department rule: same-team members pass, an empty (unscoped)
+// team means owner/admin only.
+func (i identity) canAccessEmployee(cfg config, team, ownerID string, visibility *dev1alpha1.VisibilitySpec) bool {
 	if i.isAdmin(cfg) {
 		return true
 	}
 	if ownerID != "" && i.UserID == ownerID {
 		return true
+	}
+	if visibility != nil {
+		switch visibility.Mode {
+		case "all":
+			return true
+		case "restricted":
+			for _, entry := range visibility.Teams {
+				if entry.ID != "" && i.inTeam(entry.ID) {
+					return true
+				}
+			}
+			for _, entry := range visibility.Users {
+				if entry.ID != "" && entry.ID == i.UserID {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
 	}
 	return i.inTeam(team)
 }

@@ -47,7 +47,7 @@ func (p *portal) authorizeChat(ctx context.Context, name string, ident identity)
 	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &item); err != nil {
 		return "", statusOf(err), err.Error()
 	}
-	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner) {
+	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner, item.Spec.Visibility) {
 		return "", http.StatusForbidden, "not authorized for this digital employee (owner, team member, or admin required)"
 	}
 	// Sleeping (KEDA scaled to zero) is fine to authorize: the memkey
