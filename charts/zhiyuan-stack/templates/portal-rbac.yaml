@@ -15,7 +15,8 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    # update backs the PATCH /api/v1/employees/{name} config-edit path.
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
