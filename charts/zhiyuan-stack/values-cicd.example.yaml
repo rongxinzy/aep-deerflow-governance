@@ -7,6 +7,21 @@ models:
   anthropic:
     apiKey: "<bigmodel-api-key>"
 
+# DEPLOY-DRIFT GUARD: these image tags are what the cicd cluster actually
+# runs. Day-to-day deploys may use `kubectl set image`, but every release
+# MUST sync tags here (and into values-cicd.local.yaml) — otherwise the
+# next `helm upgrade` silently rolls components back to whatever
+# values.yaml last pinned (2026-10-06 audit: chart said 0.13.0/0.14.0/
+# 0.8.3/v18 while the cluster ran 0.18.0/0.18.0/0.10.2/v25).
+images:
+  operator: { repository: rongxinzy/de-operator, tag: "0.18.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.18.0" }
+  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.10.2" }
+  # v25 = governance TypedDict fix (tool interception live); PORTAL_RUNTIME_IMAGE
+  # (new-employee default) renders from this entry since 2026-10-06.
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v25" }
+
 memory:
   openviking:
     rootAPIKey: "<openviking-root-key>"
