@@ -10,6 +10,22 @@ models:
 memory:
   openviking:
     rootAPIKey: "<openviking-root-key>"
+    # cicd memory extraction rides the on-prem Qwen server DIRECTLY, not
+    # through Higress: the model gateway's openai-compat conversion route
+    # is shadowed by a legacy manual /v1/chat/completions ingress
+    # (longest-prefix wins), so the derived route is unreachable — recorded
+    # as an AEP gap. Qwen3.8-Flash-Next is a thinking model: without
+    # enable_thinking=false the answer stays in reasoning_content and
+    # extraction returns 0 hits. Revisit apiBase when the route shadowing
+    # is fixed. (2026-10-06; matches the live openviking-config CM.)
+    vlm:
+      apiBase: http://172.18.6.119:8080/v1
+      model: Qwen3.8-Flash-Next
+      apiKey: "none"
+      timeout: 300
+      extraRequestBody:
+        chat_template_kwargs:
+          enable_thinking: false
 
 employees:
   - name: sales-helper

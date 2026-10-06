@@ -75,11 +75,14 @@ data:
       },
       "vlm": {
         "api_base": "{{ .Values.memory.openviking.vlm.apiBase }}",
-        "timeout": 120,
+        "timeout": {{ .Values.memory.openviking.vlm.timeout | default 120 }},
         "thinking": false,
-        "api_key": "aep-managed-by-higress",
+        "api_key": "{{ .Values.memory.openviking.vlm.apiKey | default "aep-managed-by-higress" }}",
         "provider": "openai",
         "model": "{{ .Values.memory.openviking.vlm.model }}"
+        {{- with .Values.memory.openviking.vlm.extraRequestBody }}
+        , "extra_request_body": {{ toJson . }}
+        {{- end }}
       }
     }
 ---

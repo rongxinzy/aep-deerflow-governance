@@ -89,6 +89,15 @@ memory:
       # in-cluster Higress gateway speaks openai to the VLM
       apiBase: http://higress-gateway.higress-system.svc.cluster.local/v1
       model: glm-5.3-flash
+      # timeout (seconds, default 120): extraction prompts are long — slow
+      # on-prem VLMs need 300.
+      # apiKey: sent as the bearer; Higress routes inject the real
+      # credential server-side (default "aep-managed-by-higress").
+      # extraRequestBody: merged into every VLM chat request. Thinking-mode
+      # models must disable thinking or the answer lands in
+      # reasoning_content and OpenViking extracts nothing — set
+      # {chat_template_kwargs: {enable_thinking: false}} for them.
+      extraRequestBody: {}
     embedding:
       apiBase: http://embed-server:8080/v1
       model: bge-small-zh-v1.5
