@@ -298,20 +298,38 @@ func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, model
 	if len(modelIDs) == 0 {
 		return nil, nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.aepBaseURL+"/aep/v1/admin/models?limit=500", nil)
+	// The catalog is platform-wide reference data; regular applicants do
+	// not hold models.read, so their token gets 403 — retry once with the
+	// portal admin token instead of failing their apply. Model USE stays
+	// gated by AEP model assignments; this only resolves route metadata.
+	fetch := func(authorization string) ([]byte, int, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.aepBaseURL+"/aep/v1/admin/models?limit=500", nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		request.Header.Set("Authorization", authorization)
+		request.Header.Set("X-AEP-Protocol-Version", "1.0")
+		response, err := serviceProbeClient.Do(request)
+		if err != nil {
+			return nil, 0, fmt.Errorf("model catalog unavailable: %w", err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		return raw, response.StatusCode, nil
+	}
+	raw, status, err := fetch("Bearer " + ident.Token)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+ident.Token)
-	request.Header.Set("X-AEP-Protocol-Version", "1.0")
-	response, err := serviceProbeClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("model catalog unavailable: %w", err)
+	if status == http.StatusForbidden || status == http.StatusUnauthorized {
+		if admin := p.adminToken(ctx); admin != "" {
+			if raw, status, err = fetch("Bearer " + admin); err != nil {
+				return nil, err
+			}
+		}
 	}
-	defer func() { _ = response.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model catalog returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("model catalog returned %d: %s", status, strings.TrimSpace(string(raw)))
 	}
 	var page struct {
 		Models []catalogModel `json:"models"`

@@ -301,22 +301,57 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 	t.Helper()
 	aep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/aep/v1/auth/password/login":
+		switch {
+		case r.URL.Path == "/aep/v1/auth/password/login":
 			_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
-		case "/aep/v1/admin/teams":
+		case strings.HasPrefix(r.URL.Path, "/aep/v1/admin/users/"):
+			// Precise per-id lookups (the directory paginates at 200, so
+			// validation must never rely on listings).
+			switch strings.TrimPrefix(r.URL.Path, "/aep/v1/admin/users/") {
+			case "u-owner":
+				_, _ = w.Write([]byte(`{"id":"u-owner","username":"lisi","displayName":"李四","status":"active","kind":"human"}`))
+			case "u-x":
+				_, _ = w.Write([]byte(`{"id":"u-x","username":"userx","displayName":"用户甲","status":"active","kind":"human"}`))
+			case "u-off":
+				_, _ = w.Write([]byte(`{"id":"u-off","username":"off","displayName":"停用者","status":"disabled","kind":"human"}`))
+			case "u-agent":
+				_, _ = w.Write([]byte(`{"id":"u-agent","username":"bot","displayName":"机器人","status":"active","kind":"agent"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		case strings.HasPrefix(r.URL.Path, "/aep/v1/admin/teams/"):
+			switch strings.TrimPrefix(r.URL.Path, "/aep/v1/admin/teams/") {
+			case "boom": // simulates a catalog outage for one lookup
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"upstream down"}`))
+				return
+			case "rd-dept":
+				_, _ = w.Write([]byte(`{"id":"rd-dept","name":"研发部"}`))
+			case "sales-dept":
+				_, _ = w.Write([]byte(`{"id":"sales-dept","name":"销售部"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		case r.URL.Path == "/aep/v1/admin/teams":
 			_, _ = w.Write([]byte(`{"teams":[{"id":"rd-dept","name":"研发部"},{"id":"sales-dept","name":"销售部"}]}`))
-		case "/aep/v1/admin/users":
+		case r.URL.Path == "/aep/v1/admin/users":
 			_, _ = w.Write([]byte(`{"items":[
 				{"id":"u-owner","username":"lisi","displayName":"李四","status":"active","kind":"human"},
 				{"id":"u-x","username":"userx","displayName":"用户甲","status":"active","kind":"human"},
 				{"id":"u-off","username":"off","displayName":"停用者","status":"disabled","kind":"human"},
 				{"id":"u-agent","username":"bot","displayName":"机器人","status":"active","kind":"agent"}]}`))
-		case "/aep/v1/admin/skills":
+		case r.URL.Path == "/aep/v1/admin/skills":
 			_, _ = w.Write([]byte(`{"skills":[
 				{"id":"report-writer","name":"报告撰写","state":"active","versions":[{"version":"1.0.0","state":"published"},{"version":"1.2.0","state":"published"},{"version":"2.0.0","state":"draft"}]},
 				{"id":"retired","name":"退役技能","state":"withdrawn","versions":[{"version":"1.0.0","state":"published"}]}]}`))
-		case "/aep/v1/admin/models":
+		case r.URL.Path == "/aep/v1/admin/models":
+			// Only the portal admin token may read the catalog — regular
+			// applicants exercise the admin-token fallback.
+			if r.Header.Get("Authorization") != "Bearer admin-token" {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":"ACCESS_DENIED"}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"models":[
 				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
@@ -490,6 +525,80 @@ func TestApplyExtendedFields(t *testing.T) {
 		require.Len(t, item.Spec.Skills, 1)
 		assert.Equal(t, "1.2.0", item.Spec.Skills[0].Version, "draft 2.0.0 must not be picked")
 	})
+}
+
+func TestRequestDecisionCorruptSpecFails(t *testing.T) {
+	h := newAPIHarness(t)
+	rows := sqlmock.NewRows([]string{"employee_name", "spec_json"}).AddRow("broken", `{"metadata":`)
+	h.dbmock.ExpectQuery(`SELECT employee_name, spec_json FROM requests`).WithArgs("req-x").WillReturnRows(rows)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/requests/req-x/approve", nil)
+	req.SetPathValue("id", "req-x")
+	w := httptest.NewRecorder()
+	h.decideRequest("approved")(w, req, adminIdentity())
+	assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+}
+
+func TestDeleteAndGetEmployeeGuards(t *testing.T) {
+	h := newAPIHarness(t, readyCR("guard-helper", "owner-a"))
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/employees/guard-helper", nil)
+	req.SetPathValue("name", "guard-helper")
+	w := httptest.NewRecorder()
+	h.deleteEmployee(w, req, identity{UserID: "stranger"})
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	missing := httptest.NewRequest(http.MethodGet, "/api/v1/employees/ghost", nil)
+	missing.SetPathValue("name", "ghost")
+	w = httptest.NewRecorder()
+	h.getEmployee(w, missing, adminIdentity())
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestApplyModelCatalogAdminFallback(t *testing.T) {
+	// A regular applicant (no models.read) submits an explicit model list:
+	// the requester-token catalog read gets 403 and the portal must retry
+	// with its admin token instead of failing the apply.
+	h := newApplyHarness(t)
+	h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+		strings.NewReader(`{"name":"fallback-helper","displayName":"回退","description":"整理资料","team":"rd-dept","models":["bench-qwen"],"visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
+	w := httptest.NewRecorder()
+	h.applyForEmployee(w, req, identity{Token: "member-token", UserID: "u-x", DisplayName: "用户甲", Kind: "human"})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	item := &dev1alpha1.DigitalEmployee{}
+	require.NoError(t, h.k8s.Get(context.Background(), objectKey("fallback-helper"), item))
+	require.Len(t, item.Spec.Runtime.Models, 1)
+	assert.Equal(t, "bench-qwen", item.Spec.Runtime.Models[0].Name)
+}
+
+func TestApplyVisibilityAllRefusedForNonAdminInSelfService(t *testing.T) {
+	h := newApplyHarness(t)
+	h.cfg.policyMode = "self-service"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+		strings.NewReader(`{"name":"all-helper","displayName":"全员","description":"整理资料","team":"rd-dept","visibility":{"mode":"all"}}`))
+	w := httptest.NewRecorder()
+	h.applyForEmployee(w, req, identity{UserID: "u-x", Kind: "human"})
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestApplyFailsClosedWithoutAdminCredentials(t *testing.T) {
+	h := newAPIHarness(t) // no platform secret → no admin token
+	h.cfg.aepBaseURL = "http://unused.invalid"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+		strings.NewReader(`{"name":"nocreds-helper","displayName":"无凭证","description":"整理资料","team":"rd-dept","skills":[{"id":"any"}],"visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
+	w := httptest.NewRecorder()
+	h.applyForEmployee(w, req, adminIdentity())
+	assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+}
+
+func TestApplyFailsClosedWhenTeamLookupErrors(t *testing.T) {
+	h := newApplyHarness(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+		strings.NewReader(`{"name":"boomblock-helper","displayName":"故障","description":"整理资料","team":"boom","visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
+	w := httptest.NewRecorder()
+	h.applyForEmployee(w, req, adminIdentity())
+	assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	var item dev1alpha1.DigitalEmployee
+	assert.Error(t, h.k8s.Get(context.Background(), objectKey("boomblock-helper"), &item), "fail closed: nothing may be created")
 }
 
 func TestGetEmployeeVisibility(t *testing.T) {

@@ -162,10 +162,43 @@ func (p *portal) listAEPSkills(ctx context.Context) ([]aepSkill, error) {
 	}
 }
 
+// aepAdminLookup performs an admin GET that distinguishes "not found"
+// (false, nil) from transport/server failures (false, err).
+func (p *portal) aepAdminLookup(ctx context.Context, path string, out any) (bool, error) {
+	token := p.adminToken(ctx)
+	if token == "" {
+		return false, fmt.Errorf("admin token unavailable")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.aepBaseURL+path, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-AEP-Protocol-Version", "1.0")
+	response, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	switch response.StatusCode {
+	case http.StatusOK:
+		return true, json.NewDecoder(response.Body).Decode(out)
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s returned %d", path, response.StatusCode)
+	}
+}
+
 // validateApply resolves and validates the extended apply fields. The
 // returned violations list every failed check (bad references, missing
 // release conditions); a non-nil error means an upstream needed for
 // validation was unavailable and the caller must fail closed.
+//
+// Users and teams are looked up by id (GET /admin/{users,teams}/{id}),
+// never by listing: the platform directory paginates at 200 entries and
+// load-test fleets push real users past the first page — a listing-based
+// check calls existing owners "not found".
 func (p *portal) validateApply(ctx context.Context, ident identity, body applyRequest) (applyContext, []violation, error) {
 	resolved := applyContext{}
 	var violations []violation
@@ -173,28 +206,39 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		violations = append(violations, violation{Field: field, Message: fmt.Sprintf(format, args...)})
 	}
 
-	needsUsers := body.Owner != "" || (body.Visibility != nil && len(body.Visibility.Users) > 0)
-	needsTeams := body.Team != "" || (body.Visibility != nil && len(body.Visibility.Teams) > 0)
-
-	var users []aepUser
-	if needsUsers {
-		var result struct {
-			Items []aepUser `json:"items"`
+	userCache := map[string]*aepUser{}
+	lookupUser := func(id string) (*aepUser, bool, error) {
+		if cached, ok := userCache[id]; ok {
+			return cached, cached != nil, nil
 		}
-		if err := p.aepAdminGet(ctx, "/aep/v1/admin/users?limit=200", &result); err != nil {
-			return resolved, nil, fmt.Errorf("users: %w", err)
+		var user aepUser
+		found, err := p.aepAdminLookup(ctx, "/aep/v1/admin/users/"+url.PathEscape(id), &user)
+		if err != nil {
+			return nil, false, fmt.Errorf("user %s: %w", id, err)
 		}
-		users = result.Items
+		if !found {
+			userCache[id] = nil
+			return nil, false, nil
+		}
+		userCache[id] = &user
+		return &user, true, nil
 	}
-	var teams []aepTeam
-	if needsTeams {
-		var result struct {
-			Teams []aepTeam `json:"teams"`
+	teamCache := map[string]*aepTeam{}
+	lookupTeam := func(id string) (*aepTeam, bool, error) {
+		if cached, ok := teamCache[id]; ok {
+			return cached, cached != nil, nil
 		}
-		if err := p.aepAdminGet(ctx, "/aep/v1/admin/teams?limit=100", &result); err != nil {
-			return resolved, nil, fmt.Errorf("teams: %w", err)
+		var team aepTeam
+		found, err := p.aepAdminLookup(ctx, "/aep/v1/admin/teams/"+url.PathEscape(id), &team)
+		if err != nil {
+			return nil, false, fmt.Errorf("team %s: %w", id, err)
 		}
-		teams = result.Teams
+		if !found {
+			teamCache[id] = nil
+			return nil, false, nil
+		}
+		teamCache[id] = &team
+		return &team, true, nil
 	}
 
 	// Owner: empty means the caller; an override must reference an active
@@ -204,44 +248,33 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		resolved.OwnerID = ident.UserID
 		resolved.OwnerName = identUsername(ident)
 	default:
-		found := false
-		for _, user := range users {
-			if user.ID != body.Owner {
-				continue
-			}
-			found = true
-			switch {
-			case user.Status == "disabled":
-				add("owner", "负责人 %s 已停用", user.DisplayName)
-			case user.Kind != "" && user.Kind != "human":
-				add("owner", "负责人 %s 不是真人账号", user.DisplayName)
-			default:
-				resolved.OwnerID = user.ID
-				resolved.OwnerName = user.DisplayName
-				if resolved.OwnerName == "" {
-					resolved.OwnerName = user.Username
-				}
-			}
+		user, found, err := lookupUser(body.Owner)
+		if err != nil {
+			return resolved, nil, err
 		}
-		if !found {
+		switch {
+		case !found:
 			add("owner", "负责人 %s 不存在", body.Owner)
+		case user.Status == "disabled":
+			add("owner", "负责人 %s 已停用", user.DisplayName)
+		case user.Kind != "" && user.Kind != "human":
+			add("owner", "负责人 %s 不是真人账号", user.DisplayName)
+		default:
+			resolved.OwnerID = user.ID
+			resolved.OwnerName = user.DisplayName
+			if resolved.OwnerName == "" {
+				resolved.OwnerName = user.Username
+			}
 		}
 	}
 
 	// Team is a required release condition and must reference a real team.
 	if body.Team == "" {
 		add("team", "所属团队为必填发布条件")
-	} else {
-		found := false
-		for _, team := range teams {
-			if team.ID == body.Team {
-				found = true
-				break
-			}
-		}
-		if !found {
-			add("team", "团队 %s 不存在", body.Team)
-		}
+	} else if _, found, err := lookupTeam(body.Team); err != nil {
+		return resolved, nil, err
+	} else if !found {
+		add("team", "团队 %s 不存在", body.Team)
 	}
 
 	// Knowledge bases: nil input keeps the legacy unrestricted policy; a
@@ -316,28 +349,28 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 	case body.Visibility.Mode == "restricted":
 		visibility := &dev1alpha1.VisibilitySpec{Mode: "restricted", Teams: []dev1alpha1.SubjectRef{}, Users: []dev1alpha1.SubjectRef{}}
 		for index, id := range body.Visibility.Teams {
-			matched := false
-			for _, team := range teams {
-				if team.ID == id {
-					visibility.Teams = append(visibility.Teams, dev1alpha1.SubjectRef{ID: team.ID, Name: team.Name})
-					matched = true
-					break
-				}
+			team, found, err := lookupTeam(id)
+			if err != nil {
+				return resolved, nil, err
 			}
-			if !matched {
+			if found {
+				visibility.Teams = append(visibility.Teams, dev1alpha1.SubjectRef{ID: team.ID, Name: team.Name})
+			} else {
 				add(fmt.Sprintf("visibility.teams[%d]", index), "团队 %s 不存在", id)
 			}
 		}
 		for index, id := range body.Visibility.Users {
-			matched := false
-			for _, user := range users {
-				if user.ID == id {
-					visibility.Users = append(visibility.Users, dev1alpha1.SubjectRef{ID: user.ID, Name: user.DisplayName})
-					matched = true
-					break
-				}
+			user, found, err := lookupUser(id)
+			if err != nil {
+				return resolved, nil, err
 			}
-			if !matched {
+			if found {
+				name := user.DisplayName
+				if name == "" {
+					name = user.Username
+				}
+				visibility.Users = append(visibility.Users, dev1alpha1.SubjectRef{ID: user.ID, Name: name})
+			} else {
 				add(fmt.Sprintf("visibility.users[%d]", index), "用户 %s 不存在", id)
 			}
 		}
