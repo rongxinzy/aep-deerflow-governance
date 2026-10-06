@@ -24,6 +24,62 @@ type violation struct {
 	Message string `json:"message"`
 }
 
+// referenceResolver caches per-id directory lookups for one request. Apply
+// and update both resolve references through it; users and teams are looked
+// up by id (GET /admin/{users,teams}/{id}), never by listing: the platform
+// directory paginates at 200 entries and load-test fleets push real users
+// past the first page — a listing-based check calls existing owners "not
+// found".
+type referenceResolver struct {
+	portal    *portal
+	ctx       context.Context
+	userCache map[string]*aepUser
+	teamCache map[string]*aepTeam
+}
+
+func newReferenceResolver(p *portal, ctx context.Context) *referenceResolver {
+	return &referenceResolver{
+		portal:    p,
+		ctx:       ctx,
+		userCache: map[string]*aepUser{},
+		teamCache: map[string]*aepTeam{},
+	}
+}
+
+func (r *referenceResolver) lookupUser(id string) (*aepUser, bool, error) {
+	if cached, ok := r.userCache[id]; ok {
+		return cached, cached != nil, nil
+	}
+	var user aepUser
+	found, err := r.portal.aepAdminLookup(r.ctx, "/aep/v1/admin/users/"+url.PathEscape(id), &user)
+	if err != nil {
+		return nil, false, fmt.Errorf("user %s: %w", id, err)
+	}
+	if !found {
+		r.userCache[id] = nil
+		return nil, false, nil
+	}
+	r.userCache[id] = &user
+	return &user, true, nil
+}
+
+func (r *referenceResolver) lookupTeam(id string) (*aepTeam, bool, error) {
+	if cached, ok := r.teamCache[id]; ok {
+		return cached, cached != nil, nil
+	}
+	var team aepTeam
+	found, err := r.portal.aepAdminLookup(r.ctx, "/aep/v1/admin/teams/"+url.PathEscape(id), &team)
+	if err != nil {
+		return nil, false, fmt.Errorf("team %s: %w", id, err)
+	}
+	if !found {
+		r.teamCache[id] = nil
+		return nil, false, nil
+	}
+	r.teamCache[id] = &team
+	return &team, true, nil
+}
+
 // applyContext carries the resolved, validated pieces of an apply request.
 type applyContext struct {
 	OwnerID    string
@@ -194,11 +250,6 @@ func (p *portal) aepAdminLookup(ctx context.Context, path string, out any) (bool
 // returned violations list every failed check (bad references, missing
 // release conditions); a non-nil error means an upstream needed for
 // validation was unavailable and the caller must fail closed.
-//
-// Users and teams are looked up by id (GET /admin/{users,teams}/{id}),
-// never by listing: the platform directory paginates at 200 entries and
-// load-test fleets push real users past the first page — a listing-based
-// check calls existing owners "not found".
 func (p *portal) validateApply(ctx context.Context, ident identity, body applyRequest) (applyContext, []violation, error) {
 	resolved := applyContext{}
 	var violations []violation
@@ -206,40 +257,9 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		violations = append(violations, violation{Field: field, Message: fmt.Sprintf(format, args...)})
 	}
 
-	userCache := map[string]*aepUser{}
-	lookupUser := func(id string) (*aepUser, bool, error) {
-		if cached, ok := userCache[id]; ok {
-			return cached, cached != nil, nil
-		}
-		var user aepUser
-		found, err := p.aepAdminLookup(ctx, "/aep/v1/admin/users/"+url.PathEscape(id), &user)
-		if err != nil {
-			return nil, false, fmt.Errorf("user %s: %w", id, err)
-		}
-		if !found {
-			userCache[id] = nil
-			return nil, false, nil
-		}
-		userCache[id] = &user
-		return &user, true, nil
-	}
-	teamCache := map[string]*aepTeam{}
-	lookupTeam := func(id string) (*aepTeam, bool, error) {
-		if cached, ok := teamCache[id]; ok {
-			return cached, cached != nil, nil
-		}
-		var team aepTeam
-		found, err := p.aepAdminLookup(ctx, "/aep/v1/admin/teams/"+url.PathEscape(id), &team)
-		if err != nil {
-			return nil, false, fmt.Errorf("team %s: %w", id, err)
-		}
-		if !found {
-			teamCache[id] = nil
-			return nil, false, nil
-		}
-		teamCache[id] = &team
-		return &team, true, nil
-	}
+	resolver := newReferenceResolver(p, ctx)
+	lookupUser := resolver.lookupUser
+	lookupTeam := resolver.lookupTeam
 
 	// Owner: empty means the caller; an override must reference an active
 	// human account (privilege is checked in the handler before this).
@@ -387,6 +407,172 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		add("description", "用途说明为必填发布条件")
 	} else if len([]rune(body.Description)) > 500 {
 		add("description", "用途说明不能超过 500 字")
+	}
+
+	return resolved, violations, nil
+}
+
+// validateUpdate resolves and validates only the fields an update request
+// actually carries — absent means unchanged, and an untouched field never
+// consults an upstream (switching a dead model must not be blocked by an
+// unrelated stale reference). The per-field rule set mirrors validateApply;
+// resolved values land in the context only for provided-and-valid fields,
+// so the handler can tell "keep current" (zero value) from "replace with
+// this" for every input shape it knows from the body itself.
+func (p *portal) validateUpdate(ctx context.Context, ident identity, body updateRequest) (applyContext, []violation, error) {
+	resolved := applyContext{}
+	var violations []violation
+	add := func(field, format string, args ...any) {
+		violations = append(violations, violation{Field: field, Message: fmt.Sprintf(format, args...)})
+	}
+	resolver := newReferenceResolver(p, ctx)
+
+	if body.Owner != nil {
+		switch {
+		case *body.Owner == "":
+			add("owner", "负责人不能为空")
+		default:
+			user, found, err := resolver.lookupUser(*body.Owner)
+			if err != nil {
+				return resolved, nil, err
+			}
+			switch {
+			case !found:
+				add("owner", "负责人 %s 不存在", *body.Owner)
+			case user.Status == "disabled":
+				add("owner", "负责人 %s 已停用", user.DisplayName)
+			case user.Kind != "" && user.Kind != "human":
+				add("owner", "负责人 %s 不是真人账号", user.DisplayName)
+			default:
+				resolved.OwnerID = user.ID
+				resolved.OwnerName = user.DisplayName
+				if resolved.OwnerName == "" {
+					resolved.OwnerName = user.Username
+				}
+			}
+		}
+	}
+
+	if body.Team != nil {
+		if *body.Team == "" {
+			add("team", "所属团队为必填发布条件")
+		} else if _, found, err := resolver.lookupTeam(*body.Team); err != nil {
+			return resolved, nil, err
+		} else if !found {
+			add("team", "团队 %s 不存在", *body.Team)
+		}
+	}
+
+	if body.Description != nil {
+		switch runes := len([]rune(*body.Description)); {
+		case runes == 0:
+			add("description", "用途说明为必填发布条件")
+		case runes > 500:
+			add("description", "用途说明不能超过 500 字")
+		}
+	}
+
+	// Same knowledge semantics as apply: an explicit empty list is a valid
+	// deny-all policy with no ids to validate, so WeKnora stays out of the
+	// loop and an outage cannot block hardening an employee to zero bases.
+	if body.KnowledgeBases != nil {
+		resolved.KBs = []dev1alpha1.KnowledgeBaseRef{}
+		if len(body.KnowledgeBases) > 0 {
+			bases, err := p.listWeKnoraBases(ctx)
+			if err != nil {
+				return resolved, nil, fmt.Errorf("knowledge bases: %w", err)
+			}
+			for index, id := range body.KnowledgeBases {
+				matched := false
+				for _, base := range bases {
+					if base.ID == id {
+						resolved.KBs = append(resolved.KBs, dev1alpha1.KnowledgeBaseRef{ID: base.ID, Name: base.Name})
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					add(fmt.Sprintf("knowledgeBases[%d]", index), "知识库 %s 不存在", id)
+				}
+			}
+		}
+	}
+
+	if body.Skills != nil {
+		resolved.Skills = []dev1alpha1.SkillRef{}
+		if len(body.Skills) > 0 {
+			skills, err := p.listAEPSkills(ctx)
+			if err != nil {
+				return resolved, nil, fmt.Errorf("skills: %w", err)
+			}
+			for index, input := range body.Skills {
+				field := fmt.Sprintf("skills[%d].id", index)
+				var matched *aepSkill
+				for i := range skills {
+					if skills[i].ID == input.ID {
+						matched = &skills[i]
+						break
+					}
+				}
+				switch {
+				case matched == nil:
+					add(field, "技能 %s 不存在", input.ID)
+				case matched.State != "active":
+					add(field, "技能 %s 未启用", matched.Name)
+				case input.Version == "" && matched.latestPublished() == "":
+					add(field, "技能 %s 没有已发布版本", matched.Name)
+				case input.Version != "" && !matched.hasPublished(input.Version):
+					add(field, "技能 %s 的版本 %s 未发布", matched.Name, input.Version)
+				default:
+					version := input.Version
+					if version == "" {
+						version = matched.latestPublished()
+					}
+					resolved.Skills = append(resolved.Skills, dev1alpha1.SkillRef{ID: matched.ID, Name: matched.Name, Version: version})
+				}
+			}
+		}
+	}
+
+	if body.Visibility != nil {
+		switch body.Visibility.Mode {
+		case "all":
+			resolved.Visibility = &dev1alpha1.VisibilitySpec{Mode: "all"}
+		case "restricted":
+			visibility := &dev1alpha1.VisibilitySpec{Mode: "restricted", Teams: []dev1alpha1.SubjectRef{}, Users: []dev1alpha1.SubjectRef{}}
+			for index, id := range body.Visibility.Teams {
+				team, found, err := resolver.lookupTeam(id)
+				if err != nil {
+					return resolved, nil, err
+				}
+				if found {
+					visibility.Teams = append(visibility.Teams, dev1alpha1.SubjectRef{ID: team.ID, Name: team.Name})
+				} else {
+					add(fmt.Sprintf("visibility.teams[%d]", index), "团队 %s 不存在", id)
+				}
+			}
+			for index, id := range body.Visibility.Users {
+				user, found, err := resolver.lookupUser(id)
+				if err != nil {
+					return resolved, nil, err
+				}
+				if found {
+					name := user.DisplayName
+					if name == "" {
+						name = user.Username
+					}
+					visibility.Users = append(visibility.Users, dev1alpha1.SubjectRef{ID: user.ID, Name: name})
+				} else {
+					add(fmt.Sprintf("visibility.users[%d]", index), "用户 %s 不存在", id)
+				}
+			}
+			if len(body.Visibility.Teams) == 0 && len(body.Visibility.Users) == 0 {
+				add("visibility", "指定范围至少需要包含一个团队或用户")
+			}
+			resolved.Visibility = visibility
+		default:
+			add("visibility", "开放范围模式必须是 all 或 restricted")
+		}
 	}
 
 	return resolved, violations, nil

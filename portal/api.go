@@ -135,6 +135,24 @@ type applyRequest struct {
 	Visibility *visibilityInput `json:"visibility"`
 }
 
+// updateRequest is the PATCH body: present fields are replaced (after the
+// same validation as apply), absent fields keep the employee's current
+// configuration. Slices distinguish absent (nil) from an explicitly empty
+// list — empty knowledgeBases hardens to deny-all, empty skills unregisters
+// every skill, while an empty models list is a release-condition violation.
+// There is deliberately no way back to the legacy unrestricted knowledge
+// policy: once explicit, an employee stays explicit.
+type updateRequest struct {
+	DisplayName    *string          `json:"displayName"`
+	Description    *string          `json:"description"`
+	Team           *string          `json:"team"`
+	Owner          *string          `json:"owner"`
+	Models         []string         `json:"models"`
+	KnowledgeBases []string         `json:"knowledgeBases"`
+	Skills         []skillInput     `json:"skills"`
+	Visibility     *visibilityInput `json:"visibility"`
+}
+
 func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
 	var body applyRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
@@ -446,16 +464,18 @@ func (p *portal) getEmployee(w http.ResponseWriter, r *http.Request, ident ident
 	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
 }
 
-// updateEmployee patches an employee's displayName and/or team. Admin or
-// owner only; the operator reconciles spec changes (config update + memory
-// account re-derivation) on the next reconcile pass.
+// updateEmployee applies partial configuration updates: model switches,
+// knowledge whitelists, skills, audience, owner transfer, and the basic
+// fields. Only fields present in the body are validated and replaced — an
+// untouched field never consults an upstream, so re-pointing an employee
+// off a decommissioned model is not blocked by unrelated stale references.
+// Owner transfer and opening to everyone stay administrator-only (updates
+// have no approval parking); the operator reconciles spec changes (runtime
+// config + memory account re-derivation) on the next pass.
 func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
 	name := r.PathValue("name")
-	var body struct {
-		DisplayName *string `json:"displayName"`
-		Team        *string `json:"team"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+	var body updateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
@@ -470,18 +490,120 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to modify this employee"})
 		return
 	}
+	// Transferring ownership to someone else is admin-only, mirroring the
+	// apply-time override rule; the current owner may keep or re-assert
+	// themselves.
+	if body.Owner != nil && *body.Owner != item.Spec.Owner && *body.Owner != ident.UserID && !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有管理员可以变更负责人"})
+		return
+	}
+	// Opening an existing employee to everyone stays a reviewed
+	// administrator action (unlike creation there is no approval queue
+	// for updates).
+	if body.Visibility != nil && body.Visibility.Mode == "all" && !ident.isAdmin(p.cfg) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "全员开放需要管理员操作"})
+		return
+	}
+	// Model lists resolve first with apply's fail-fast semantics.
+	var runtimeModels []dev1alpha1.RuntimeModel
+	if body.Models != nil {
+		if len(body.Models) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":      "发布条件校验未通过（1 项）",
+				"violations": []violation{{Field: "models", Message: "使用模型为必填发布条件"}},
+			})
+			return
+		}
+		var err error
+		if runtimeModels, err = p.resolveRuntimeModels(r.Context(), ident, body.Models); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	resolved, violations, err := p.validateUpdate(r.Context(), ident, body)
+	if err != nil {
+		// Fail closed: never write an update whose references were not
+		// checked because an upstream was down.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "发布条件校验依赖的服务暂不可用：" + err.Error()})
+		return
+	}
+	if len(violations) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":      fmt.Sprintf("发布条件校验未通过（%d 项）", len(violations)),
+			"violations": violations,
+		})
+		return
+	}
 	if body.DisplayName != nil && *body.DisplayName != "" {
 		item.Spec.DisplayName = *body.DisplayName
 	}
+	if body.Description != nil {
+		item.Spec.Description = *body.Description
+	}
 	if body.Team != nil {
 		item.Spec.Team = *body.Team
+	}
+	if body.Owner != nil && resolved.OwnerID != "" {
+		item.Spec.Owner = resolved.OwnerID
+		item.Spec.OwnerName = resolved.OwnerName
+		// The employee acts with its owner's data scope — governance
+		// identity follows the transfer.
+		item.Spec.Governance.DefaultAEPUser = resolved.OwnerID
+	}
+	if body.Models != nil {
+		// The explicit list replaces the singular default too, or
+		// summarize would keep reporting the retired model as default.
+		item.Spec.Runtime.Models = runtimeModels
+		item.Spec.Runtime.Model = ""
+	}
+	if body.KnowledgeBases != nil {
+		if item.Spec.Knowledge == nil {
+			item.Spec.Knowledge = &dev1alpha1.KnowledgeSpec{Type: "weknora", MCPURL: p.cfg.knowledgeMCPURL}
+		}
+		item.Spec.Knowledge.Bases = resolved.KBs
+	}
+	if body.Skills != nil {
+		item.Spec.Skills = resolved.Skills
+	}
+	if body.Visibility != nil {
+		item.Spec.Visibility = resolved.Visibility
 	}
 	if err := p.k8s.Update(r.Context(), &item); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	p.logger.Info("employee updated", "name", name, "team", item.Spec.Team, "by", ident.UserID)
+	p.logger.Info("employee updated", "name", name, "fields", updatedFields(body), "by", ident.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
+}
+
+// updatedFields names the fields an update carried, for the audit log.
+func updatedFields(body updateRequest) []string {
+	fields := make([]string, 0, 8)
+	if body.DisplayName != nil {
+		fields = append(fields, "displayName")
+	}
+	if body.Description != nil {
+		fields = append(fields, "description")
+	}
+	if body.Team != nil {
+		fields = append(fields, "team")
+	}
+	if body.Owner != nil {
+		fields = append(fields, "owner")
+	}
+	if body.Models != nil {
+		fields = append(fields, "models")
+	}
+	if body.KnowledgeBases != nil {
+		fields = append(fields, "knowledgeBases")
+	}
+	if body.Skills != nil {
+		fields = append(fields, "skills")
+	}
+	if body.Visibility != nil {
+		fields = append(fields, "visibility")
+	}
+	return fields
 }
 func (p *portal) deleteEmployee(w http.ResponseWriter, r *http.Request, ident identity) {
 	name := r.PathValue("name")
@@ -597,6 +719,12 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 	if model == "" && len(item.Spec.Runtime.Models) > 0 {
 		model = item.Spec.Runtime.Models[0].Name
 	}
+	// The full ordered list feeds the console's edit form (it needs every
+	// selectable model, not just the default).
+	models := make([]string, 0, len(item.Spec.Runtime.Models))
+	for _, entry := range item.Spec.Runtime.Models {
+		models = append(models, entry.Name)
+	}
 	var knowledgeBases any
 	if item.Spec.Knowledge != nil && item.Spec.Knowledge.Bases != nil {
 		bases := make([]map[string]string, 0, len(item.Spec.Knowledge.Bases))
@@ -623,7 +751,7 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 	}
 	return map[string]any{
 		"name": item.Name, "displayName": item.Spec.DisplayName, "phase": item.Status.Phase,
-		"runtime": item.Spec.Runtime.Type, "model": model,
+		"runtime": item.Spec.Runtime.Type, "model": model, "models": models,
 		"owner": item.Spec.OwnerName, "ownerId": item.Spec.Owner,
 		"team":        item.Spec.Team,
 		"description": item.Spec.Description,

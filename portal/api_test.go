@@ -100,13 +100,16 @@ func TestAPICRUDHandlers(t *testing.T) {
 	})
 
 	t.Run("update employee patches displayName and team", func(t *testing.T) {
-		h := newAPIHarness(t, readyCR("sales-helper", "admin-user"))
+		h := newApplyHarness(t)
+		target := readyCR("sales-helper", "u-owner")
+		target.Spec.Team = "sales-dept"
+		require.NoError(t, h.k8s.Create(context.Background(), target))
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/employees/sales-helper",
 			strings.NewReader(`{"displayName":"销售专员","team":"rd-dept"}`))
 		req.SetPathValue("name", "sales-helper")
 		w := httptest.NewRecorder()
 		h.updateEmployee(w, req, adminIdentity())
-		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		var item dev1alpha1.DigitalEmployee
 		require.NoError(t, h.k8s.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "sales-helper"}, &item))
 		assert.Equal(t, "销售专员", item.Spec.DisplayName)
