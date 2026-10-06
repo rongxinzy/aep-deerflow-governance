@@ -5,6 +5,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -40,8 +42,9 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		}
 	}
 
+	configPayload := renderConfig(employee, conversationURLKey(employee))
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configName(employee), Namespace: employee.Namespace}}
-	configMap.Data = map[string]string{"config.yaml": renderConfig(employee, conversationURLKey(employee))}
+	configMap.Data = map[string]string{"config.yaml": configPayload}
 	if err := controllerutil.SetControllerReference(employee, configMap, r.Scheme); err != nil {
 		return err
 	}
@@ -49,8 +52,9 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		return fmt.Errorf("config map: %w", err)
 	}
 
+	extensionsPayload := renderExtensions(employee)
 	extensions := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: extensionsName(employee), Namespace: employee.Namespace}}
-	extensions.Data = map[string]string{"extensions_config.json": renderExtensions(employee)}
+	extensions.Data = map[string]string{"extensions_config.json": extensionsPayload}
 	if err := controllerutil.SetControllerReference(employee, extensions, r.Scheme); err != nil {
 		return err
 	}
@@ -64,7 +68,7 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		}
 	}
 
-	deployment, err := r.renderDeployment(employee)
+	deployment, err := r.renderDeployment(employee, configChecksum(configPayload, extensionsPayload))
 	if err != nil {
 		return err
 	}
@@ -134,10 +138,16 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 		return c.Update(ctx, previous)
 	case *appsv1.Deployment:
 		previous := existing.(*appsv1.Deployment)
-		if reflect.DeepEqual(previous.Spec.Template.Spec, typed.Spec.Template.Spec) {
+		// The pod template annotations carry the config checksum: comparing
+		// them too is what turns a rendered-config change into a rollout
+		// (the runtime loads config at boot; a hot-updated ConfigMap alone
+		// would leave the old policy live forever).
+		if reflect.DeepEqual(previous.Spec.Template.Spec, typed.Spec.Template.Spec) &&
+			reflect.DeepEqual(previous.Spec.Template.Annotations, typed.Spec.Template.Annotations) {
 			return nil
 		}
 		previous.Spec.Template.Spec = typed.Spec.Template.Spec
+		previous.Spec.Template.Annotations = typed.Spec.Template.Annotations
 		return c.Update(ctx, previous)
 	case *corev1.Service:
 		previous := existing.(*corev1.Service)
@@ -380,7 +390,20 @@ func renderExtensions(employee *v1alpha1.DigitalEmployee) string {
 	return string(encoded)
 }
 
-func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalEmployee) (*appsv1.Deployment, error) {
+// configHashAnnotation keys the rendered-config checksum on the pod
+// template. A change rolls the deployment (Recreate) so the runtime boots
+// with the new governance kwargs — without it, PATCHed knowledge
+// whitelists would only ever apply to freshly created employees.
+const configHashAnnotation = "zhiyuan.io/config-hash"
+
+// configChecksum fingerprints both rendered payloads; map-key-sorted JSON
+// keeps it stable across reconciles.
+func configChecksum(configPayload, extensionsPayload string) string {
+	digest := sha256.Sum256([]byte(configPayload + "\x00" + extensionsPayload))
+	return hex.EncodeToString(digest[:])[:16]
+}
+
+func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalEmployee, checksum string) (*appsv1.Deployment, error) {
 	spec := employee.Spec
 	replicas := spec.Replicas
 	if replicas <= 0 {
@@ -463,7 +486,12 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels(employee)},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels(employee)},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels(employee),
+					Annotations: map[string]string{
+						configHashAnnotation: checksum,
+					},
+				},
 				Spec: corev1.PodSpec{
 					InitContainers: func() []corev1.Container {
 						if init := r.conversationInitContainer(employee, convDatabase); init != nil {

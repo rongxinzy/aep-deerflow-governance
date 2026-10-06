@@ -5,6 +5,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -83,5 +84,35 @@ var _ = Describe("knowledge bases and business-layer fields", func() {
 		// Nowhere in the rendered config: these are business-layer fields.
 		Expect(fetchConfig(ctx, fx, employee)).NotTo(ContainSubstring("report-writer"))
 		Expect(fetchConfig(ctx, fx, employee)).NotTo(ContainSubstring(`"visibility"`))
+	})
+
+	// The runtime reads its config at boot: a rendered-config change must
+	// move the deployment's checksum annotation or an edited whitelist only
+	// ever applies to freshly created employees.
+	fetchChecksum := func(ctx context.Context, fx *fixture, employee *dev1alpha1.DigitalEmployee) string {
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		return deployment.Spec.Template.Annotations[configHashAnnotation]
+	}
+
+	It("rolls the deployment when the rendered config changes", func(ctx context.Context) {
+		fx, employee := setup(ctx, nil)
+		first := fetchChecksum(ctx, fx, employee)
+		Expect(first).NotTo(BeEmpty())
+
+		// Unchanged spec → identical checksum (no rollout churn).
+		_, err := fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetchChecksum(ctx, fx, employee)).To(Equal(first))
+
+		// Edited whitelist → new checksum on the pod template.
+		fresh := &dev1alpha1.DigitalEmployee{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}, fresh)).To(Succeed())
+		fresh.Spec.Knowledge.Bases = []dev1alpha1.KnowledgeBaseRef{{ID: "kb-3", Name: "财务知识库"}}
+		Expect(fx.client.Update(ctx, fresh)).To(Succeed())
+		_, err = fx.reconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: employee.Namespace, Name: employee.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fetchChecksum(ctx, fx, employee)).NotTo(Equal(first))
+		Expect(fetchConfig(ctx, fx, employee)).To(ContainSubstring(`"kb-3": "财务知识库"`))
 	})
 })
