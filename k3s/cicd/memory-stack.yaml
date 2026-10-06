@@ -1,8 +1,20 @@
 # Memory stack for the cicd cluster. Same shape as ../memory-stack.yaml with
-# cicd differences baked in:
-#   - VLM goes through the in-cluster Higress model gateway (online GLM via
-#     the Anthropic route; ai-proxy converts openai<->anthropic and injects
-#     the credential server-side) — api_key is a non-empty dummy on purpose
+# cicd differences baked in.
+#
+# NOTE (2026-10-06): the Helm release `zhiyuan` (chart charts/zhiyuan-stack,
+# template memory-stack.yaml) owns the live openviking-config ConfigMap —
+# this manifest is kept as the rendered reference of current cicd state and
+# is NOT applied anymore. The authoritative values live in the chart's
+# values (see values-cicd.example.yaml memory.openviking.vlm).
+#
+# VLM notes:
+#   - extraction rides the on-prem Qwen server directly, not Higress: the
+#     gateway's openai-compat conversion route is shadowed by a legacy
+#     manual /v1/chat/completions ingress (longest-prefix wins) — recorded
+#     as an AEP gap. Revisit when the shadowing is fixed.
+#   - Qwen3.8-Flash-Next is a thinking model: enable_thinking=false is
+#     required or the answer stays in reasoning_content and extraction
+#     returns 0 hits; 300s timeout because the on-prem server is slow.
 #   - root_api_key is a deploy-time secret: render with
 #       OPENVIKING_ROOT_API_KEY=... envsubst < memory-stack.yaml | kubectl apply -f -
 # Embedding stays on the local embed-server (not a GLM concern).
@@ -95,12 +107,17 @@ data:
         }
       },
       "vlm": {
-        "api_base": "http://higress-gateway.higress-system.svc.cluster.local/v1",
-        "timeout": 120,
+        "api_base": "http://172.18.6.119:8080/v1",
+        "timeout": 300,
         "thinking": false,
-        "api_key": "aep-managed-by-higress",
+        "api_key": "none",
         "provider": "openai",
-        "model": "glm-5.3-flash"
+        "model": "Qwen3.8-Flash-Next",
+        "extra_request_body": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        }
       }
     }
 ---
