@@ -428,8 +428,8 @@ func (p *portal) validateUpdate(ctx context.Context, ident identity, body update
 	resolver := newReferenceResolver(p, ctx)
 
 	if body.Owner != nil {
-		switch {
-		case *body.Owner == "":
+		switch *body.Owner {
+		case "":
 			add("owner", "负责人不能为空")
 		default:
 			user, found, err := resolver.lookupUser(*body.Owner)
