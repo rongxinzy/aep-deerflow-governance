@@ -21,6 +21,10 @@ spec:
             - {name: PORTAL_QUOTA_PER_USER, value: {{ .Values.portal.quotaPerUser | quote }}}
             - {name: PORTAL_ADMIN_USERS, value: {{ .Values.portal.adminUsers | quote }}}
             - {name: PORTAL_ADMIN_ROLES, value: {{ .Values.portal.adminRoles | quote }}}
+            # Default runtime image for newly applied employees. Rendered
+            # here so the chart — not an ad-hoc `kubectl set env` — is the
+            # record of what new employees run.
+            - {name: PORTAL_RUNTIME_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag) | quote }}}
           envFrom:
             - secretRef: {name: {{ .Values.secrets.portalDB }}}
           ports:
