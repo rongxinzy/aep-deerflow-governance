@@ -205,7 +205,7 @@ func TestRenderConfigVariants(t *testing.T) {
 	assert.Contains(t, cfg, "ChatAnthropic")
 	assert.Contains(t, cfg, "AepGovernanceMiddleware")
 
-	rendered, err := (&DigitalEmployeeReconciler{}).renderDeployment(employee)
+	rendered, err := (&DigitalEmployeeReconciler{}).renderDeployment(employee, "checksum-for-test")
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1, *rendered.Spec.Replicas)
 	assert.NotNil(t, rendered.Spec.Template.Spec.Containers[0].ReadinessProbe)
