@@ -9,3 +9,11 @@ kind: Namespace
 metadata:
   name: {{ .Values.global.namespaces.memory }}
   labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- if .Values.aepStack.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aep-system
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- end }}
