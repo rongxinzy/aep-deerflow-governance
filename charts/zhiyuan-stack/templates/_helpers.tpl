@@ -5,8 +5,8 @@
 
 {{- define "zhiyuan.assertRealValue" -}}
 {{- $v := .value -}}
-{{- if and (kindIs "string" $v) (hasPrefix "<" $v) (hasSuffix ">" $v) -}}
-{{- fail (printf "aepStack.%s still holds the placeholder %q — set the real value in values-<env>.local.yaml (gitignored) before installing; placeholders that slip through would silently write invalid config (or brick control-service on its next restart)" .name $v) -}}
+{{- if and (kindIs "string" $v) (regexMatch "<[^<>]+>" $v) -}}
+{{- fail (printf "aepStack.%s still contains a <...> placeholder (%q) — set the real value in values-<env>.local.yaml (gitignored) before installing; placeholders that slip through would silently write invalid config (or brick control-service on its next restart)" .name $v) -}}
 {{- end -}}
 {{- end }}
 
