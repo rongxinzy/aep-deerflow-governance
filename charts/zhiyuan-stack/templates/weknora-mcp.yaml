@@ -3,7 +3,9 @@
 # Faithful render of the live object (2026-10-07) — it was hand-applied and
 # is not part of the vendored WeKnora subchart. Digital employees call the
 # knowledge_search tool through this service (governance middleware).
-{{- $ns := .Values.weknora.namespace | default "weknora" }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.mcp.apiKey" "value" .Values.weknora.mcp.apiKey) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.mcp.serverAuthToken" "value" .Values.weknora.mcp.serverAuthToken) }}
+{{- $ns := required "weknora.namespace is required when weknora.enabled (e.g. \"weknora\")" .Values.weknora.namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment

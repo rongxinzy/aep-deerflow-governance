@@ -23,8 +23,13 @@ helm upgrade --install zhiyuan . -f values-cicd.local.yaml \
 helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 ```
 
-- `--take-ownership`：收编已存在的同名资源（迁移既有环境必需；helm ≥3.17）。
-  收编既有 `weknora` release 时同样靠它；收编后原 release 记录可删。
+- `--take-ownership`：收编已存在的同名资源（迁移既有环境必需；helm ≥3.17；
+  cicd 节点 helm 3.18.4 可用，本机旧版需升级或在节点上执行）。
+- **收编既有 `weknora` release 后，只删 release 记录**：
+  `kubectl -n weknora delete secret sh.helm.release.v1.weknora.v1`。
+  **禁止 `helm uninstall weknora`** —— uninstall 按旧 manifest 删除对象且不校验
+  归属，会连已收编的工作负载和 3 个 local-path 备份 PVC
+  （weknora-postgres/-redis/-data-files）一起删掉。
 - **占位符守卫**：`aepStack` 敏感项与 WeKnora 凭据里任何 `<...>` 占位符没被
   values-`<env>`.local.yaml 的真实值替换时，渲染直接失败（防止把无效配置静默
   写进 ConfigMap/Secret，或让控制面在下次重启时 CrashLoop）。
