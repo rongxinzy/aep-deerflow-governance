@@ -16,6 +16,7 @@
 {{- include "zhiyuan.assertRealValue" (dict "name" "dataPlaneReconcilerToken" "value" .Values.aepStack.dataPlaneReconcilerToken) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "gatewayLicenseStatusToken" "value" .Values.aepStack.gatewayLicenseStatusToken) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "modelGatewayBaseUrl" "value" .Values.aepStack.modelGatewayBaseUrl) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "postgres.password" "value" .Values.aepStack.postgres.password) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "agentControlAdvertiseUrl" "value" .Values.aepStack.agentControlAdvertiseUrl) }}
 {{/* control-service 的启动校验（clientReachableGatewayHost）拒绝
      .svc.cluster.local —— 集群内 DNS 会让控制面 CrashLoop，模板期先拦。 */}}
