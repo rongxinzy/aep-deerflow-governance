@@ -5,6 +5,10 @@
 # (/mcp/{endpoint_id}), replace this deployment with an endpoint created via
 # the WeKnora admin API and update the DeerFlow extensions URL.
 #
+# SUPERSEDED (2026-10-07): 已由 charts/zhiyuan-stack
+# templates/weknora-mcp.yaml 纳管（镜像为 Harbor DNS）。本文件仅作历史
+# 参考；勿再 apply（会把镜像回退到旧 jfrog 路径）。
+#
 # Real values (WEKNORA_API_KEY bearer + MCP token) go in weknora-mcp.local.yaml.
 apiVersion: apps/v1
 kind: Deployment

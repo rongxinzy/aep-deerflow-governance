@@ -63,8 +63,9 @@ dev 侧故障根因是 redis PVC 的 AOF 文件损坏（`redis-check-aof --fix` 
 全栈恢复）。cicd 用 WeKnora fork main 分支的 helm chart（`zhiyuan/helm-extra-env`
 补丁已并入）全新安装：values 密钥随机生成（存工作区外凭证备忘），
 `SSRF_WHITELIST_EXTRA` 同时放行 higress 网关与内网 embed-server；
-`k3s/weknora-mcp.yaml` 按 cicd bearer 渲染后 apply（`WEKNORA_API_KEY` 待
-实例初始化后回填）。实例初始化清单：管理员账户 → 嵌入模型指向
+`k3s/weknora-mcp.yaml`（**已废弃**，勿再 apply）——自 2026-10-07 起 MCP
+桥由 `charts/zhiyuan-stack/templates/weknora-mcp.yaml` 纳管，凭据入
+values-`<env>`.local.yaml，运行期经 chart 渲染。实例初始化清单：管理员账户 → 嵌入模型指向
 `http://embed-server.memory-system.svc.cluster.local:8080/v1`（bge-small-zh-v1.5）
 → 建库 → 租户 API key 回填 mcp → 员工 CR 挂 `spec.knowledge`（注意 operator
 配置变更不滚动 pod，需重启运行时生效）。

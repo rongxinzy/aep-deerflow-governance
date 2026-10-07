@@ -17,3 +17,19 @@ metadata:
   name: aep-system
   labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
 {{- end }}
+{{- if .Values.weknora.enabled }}
+{{/* WeKnora 凭据占位符守卫（父侧，覆盖 vendored 子图的 required 盲区：
+     `<...>` 是非空字符串，required 放行）。 */}}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.dbPassword" "value" .Values.weknora.secrets.dbPassword) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.redisPassword" "value" .Values.weknora.secrets.redisPassword) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.jwtSecret" "value" .Values.weknora.secrets.jwtSecret) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.systemAesKey" "value" .Values.weknora.secrets.systemAesKey) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  # required：空值会让父侧模板（default "weknora" 语义）与子图 helper
+  # （default .Release.Namespace 语义）分叉到两个 namespace，直接 fail。
+  name: {{ required "weknora.namespace is required when weknora.enabled (e.g. \"weknora\")" .Values.weknora.namespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- end }}
