@@ -1,0 +1,104 @@
+# Harbor v2.15.2 (in-cluster master registry, ns harbor, node-pinned to compute1)
+#
+# Applied as:  helm template harbor longhorn-chart.tgz -n harbor -f values.yaml | kubectl apply -f -
+#   - chart: harbor 1.19.2 (OCI mirror fetch documented in zhiyuan-docs)
+#   - TLS:   cert-manager secret harbor-tls (see certs.yaml chain), SAN:
+#            harbor.zhiyuan.local + IP 172.18.5.189
+#   - The live admin password is NOT committed; it lives at
+#     /root/harbor-admin-password.txt (0600) on the cicd control node and
+#     was set via Helm harborAdminPassword at first install.
+#   - WARNING: the harbor chart regenerates internal secrets (core/
+#     jobservice/registry/redis/db) on every template render when values
+#     do not pin them. Re-applying a fresh render rotates internal creds
+#     and breaks auth for pods holding old env — restart the affected
+#     components together, or pin the secrets in values before rendering.
+#   - RWO-PVC components (registry/jobservice + the db/redis STS) run with
+#     strategy/updateStrategy Recreate — never switch them back to rolling
+#     updates.
+externalURL: https://harbor.zhiyuan.local:30443
+harborAdminPassword: "<live-password-not-committed>"
+expose:
+  type: nodePort
+  tls:
+    enabled: true
+    certSource: secret
+    secret:
+      secretName: harbor-tls
+  nodePort:
+    ports:
+      http:
+        port: 30010
+        nodePort: 30010
+      https:
+        port: 30443
+        nodePort: 30443
+persistence:
+  enabled: true
+  resourcePolicy: "keep"
+  persistentVolumeClaim:
+    registry:
+      size: 120Gi
+    database:
+      size: 5Gi
+    redis:
+      size: 2Gi
+    jobservice:
+      size: 2Gi
+nginx:
+  image:
+    repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-nginx-photon
+    tag: v2.15.2
+  nodeSelector:
+    kubernetes.io/hostname: compute1
+portal:
+  image:
+    repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-harbor-portal
+    tag: v2.15.2
+  nodeSelector:
+    kubernetes.io/hostname: compute1
+core:
+  image:
+    repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-harbor-core
+    tag: v2.15.2
+  nodeSelector:
+    kubernetes.io/hostname: compute1
+jobservice:
+  updateStrategy:
+    type: Recreate
+  image:
+    repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-harbor-jobservice
+    tag: v2.15.2
+  nodeSelector:
+    kubernetes.io/hostname: compute1
+registry:
+  updateStrategy:
+    type: Recreate
+  nodeSelector:
+    kubernetes.io/hostname: compute1
+  registry:
+    image:
+      repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-registry-photon
+      tag: v2.15.2
+  controller:
+    image:
+      repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-harbor-registryctl
+      tag: v2.15.2
+database:
+  type: internal
+  internal:
+    image:
+      repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-harbor-db
+      tag: v2.15.2
+    nodeSelector:
+      kubernetes.io/hostname: compute1
+redis:
+  internal:
+    image:
+      repository: harbor.zhiyuan.local:30443/zhiyuan/goharbor-valkey-photon
+      tag: v2.15.2
+    nodeSelector:
+      kubernetes.io/hostname: compute1
+trivy:
+  enabled: false
+exporter:
+  enabled: false

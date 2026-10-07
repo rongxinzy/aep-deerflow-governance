@@ -39,7 +39,7 @@ spec:
     spec:
       containers:
         - name: embed-server
-          image: 172.18.5.251:8081/zhiyuan/embed-server:0.1.0
+          image: harbor.zhiyuan.local:30443/zhiyuan/embed-server:0.1.0
           args: ["--port", "8080", "-m", "/opt/models/bge-small-zh-v1.5-f16.gguf"]
           ports:
             - containerPort: 8080
@@ -69,7 +69,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: openviking-data
+  name: openviking-data-lh
   namespace: memory-system
 spec:
   accessModes: [ReadWriteOnce]
@@ -137,7 +137,7 @@ spec:
     spec:
       containers:
         - name: openviking
-          image: 172.18.5.251:8081/zhiyuan/openviking:0.4.21
+          image: harbor.zhiyuan.local:30443/zhiyuan/openviking:0.4.21
           ports:
             - containerPort: 1933
           volumeMounts:
@@ -160,7 +160,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: openviking-data
+            claimName: openviking-data-lh
         - name: config
           configMap:
             name: openviking-config
