@@ -36,7 +36,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: openviking-data
+  # Migrated to Longhorn 2026-10-07 (data copied cp -a, old local-path PVC
+  # kept as rollback). Name kept stable — a rename would orphan the bound PV.
+  name: openviking-data-lh
   namespace: {{ include "zhiyuan.nsMemory" . }}
 spec:
   accessModes: [ReadWriteOnce]
@@ -117,7 +119,7 @@ spec:
             limits: {memory: 4Gi}
       volumes:
         - name: data
-          persistentVolumeClaim: {claimName: openviking-data}
+          persistentVolumeClaim: {claimName: openviking-data-lh}
         - name: config
           configMap: {name: openviking-config}
 ---

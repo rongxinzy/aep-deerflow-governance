@@ -1,5 +1,13 @@
 # cicd overlay example — copy to values-cicd.local.yaml and fill the
 # credentials (never commit the local copy).
+global:
+  # 2026-10-07 registry standardization: nodes pull ONLY from the in-cluster
+  # Harbor (harbor.zhiyuan.local:30443, cert-manager TLS); Harbor proxies
+  # external upstreams (dockerhub/quay projects) and the jfrog archive.
+  # The legacy mirror mapping in each node's registries.yaml falls back to
+  # 172.18.5.251:8081 for old tags.
+  registry: "harbor.zhiyuan.local:30443/zhiyuan"
+
 aep:
   adminUserId: "<aep-admin-user-uuid>"
 
@@ -12,7 +20,10 @@ models:
 # MUST sync tags here (and into values-cicd.local.yaml) — otherwise the
 # next `helm upgrade` silently rolls components back to whatever
 # values.yaml last pinned (2026-10-06 audit: chart said 0.13.0/0.14.0/
-# 0.8.3/v18 while the cluster ran 0.18.0/0.18.0/0.10.2/v25).
+# 0.8.3/v18 while the cluster ran 0.18.0/0.18.0/0.10.2/v25). Same rule
+# now covers the migration state: PVC claim names (postgres-data-lh /
+# openviking-data-lh), RWO-PVC workloads must keep `strategy: Recreate`,
+# and every image ref must render through the Harbor DNS registry above.
 images:
   operator: { repository: rongxinzy/de-operator, tag: "0.18.0" }
   portal: { repository: rongxinzy/de-portal, tag: "0.18.0" }

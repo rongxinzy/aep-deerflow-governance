@@ -77,3 +77,22 @@ dev 侧故障根因是 redis PVC 的 AOF 文件损坏（`redis-check-aof --fix` 
   凭证走 AEP credential 体系。本目录手工透传路由已退役，清单只剩 VLM 转换
   子路由（ai-proxy claude 转换，AEP 暂不承载 openai→anthropic 转换语义）。
   运行时账号 429 限流问题独立存在（见 operator 日志），与路由无关。
+
+## 2026-10-07：注册表与存储标准化（Harbor + Longhorn）
+
+### 镜像注册表
+- **主库 = 集群内 Harbor**：`harbor.zhiyuan.local:30443`（compute1 节点，cert-manager 真证书，SAN 含域名+节点 IP）。所有清单的镜像引用一律走该 DNS 名，**禁止出现任何 IP**（换环境只换 DNS）。
+- 节点级镜像链：`registries.yaml` 把 `172.18.5.251:8081` 映射为镜像端点 `https://harbor.zhiyuan.local:30443`（Harbor 优先、jfrog 原仓自动兜底老 tag），CA 见 `/etc/rancher/k3s/harbor-ca.crt`。
+- jfrog（172.18.5.251:8081）**不再是主库**：降级为冻结归档 + 兜底；新版本推 Harbor。Harbor 侧的 `dockerhub`/`quay` 代理项目统一承接外部镜像拉取。
+- 部署资产：`harbor/values.yaml`（含证书链 `harbor/certs.yaml`）。
+- 推送注意：集群侧推送需要注册表 CA 与凭据（`--hosts-dir` 配 DNS 名条目的 certs.d）；Harbor 组件自举有"镜像不在自己里"死锁，预热办法见 harbor/values.yaml 头注释。
+
+### 存储
+- **默认 StorageClass = `longhorn`**（3 节点盘池：rtl-control/compute1/rtl-l20；burst6 经 `node.longhorn.io/create-default-disk` 标签刻意排除）。local-path 仅服务未迁移的存量卷。
+- 部署资产：`longhorn/values.yaml`（tolerations/标签门控已固化在 values 里）。
+- **PVC 迁移状态**：11 个生产卷已迁（weknora×3、harbor×4、memory openviking、aep rustfs/postgres、logging ES），旧 local-path 卷全部保留做回滚；DE helper-home ×6 因 operator 渲染硬编码 PVC 名暂缓（需 operator 支持可配），`digital-employees/pg-backups` 与两个孤儿卷待处置。
+
+### 铁律（踩坑铸成）
+1. **挂 RWO PVC 的 Deployment 一律 `strategy: Recreate`**——RollingUpdate 会同节点双挂同一卷导致双写损坏（2026-10-06 aep postgres 实际事故，pg_resetwal 救援）。
+2. STS 换后端卷的手册：孤删 → 改 volumeClaimTemplates 名 + **同步改 mounts 同名** + storageClassName → 预建 `<模板名>-<sts>-<序数>` 卷并灌数 → 重放。命名推导绝不能错（harbor-database 踩过）。
+3. 一切含密文件不入库；harbor admin 初始密码在控制节点 `/root/harbor-admin-password.txt`。

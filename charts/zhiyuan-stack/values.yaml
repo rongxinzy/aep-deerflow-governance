@@ -3,14 +3,15 @@
 
 global:
   # Image registry base for the zhiyuan-built images. ghcr.io is the
-  # version source (CI publishes there); clusters pull from the intranet
-  # Artifactory local repo for speed — until CI mirrors finished builds
-  # back, point at the intranet registry. The ghcr pull-through
-  # (172.18.5.251:8081/ghcr) works but its on-demand origin fetch times
-  # out under kubelet deadlines.
-  registry: "172.18.5.251:8081/zhiyuan"
+  # version source (CI publishes there); the cicd cluster pulls from its
+  # own Harbor instead (2026-10-07 registry standardization): nodes talk
+  # ONLY to the in-cluster Harbor over TLS (cert-manager-issued cert,
+  # /etc/hosts or DNS resolves harbor.zhiyuan.local), Harbor proxies
+  # external upstreams and the legacy jfrog archive. Never hardcode IPs
+  # in image refs — swap the DNS name per environment instead.
+  registry: "harbor.zhiyuan.local:30443/zhiyuan"
   # Third-party images that only exist on the intranet registry.
-  intranetRegistry: "172.18.5.251:8081/zhiyuan"
+  intranetRegistry: "harbor.zhiyuan.local:30443/zhiyuan"
   namespaces:
     main: digital-employees
     memory: memory-system
@@ -22,8 +23,8 @@ images:
   adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.3" }
   # runtime images are big and version rarely; the lineage lives on ghcr
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v18" }
-  openviking: { repository: "172.18.5.251:8081/zhiyuan/openviking", tag: "0.4.21" }
-  embedServer: { repository: "172.18.5.251:8081/zhiyuan/embed-server", tag: "0.1.0" }
+  openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
+  embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
 
 # de-channel-gateway: the always-on platform websocket leg for IM channels
 # (enables hibernation for WeCom employees). Bot credentials live in the
