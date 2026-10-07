@@ -43,9 +43,10 @@ aepStack:
   controlNodePort: 30180
   authorizerNodePort: 30181
   agentControlNodePort: 30182
-  # 桌面端 metadata 广播的 agent-control 地址（需外部可达）。产品决策待定：
-  # 应替换为稳定入口域名；部署环境必须显式覆盖本项。
-  agentControlAdvertiseUrl: "http://aep-agent-control.aep-system.svc.cluster.local:8080"
+  # 对外广播的 agent-control 地址（桌面端从 metadata 读取后直连）——必须
+  # 从集群外可达，不能是集群内 DNS。产品决策待定：稳定入口域名。
+  # 占位符会在渲染期被 fail-fast 拦截（占位符守卫，aep-stack.yaml 顶部）。
+  agentControlAdvertiseUrl: "<client-reachable-agent-control-url>"
   deploymentId: demo
   deploymentName: "Demo Deployment"
   environment: development
@@ -53,9 +54,12 @@ aepStack:
   logLevel: info
   maxResidentAgents: "100"
   modelAccessTTL: 15m
-  # 模型网关地址 = gateway-authorizer（校验 model JWT 后转发 Higress），
-  # 不是 Higress 本身；Higress 无 :8090 端口，指错会直接断模型链路。
-  modelGatewayBaseUrl: "http://aep-gateway-authorizer.aep-system.svc.cluster.local:8090/v1"
+  # 模型网关地址 = gateway-authorizer 的**对外可达**地址（校验 model JWT
+  # 后转发 Higress）——不是 Higress 本身（无 :8090 端口），也**不能是集群内
+  # DNS**：control-service 启动校验（clientReachableGatewayHost 拒绝
+  # .svc.cluster.local / 单标签名）会让控制面 CrashLoop。cicd 用节点
+  # IP:30181（authorizer NodePort），见 values-cicd.example.yaml。
+  modelGatewayBaseUrl: "<client-reachable-model-gateway-url>"
   gatewayUpstreamUrl: "http://higress-gateway.higress-system.svc.cluster.local:80"
   gatewayRequireEntitlement: "false"
   reconcilerInterval: 15s
@@ -71,8 +75,11 @@ aepStack:
   dataPlaneReconcilerToken: "<token>"
   gatewayLicenseStatusToken: "<token>"
   licenseFilePath: /var/run/aep-license/license.zylic
-  licenseTrustedKeysFile: "<json>"
+  # 这是**文件路径**（挂载的 aep-license Secret 内文件），不是密钥内容
+  licenseTrustedKeysFile: /var/run/aep-license/license-trusted-keys.json
   licenseCustomerId: customer-internal-test
+  # rustfs 凭据：dev 默认值（= cicd 活体现值，集群内网信任域）；生产环境
+  # 在 local values 覆盖。此处如实记录而非占位，避免引入新的回填断点。
   minioAccessKey: minioadmin
   minioSecretKey: minioadmin
   minioBucket: aep-skills

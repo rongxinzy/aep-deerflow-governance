@@ -27,9 +27,12 @@ rtl-control；l20 的 `/etc/rancher/k3s/registries.yaml` 已配置（与 188 相
 | `demo-employees.yaml` | 演示员工批量清单（财务/生产/研发/行政，与 sales-helper 同规格） |
 | `seed-aep.sh` | AEP 种子：wecom 身份源、saber 映射、gov-service 账号；密码走 env |
 
-AEP 栈本体沿用 `Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml`
-改密码后 apply；CRD/operator/portal/chat-ui 直接用各自 deploy 目录的清单。
-`de-platform-creds`/`de-portal-db` Secret 按同样的键名在 cicd 上单独创建
+AEP 栈本体自 2026-10-07 起由 `charts/zhiyuan-stack` 纳管
+（`templates/aep-stack.yaml` + `aep-rbac.yaml`，逐字段还原活体；
+`Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml` 仅作
+上游来源）。本条目录下的清单文件均为历史直接 apply 的存量形态；新环境一律
+走 chart（见 chart README 的前置与 `--take-ownership` 说明）。
+`de-platform-creds`/`de-portal-db`/`aep-license` Secret 在 cicd 上单独创建
 （值见工作区外凭证备忘，不入 git）。
 
 ## 部署顺序

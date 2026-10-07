@@ -21,10 +21,11 @@ aepStack:
   deploymentId: demo
   deploymentName: "Demo Deployment"
   environment: development
-  # 活体现值 http://10.43.71.90:8090/v1（= aep-gateway-authorizer 的
-  # ClusterIP；model JWT 由 authorizer 校验后转发 Higress）。下次 upgrade
-  # 收敛为 svc 域名（同服务，IP→DNS 标准化，无行为变化）。
-  modelGatewayBaseUrl: "http://aep-gateway-authorizer.aep-system.svc.cluster.local:8090/v1"
+  # 活体现值 http://10.43.71.90:8090/v1 是 authorizer 的 ClusterIP——能过
+  # control-service 的启动校验（拒绝 .svc.cluster.local），但集群外客户端
+  # 路由不到 10.43.x.x，实际不可用。按校验器意图收敛为节点 IP + NodePort
+  # （30181）。注意：这是外部 agent 实际使用的数据面入口地址。
+  modelGatewayBaseUrl: "http://172.18.5.188:30181/v1"
   # 以下敏感值必须与集群现值一致（存量迁移：从 aep-*-config CM 回填到
   # values-cicd.local.yaml），否则下次 upgrade 会回退引导口令/密钥。
   bootstrapAdminUsername: admin
@@ -34,7 +35,7 @@ aepStack:
   databaseUrl: "postgres://aep:<from-values-cicd-local>@postgres:5432/aep?sslmode=disable"
   dataPlaneReconcilerToken: "<from-values-cicd-local>"
   gatewayLicenseStatusToken: "<from-values-cicd-local>"
-  licenseTrustedKeysFile: "<from-values-cicd-local>"
+  # licenseTrustedKeysFile 是文件路径（非敏感），用 values.yaml 默认值
   licenseCustomerId: customer-internal-test
   postgres: {password: "<from-values-cicd-local>"}
 

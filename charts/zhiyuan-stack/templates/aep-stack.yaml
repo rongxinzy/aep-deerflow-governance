@@ -8,6 +8,20 @@
 # values; commit placeholders only, real values live in the gitignored
 # values-<env>.local.yaml.
 {{- $ns := "aep-system" }}
+{{/* 占位符守卫：敏感/环境相关值未回填时直接 fail，不落集群。 */}}
+{{- include "zhiyuan.assertRealValue" (dict "name" "bootstrapAdminPassword" "value" .Values.aepStack.bootstrapAdminPassword) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "credentialMasterKeyBase64" "value" .Values.aepStack.credentialMasterKeyBase64) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "signingKeyBase64" "value" .Values.aepStack.signingKeyBase64) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "databaseUrl" "value" .Values.aepStack.databaseUrl) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "dataPlaneReconcilerToken" "value" .Values.aepStack.dataPlaneReconcilerToken) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "gatewayLicenseStatusToken" "value" .Values.aepStack.gatewayLicenseStatusToken) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "modelGatewayBaseUrl" "value" .Values.aepStack.modelGatewayBaseUrl) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "agentControlAdvertiseUrl" "value" .Values.aepStack.agentControlAdvertiseUrl) }}
+{{/* control-service 的启动校验（clientReachableGatewayHost）拒绝
+     .svc.cluster.local —— 集群内 DNS 会让控制面 CrashLoop，模板期先拦。 */}}
+{{- if contains ".svc.cluster.local" .Values.aepStack.modelGatewayBaseUrl }}
+{{- fail "aepStack.modelGatewayBaseUrl must be a client-reachable address — control-service rejects .svc.cluster.local at startup (see values.yaml comment)" }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -175,6 +189,8 @@ spec:
       containers:
         - name: postgres
           image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.postgres.repository "tag" .Values.images.postgres.tag) }}
+          # 压测调优（loadgen FINDINGS）：默认 16MB → 512MB
+          args: ["-c", "shared_buffers=512MB"]
           env:
             - {name: POSTGRES_DB, value: {{ .Values.aepStack.postgres.database | quote }}}
             - {name: POSTGRES_USER, value: {{ .Values.aepStack.postgres.user | quote }}}
