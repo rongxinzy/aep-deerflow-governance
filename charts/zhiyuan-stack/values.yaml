@@ -25,6 +25,58 @@ images:
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v18" }
   openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
   embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
+  # AEP control plane + datastore images (ns aep-system, see templates/aep-stack.yaml)
+  postgres: { repository: postgres, tag: "17.6-alpine" }
+  rustfs: { repository: rustfs, tag: "1.0.0" }
+  aepControlService: { repository: aep-control-service, tag: "0.8.0" }
+  aepAgentControl: { repository: aep-agent-control, tag: "0.1.0" }
+  aepGatewayAuthorizer: { repository: aep-gateway-authorizer, tag: "0.2.0" }
+  aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.4.3" }
+
+# AEP 控制面（ns aep-system）。对象形状/探针/环境键名与 cicd 活体一致
+# （2026-10-07 从活体提取入库）；敏感值一律占位，真值只在
+# values-<env>.local.yaml（gitignored）。
+aepStack:
+  enabled: true
+  controlNodePort: 30180
+  authorizerNodePort: 30181
+  agentControlNodePort: 30182
+  # 桌面端 metadata 广播的 agent-control 地址（需外部可达）。产品决策待定：
+  # 应替换为稳定入口域名；部署环境必须显式覆盖本项。
+  agentControlAdvertiseUrl: "http://aep-agent-control.aep-system.svc.cluster.local:8080"
+  deploymentId: demo
+  deploymentName: "Demo Deployment"
+  environment: development
+  logFormat: text
+  logLevel: info
+  maxResidentAgents: "100"
+  modelAccessTTL: 15m
+  # 模型网关地址 = gateway-authorizer（校验 model JWT 后转发 Higress），
+  # 不是 Higress 本身；Higress 无 :8090 端口，指错会直接断模型链路。
+  modelGatewayBaseUrl: "http://aep-gateway-authorizer.aep-system.svc.cluster.local:8090/v1"
+  gatewayUpstreamUrl: "http://higress-gateway.higress-system.svc.cluster.local:80"
+  gatewayRequireEntitlement: "false"
+  reconcilerInterval: 15s
+  reconcilerTenants: demo
+  # ---- credentials（values-<env>.local.yaml 覆盖）----
+  bootstrapAdminUsername: admin
+  bootstrapAdminPassword: "<set-in-local-values>"
+  bootstrapEnterpriseId: demo
+  bootstrapEnterpriseName: "Demo Enterprise"
+  credentialMasterKeyBase64: "<base64-32-bytes>"
+  signingKeyBase64: "<base64-32-bytes>"
+  databaseUrl: "postgres://aep:<db-password>@postgres:5432/aep?sslmode=disable"
+  dataPlaneReconcilerToken: "<token>"
+  gatewayLicenseStatusToken: "<token>"
+  licenseFilePath: /var/run/aep-license/license.zylic
+  licenseTrustedKeysFile: "<json>"
+  licenseCustomerId: customer-internal-test
+  minioAccessKey: minioadmin
+  minioSecretKey: minioadmin
+  minioBucket: aep-skills
+  minioEndpoint: rustfs:9000
+  postgres: {database: aep, user: aep, password: "<db-password>", storage: 5Gi, storageClass: longhorn}
+  rustfs: {storage: 5Gi, storageClass: longhorn}
 
 # de-channel-gateway: the always-on platform websocket leg for IM channels
 # (enables hibernation for WeCom employees). Bot credentials live in the

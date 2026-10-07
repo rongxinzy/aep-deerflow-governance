@@ -1,0 +1,59 @@
+{{- if .Values.aepStack.enabled }}
+# AEP service accounts and RBAC (live state 2026-10-07, mirrors
+# Agent-Enterprise-Protocol deploy/kubernetes/local-k3s/aep-stack.yaml).
+#   - aep-control-service: identity only — no bindings, and its token is
+#     disabled (automountServiceAccountToken: false).
+#   - aep-gateway-reconciler: leader election leases in aep-system, plus the
+#     Higress objects it owns in higress-system (ingresses, wasmplugins,
+#     envoyfilters). Least privilege: no cluster-scoped grants.
+{{- $ns := "aep-system" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: aep-control-service, namespace: {{ $ns }}}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: aep-gateway-reconciler, namespace: {{ $ns }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: aep-gateway-reconciler-leader, namespace: {{ $ns }}}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: aep-gateway-reconciler-leader, namespace: {{ $ns }}}
+subjects: [{kind: ServiceAccount, name: aep-gateway-reconciler, namespace: {{ $ns }}}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: aep-gateway-reconciler-leader}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: aep-gateway-reconciler, namespace: higress-system}
+rules:
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [extensions.higress.io]
+    resources: [wasmplugins]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [networking.istio.io]
+    resources: [envoyfilters]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: aep-gateway-reconciler, namespace: higress-system}
+subjects: [{kind: ServiceAccount, name: aep-gateway-reconciler, namespace: {{ $ns }}}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: aep-gateway-reconciler}
+{{- end }}

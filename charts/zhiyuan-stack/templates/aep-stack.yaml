@@ -1,0 +1,304 @@
+{{- if .Values.aepStack.enabled }}
+# AEP control plane + data-plane support services (ns aep-system).
+# Faithful render of the live stack (2026-10-07): the object shapes, probes,
+# env keys and ConfigMap key names mirror what the cicd cluster runs — the
+# chart is the deploy record now (replaces the hand-applied
+# Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml for
+# this environment). Sensitive values (keys/tokens/passwords) come from
+# values; commit placeholders only, real values live in the gitignored
+# values-<env>.local.yaml.
+{{- $ns := "aep-system" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: aep-control-service-config, namespace: {{ $ns }}}
+data:
+  AEP_ADDRESS: ":8080"
+  AEP_BOOTSTRAP_ADMIN_USERNAME: {{ .Values.aepStack.bootstrapAdminUsername | quote }}
+  AEP_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.aepStack.bootstrapAdminPassword | quote }}
+  AEP_BOOTSTRAP_ENTERPRISE_ID: {{ .Values.aepStack.bootstrapEnterpriseId | quote }}
+  AEP_BOOTSTRAP_ENTERPRISE_NAME: {{ .Values.aepStack.bootstrapEnterpriseName | quote }}
+  AEP_CREDENTIAL_MASTER_KEY_BASE64: {{ .Values.aepStack.credentialMasterKeyBase64 | quote }}
+  AEP_SIGNING_KEY_BASE64: {{ .Values.aepStack.signingKeyBase64 | quote }}
+  AEP_DATABASE_URL: {{ .Values.aepStack.databaseUrl | quote }}
+  AEP_DATA_PLANE_RECONCILER_TOKEN: {{ .Values.aepStack.dataPlaneReconcilerToken | quote }}
+  AEP_GATEWAY_LICENSE_STATUS_TOKEN: {{ .Values.aepStack.gatewayLicenseStatusToken | quote }}
+  AEP_DEPLOYMENT_ID: {{ .Values.aepStack.deploymentId | quote }}
+  AEP_DEPLOYMENT_NAME: {{ .Values.aepStack.deploymentName | quote }}
+  AEP_ENVIRONMENT: {{ .Values.aepStack.environment | quote }}
+  AEP_ISSUER: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080" $ns | quote }}
+  AEP_LICENSE_CUSTOMER_ID: {{ .Values.aepStack.licenseCustomerId | quote }}
+  AEP_LICENSE_DEPLOYMENT_ID: {{ .Values.aepStack.deploymentId | quote }}
+  AEP_LICENSE_FILE: {{ .Values.aepStack.licenseFilePath | quote }}
+  AEP_LICENSE_TRUSTED_KEYS_FILE: {{ .Values.aepStack.licenseTrustedKeysFile | quote }}
+  AEP_LOG_FORMAT: {{ .Values.aepStack.logFormat | quote }}
+  AEP_LOG_LEVEL: {{ .Values.aepStack.logLevel | quote }}
+  AEP_MAX_RESIDENT_AGENTS: {{ .Values.aepStack.maxResidentAgents | quote }}
+  AEP_MINIO_ACCESS_KEY: {{ .Values.aepStack.minioAccessKey | quote }}
+  AEP_MINIO_SECRET_KEY: {{ .Values.aepStack.minioSecretKey | quote }}
+  AEP_MINIO_BUCKET: {{ .Values.aepStack.minioBucket | quote }}
+  AEP_MINIO_ENDPOINT: {{ .Values.aepStack.minioEndpoint | quote }}
+  AEP_MODEL_ACCESS_TTL: {{ .Values.aepStack.modelAccessTTL | quote }}
+  AEP_MODEL_GATEWAY_BASE_URL: {{ .Values.aepStack.modelGatewayBaseUrl | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: aep-agent-control-config, namespace: {{ $ns }}}
+data:
+  AEP_ADDRESS: ":8080"
+  AEP_AGENT_CONTROL_BASE_URL: {{ printf "http://aep-agent-control.%s.svc.cluster.local:8080" $ns | quote }}
+  AEP_BOOTSTRAP_ADMIN_USERNAME: {{ .Values.aepStack.bootstrapAdminUsername | quote }}
+  AEP_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.aepStack.bootstrapAdminPassword | quote }}
+  AEP_BOOTSTRAP_ENTERPRISE_ID: {{ .Values.aepStack.bootstrapEnterpriseId | quote }}
+  AEP_BOOTSTRAP_ENTERPRISE_NAME: {{ .Values.aepStack.bootstrapEnterpriseName | quote }}
+  AEP_CREDENTIAL_MASTER_KEY_BASE64: {{ .Values.aepStack.credentialMasterKeyBase64 | quote }}
+  AEP_SIGNING_KEY_BASE64: {{ .Values.aepStack.signingKeyBase64 | quote }}
+  AEP_DATABASE_URL: {{ .Values.aepStack.databaseUrl | quote }}
+  AEP_DEPLOYMENT_ID: {{ .Values.aepStack.deploymentId | quote }}
+  AEP_DEPLOYMENT_NAME: {{ .Values.aepStack.deploymentName | quote }}
+  AEP_ENVIRONMENT: {{ .Values.aepStack.environment | quote }}
+  AEP_ISSUER: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080" $ns | quote }}
+  AEP_LICENSE_FILE: {{ .Values.aepStack.licenseFilePath | quote }}
+  AEP_LICENSE_TRUSTED_KEYS_FILE: {{ .Values.aepStack.licenseTrustedKeysFile | quote }}
+  AEP_LOG_FORMAT: {{ .Values.aepStack.logFormat | quote }}
+  AEP_LOG_LEVEL: {{ .Values.aepStack.logLevel | quote }}
+  AEP_MINIO_ACCESS_KEY: {{ .Values.aepStack.minioAccessKey | quote }}
+  AEP_MINIO_SECRET_KEY: {{ .Values.aepStack.minioSecretKey | quote }}
+  AEP_MINIO_BUCKET: {{ .Values.aepStack.minioBucket | quote }}
+  AEP_MINIO_ENDPOINT: {{ .Values.aepStack.minioEndpoint | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: aep-gateway-authorizer-config, namespace: {{ $ns }}}
+data:
+  AEP_ENVIRONMENT: {{ .Values.aepStack.environment | quote }}
+  AEP_GATEWAY_ADDRESS: ":8090"
+  AEP_GATEWAY_ISSUER: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080" $ns | quote }}
+  AEP_GATEWAY_JWKS_TIMEOUT: "2s"
+  AEP_GATEWAY_JWKS_TTL: "5m"
+  AEP_GATEWAY_JWKS_URL: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080/.well-known/jwks.json" $ns | quote }}
+  AEP_GATEWAY_LICENSE_STATUS_TOKEN: {{ .Values.aepStack.gatewayLicenseStatusToken | quote }}
+  AEP_GATEWAY_LICENSE_STATUS_URL: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080/internal/gateway/licenses" $ns | quote }}
+  AEP_GATEWAY_REQUEST_LIMIT: "2097152"
+  AEP_GATEWAY_REQUIRE_ENTITLEMENT: {{ .Values.aepStack.gatewayRequireEntitlement | quote }}
+  AEP_GATEWAY_UPSTREAM_HEADER_TIMEOUT: "15s"
+  AEP_GATEWAY_UPSTREAM_URL: {{ .Values.aepStack.gatewayUpstreamUrl | quote }}
+  AEP_LOG_FORMAT: {{ .Values.aepStack.logFormat | quote }}
+  AEP_LOG_LEVEL: {{ .Values.aepStack.logLevel | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: aep-gateway-reconciler-config, namespace: {{ $ns }}}
+data:
+  AEP_DATA_PLANE_RECONCILER_TOKEN: {{ .Values.aepStack.dataPlaneReconcilerToken | quote }}
+  AEP_RECONCILER_ADDRESS: ":8091"
+  AEP_RECONCILER_CONTROL_URL: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080" $ns | quote }}
+  AEP_RECONCILER_INTERVAL: {{ .Values.aepStack.reconcilerInterval | quote }}
+  AEP_RECONCILER_KUBERNETES_CA_FILE: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  AEP_RECONCILER_KUBERNETES_TOKEN_FILE: /var/run/secrets/kubernetes.io/serviceaccount/token
+  AEP_RECONCILER_KUBERNETES_URL: https://kubernetes.default.svc
+  AEP_RECONCILER_OUTPUT_DIR: /var/lib/aep-reconciler
+  AEP_RECONCILER_TENANTS: {{ .Values.aepStack.reconcilerTenants | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres, namespace: {{ $ns }}}
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432, targetPort: 5432}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rustfs, namespace: {{ $ns }}}
+spec:
+  selector: {app: rustfs}
+  ports: [{name: api, port: 9000, targetPort: 9000}, {name: console, port: 9001, targetPort: 9001}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: aep-control-service, namespace: {{ $ns }}}
+spec:
+  type: NodePort
+  selector: {app: aep-control-service}
+  ports: [{port: 8080, targetPort: 8080, nodePort: {{ .Values.aepStack.controlNodePort }}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: aep-agent-control, namespace: {{ $ns }}}
+spec:
+  type: NodePort
+  selector: {app: aep-agent-control}
+  ports: [{name: http, port: 8080, targetPort: 8080, nodePort: {{ .Values.aepStack.agentControlNodePort }}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: aep-gateway-authorizer, namespace: {{ $ns }}}
+spec:
+  type: NodePort
+  selector: {app: aep-gateway-authorizer}
+  ports: [{port: 8090, targetPort: 8090, nodePort: {{ .Values.aepStack.authorizerNodePort }}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: aep-gateway-reconciler, namespace: {{ $ns }}}
+spec:
+  selector: {app: aep-gateway-reconciler}
+  ports: [{name: health, port: 8091, targetPort: health}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: postgres-data-lh, namespace: {{ $ns }}}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.aepStack.postgres.storageClass }}
+  resources: {requests: {storage: {{ .Values.aepStack.postgres.storage }}}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: rustfs-data-lh, namespace: {{ $ns }}}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.aepStack.rustfs.storageClass }}
+  resources: {requests: {storage: {{ .Values.aepStack.rustfs.storage }}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  # RWO PVC 铁律：单写者卷必须 Recreate（2026-10-06 双写事故后固化）。
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.postgres.repository "tag" .Values.images.postgres.tag) }}
+          env:
+            - {name: POSTGRES_DB, value: {{ .Values.aepStack.postgres.database | quote }}}
+            - {name: POSTGRES_USER, value: {{ .Values.aepStack.postgres.user | quote }}}
+            - {name: POSTGRES_PASSWORD, value: {{ .Values.aepStack.postgres.password | quote }}}
+          ports: [{containerPort: 5432}]
+          readinessProbe: {exec: {command: [pg_isready, -U, {{ .Values.aepStack.postgres.user }}, -d, {{ .Values.aepStack.postgres.database }}]}, initialDelaySeconds: 5, periodSeconds: 5}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: postgres-data-lh}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rustfs, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}  # RWO PVC 铁律，同上
+  selector: {matchLabels: {app: rustfs}}
+  template:
+    metadata: {labels: {app: rustfs}}
+    spec:
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: rustfs
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.rustfs.repository "tag" .Values.images.rustfs.tag) }}
+          env:
+            - {name: RUSTFS_ACCESS_KEY, value: {{ .Values.aepStack.minioAccessKey | quote }}}
+            - {name: RUSTFS_SECRET_KEY, value: {{ .Values.aepStack.minioSecretKey | quote }}}
+            - {name: RUSTFS_VOLUMES, value: /data}
+            - {name: RUSTFS_ADDRESS, value: 0.0.0.0:9000}
+            - {name: RUSTFS_CONSOLE_ADDRESS, value: 0.0.0.0:9001}
+            - {name: RUSTFS_CONSOLE_ENABLE, value: "true"}
+          ports: [{containerPort: 9000}, {containerPort: 9001}]
+          readinessProbe: {httpGet: {path: /health, port: 9000}, initialDelaySeconds: 5, periodSeconds: 5}
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: rustfs-data-lh}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: aep-control-service, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: aep-control-service}}
+  template:
+    metadata: {labels: {app: aep-control-service}}
+    spec:
+      serviceAccountName: aep-control-service
+      containers:
+        - name: control
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepControlService.repository "tag" .Values.images.aepControlService.tag) }}
+          env:
+            # 外部广播地址（桌面端 metadata.agentControl.baseUrl）——产品决策
+            # 待定（应换稳定入口域名）；cicd 现值见 values-cicd.example。
+            - {name: AEP_AGENT_CONTROL_BASE_URL, value: {{ .Values.aepStack.agentControlAdvertiseUrl | quote }}}
+          envFrom:
+            - configMapRef: {name: aep-control-service-config}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: 8080}, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 24}
+          volumeMounts: [{name: aep-license, mountPath: /var/run/aep-license, readOnly: true}]
+      volumes:
+        - name: aep-license
+          secret: {secretName: aep-license, defaultMode: 420}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: aep-agent-control, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: aep-agent-control}}
+  template:
+    metadata: {labels: {app: aep-agent-control}}
+    spec:
+      containers:
+        - name: agent-control
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepAgentControl.repository "tag" .Values.images.aepAgentControl.tag) }}
+          env:
+            - {name: AEP_AGENT_CONTROL_BASE_URL, value: {{ .Values.aepStack.agentControlAdvertiseUrl | quote }}}
+          envFrom:
+            - configMapRef: {name: aep-agent-control-config}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /livez, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts: [{name: aep-license, mountPath: /var/run/aep-license, readOnly: true}]
+      volumes:
+        - name: aep-license
+          secret: {secretName: aep-license, defaultMode: 420}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: aep-gateway-authorizer, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: aep-gateway-authorizer}}
+  template:
+    metadata: {labels: {app: aep-gateway-authorizer}}
+    spec:
+      containers:
+        - name: authorizer
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayAuthorizer.repository "tag" .Values.images.aepGatewayAuthorizer.tag) }}
+          envFrom:
+            - configMapRef: {name: aep-gateway-authorizer-config}
+          ports: [{containerPort: 8090}]
+          readinessProbe: {httpGet: {path: /readyz, port: 8090}, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 24}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: aep-gateway-reconciler, namespace: {{ $ns }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: aep-gateway-reconciler}}
+  template:
+    metadata: {labels: {app: aep-gateway-reconciler}}
+    spec:
+      serviceAccountName: aep-gateway-reconciler
+      containers:
+        - name: reconciler
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayReconciler.repository "tag" .Values.images.aepGatewayReconciler.tag) }}
+          envFrom:
+            - configMapRef: {name: aep-gateway-reconciler-config}
+          ports: [{containerPort: 8091, name: health}]
+          readinessProbe: {httpGet: {path: /readyz, port: 8091}, initialDelaySeconds: 8, periodSeconds: 5, failureThreshold: 24}
+{{- end }}
