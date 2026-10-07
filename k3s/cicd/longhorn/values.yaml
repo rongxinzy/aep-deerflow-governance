@@ -1,5 +1,10 @@
 # Longhorn v1.13.0 (cluster storage, default StorageClass `longhorn`)
 #
+# 例外说明（有意为之，勿顺手"标准化"）：Longhorn 组件镜像保留 jfrog(251)
+# 地址而不走 Harbor——存储层不能依赖长在其自身之上的 Harbor（Harbor 的
+# registry 卷就存在 Longhorn 上，cyclical dependency）。节点 mirror 会先试
+# Harbor（404）再回退 251，拉取路径不受影响。
+#
 # Applied as:  helm template longhorn longhorn-1.13.0.tgz -n longhorn-system -f values.yaml | kubectl apply -f -
 #   - Node pool = rtl-control/compute1/rtl-l20 ONLY: disks are gated by the
 #     node label `node.longhorn.io/create-default-disk=true`

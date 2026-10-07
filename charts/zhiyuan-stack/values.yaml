@@ -31,7 +31,7 @@ images:
 # de-channel-connections Secret as JSON, never in values.
 channelGateway:
   enabled: false
-  image: { repository: "172.18.5.251:8081/zhiyuan/de-channel-gateway", tag: "0.1.0" }
+  image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/de-channel-gateway", tag: "0.1.0" }
   connectionsSecret: de-channel-connections
   port: 8899
 
