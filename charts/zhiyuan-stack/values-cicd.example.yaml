@@ -38,6 +38,36 @@ aepStack:
   licenseCustomerId: customer-internal-test
   postgres: {password: "<from-values-cicd-local>"}
 
+# WeKnora 知识库（vendored 子图，2026-10-07 收编）。活体现况：
+#   - 三个数据卷已迁 Longhorn（-lh claims），旧 local-path PVC 保留为备份；
+#   - 镜像是 Harbor DNS（weknora release 里存量的用户 values 仍是旧 jfrog
+#     地址——收编升级时以本 chart 的值为准，勿回放旧 values）；
+#   - SSRF 白名单与 app Recreate 是活体状态（Recreate 已在 values.yaml 默认）。
+# 敏感项（dbPassword/redisPassword/jwtSecret/systemAesKey、mcp 凭据）在
+# values-cicd.local.yaml，收编前从集群回填。
+weknora:
+  enabled: true
+  namespace: weknora
+  fullnameOverride: weknora
+  app:
+    extraEnv:
+      - name: SSRF_WHITELIST_EXTRA
+        value: higress-gateway.higress-system.svc.cluster.local,embed-server.memory-system.svc.cluster.local
+  postgresql:
+    persistence: {existingClaim: weknora-postgres-lh}
+  redis:
+    persistence: {existingClaim: weknora-redis-lh}
+  dataFiles:
+    persistence: {existingClaim: weknora-data-files-lh}
+  mcp:
+    apiKey: "<from-values-cicd-local>"
+    serverAuthToken: "<from-values-cicd-local>"
+  secrets:
+    dbPassword: "<from-values-cicd-local>"
+    redisPassword: "<from-values-cicd-local>"
+    jwtSecret: "<from-values-cicd-local>"
+    systemAesKey: "<from-values-cicd-local>"
+
 models:
   anthropic:
     apiKey: "<bigmodel-api-key>"

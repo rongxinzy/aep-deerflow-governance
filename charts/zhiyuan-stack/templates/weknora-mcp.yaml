@@ -1,0 +1,46 @@
+{{- if and .Values.weknora.enabled .Values.weknora.mcp.enabled }}
+# weknora-mcp: zhiyuan's MCP bridge in front of WeKnora's knowledge API.
+# Faithful render of the live object (2026-10-07) — it was hand-applied and
+# is not part of the vendored WeKnora subchart. Digital employees call the
+# knowledge_search tool through this service (governance middleware).
+{{- $ns := .Values.weknora.namespace | default "weknora" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weknora-mcp
+  namespace: {{ $ns }}
+  labels: {app: weknora-mcp}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: weknora-mcp}}
+  template:
+    metadata: {labels: {app: weknora-mcp}}
+    spec:
+      containers:
+        - name: mcp
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.weknoraMcp.repository "tag" .Values.images.weknoraMcp.tag) }}
+          env:
+            - {name: WEKNORA_BASE_URL, value: {{ .Values.weknora.mcp.baseURL | default (printf "http://app.%s.svc.cluster.local:8080/api/v1" $ns) | quote }}}
+            # 两个凭据均为密值：仅来自 values-<env>.local.yaml
+            # （WEKNORA_API_KEY = WeKnora 租户 API key；
+            #  MCP_SERVER_AUTH_TOKEN 与 de-platform-creds 的
+            #  WEKNORA_MCP_BEARER 保持一致）。
+            - {name: WEKNORA_API_KEY, value: {{ required "weknora.mcp.apiKey is required (set it in values-<env>.local.yaml)" .Values.weknora.mcp.apiKey | quote }}}
+            - {name: MCP_TRANSPORT, value: http}
+            - {name: MCP_HOST, value: 0.0.0.0}
+            - {name: MCP_PORT, value: {{ .Values.weknora.mcp.port | quote }}}
+            - {name: MCP_SERVER_AUTH_TOKEN, value: {{ required "weknora.mcp.serverAuthToken is required (set it in values-<env>.local.yaml)" .Values.weknora.mcp.serverAuthToken | quote }}}
+          ports: [{containerPort: {{ .Values.weknora.mcp.port }}}]
+          readinessProbe: {tcpSocket: {port: {{ .Values.weknora.mcp.port }}}, initialDelaySeconds: 5, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: {{ .Values.weknora.mcp.port }}}, initialDelaySeconds: 20, periodSeconds: 30}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weknora-mcp
+  namespace: {{ $ns }}
+spec:
+  selector: {app: weknora-mcp}
+  ports: [{port: {{ .Values.weknora.mcp.port }}, targetPort: {{ .Values.weknora.mcp.port }}}]
+{{- end }}

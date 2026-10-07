@@ -17,3 +17,11 @@ metadata:
   name: aep-system
   labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
 {{- end }}
+{{- if .Values.weknora.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.weknora.namespace | default "weknora" }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- end }}

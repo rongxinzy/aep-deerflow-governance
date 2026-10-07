@@ -32,6 +32,8 @@ images:
   aepAgentControl: { repository: aep-agent-control, tag: "0.1.0" }
   aepGatewayAuthorizer: { repository: aep-gateway-authorizer, tag: "0.2.0" }
   aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.4.3" }
+  # zhiyuan's MCP bridge in front of WeKnora (see templates/weknora-mcp.yaml)
+  weknoraMcp: { repository: weknora-mcp, tag: "0.1.0" }
 
 # AEP 控制面（ns aep-system）。对象形状/探针/环境键名与 cicd 活体一致
 # （2026-10-07 从活体提取入库）；敏感值一律占位，真值只在
@@ -77,6 +79,34 @@ aepStack:
   minioEndpoint: rustfs:9000
   postgres: {database: aep, user: aep, password: "<db-password>", storage: 5Gi, storageClass: longhorn}
   rustfs: {storage: 5Gi, storageClass: longhorn}
+
+# WeKnora 知识库（vendored 子图 charts/weknora，2026-10-07 收编，见该目录
+# VENDORING.md）。命名固定 weknora-*（fullnameOverride）：父 release 名会让
+# 子图默认渲染成 zhiyuan-weknora-*，与活体和交叉引用
+# （frontend.weknora.svc.cluster.local 等）不符。
+weknora:
+  enabled: true
+  namespace: weknora
+  fullnameOverride: weknora
+  # Deployment selector label（不可变）：收编进父 release（zhiyuan）时必须
+  # 保持活体的 instance=weknora，否则 selector patch 会被 API server 拒绝。
+  instanceName: weknora
+  # app 挂 RWO data-files 卷 → Recreate（RWO 铁律，2026-10-06 事故后固化）
+  app:
+    strategy: {type: Recreate}
+  # ---- 敏感项：仅 values-<env>.local.yaml ----
+  secrets:
+    dbPassword: ""
+    redisPassword: ""
+    jwtSecret: ""
+    systemAesKey: ""
+  mcp:
+    enabled: true
+    # 留空时由模板按 namespace 构造 http://app.<ns>.svc.cluster.local:8080/api/v1
+    baseURL: ""
+    port: 8830
+    apiKey: ""           # WeKnora 租户 API key —— local values only
+    serverAuthToken: ""  # 与 de-platform-creds 的 WEKNORA_MCP_BEARER 一致 —— local values only
 
 # de-channel-gateway: the always-on platform websocket leg for IM channels
 # (enables hibernation for WeCom employees). Bot credentials live in the

@@ -1,11 +1,17 @@
 apiVersion: v2
 name: zhiyuan-stack
 description: |
-  Zhiyuan digital-employee platform stack: DE operator + portal + chat UI +
-  admin console, the OpenViking memory stack, and the Higress model routes
-  for the online GLM (Anthropic passthrough + openai conversion).
-  The AEP control plane and Higress itself are prerequisites installed from
-  their own repos; this chart manages everything zhiyuan-specific above them.
+  Zhiyuan digital-employee platform stack: the AEP control plane (ns
+  aep-system), DE operator + portal + chat UI + admin console, the
+  OpenViking memory stack, the WeKnora knowledge base (vendored subchart)
+  and the Higress model routes for the online GLM (Anthropic passthrough +
+  openai conversion). Higress itself is a prerequisite installed from its
+  own repo; this chart manages everything zhiyuan-specific above it.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+
+dependencies:
+  - name: weknora
+    version: "0.1.0"
+    condition: weknora.enabled
