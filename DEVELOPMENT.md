@@ -58,14 +58,20 @@ helm install higress higress/higress -n higress-system --create-namespace \
   --set higress-core.gateway.resources.requests.memory=512Mi
 ```
 
-## 3. AEP 控制面（k3s 清单）
+## 3. AEP 控制面（由 zhiyuan-stack chart 纳管）
 
-清单：`Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml`
-（postgres + minio + control-service + authorizer + reconciler + RBAC；control
-NodePort **30180**）。镜像取自内网仓（`zhiyuan/aep-*:0.1.0` 等）。
+自 2026-10-07 起控制面（postgres + rustfs + control-service + agent-control +
+authorizer + reconciler + RBAC）由 `charts/zhiyuan-stack` 渲染
+（`templates/aep-stack.yaml`；control NodePort **30180**），一次
+`helm upgrade --install zhiyuan charts/zhiyuan-stack -f values-<env>.local.yaml`
+连同整个平台安装（前置与凭据回填见 chart README）。
+`Agent-Enterprise-Protocol/deploy/kubernetes/local-k3s/aep-stack.yaml` 是历史
+直接 apply 的存量清单（上游来源），新环境勿再使用。
 
 ```bash
-sudo k3s kubectl apply -f deploy/kubernetes/local-k3s/aep-stack.yaml
+helm upgrade --install zhiyuan charts/zhiyuan-stack \
+  -n digital-employees --create-namespace --take-ownership \
+  -f charts/zhiyuan-stack/values-cicd.local.yaml
 watch sudo k3s kubectl -n aep-system get pods   # 全部 Running 后：
 curl http://127.0.0.1:30180/readyz
 ```

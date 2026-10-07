@@ -3,6 +3,13 @@
 {{- define "zhiyuan.ns" -}}{{ .Values.global.namespaces.main }}{{- end }}
 {{- define "zhiyuan.nsMemory" -}}{{ .Values.global.namespaces.memory }}{{- end }}
 
+{{- define "zhiyuan.assertRealValue" -}}
+{{- $v := .value -}}
+{{- if and (kindIs "string" $v) (regexMatch "<[^<>]+>" $v) -}}
+{{- fail (printf "%s still contains a <...> placeholder (%q) — set the real value in values-<env>.local.yaml (gitignored) before installing; placeholders that slip through get written into the cluster and fail later (or break running components on restart)" .name $v) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "zhiyuan.image" -}}
 {{- /* The intranet local repo is flat (no org namespace): strip the ghcr
        org prefix when the registry points at it, so values can keep the
