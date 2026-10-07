@@ -1,7 +1,8 @@
 # zhiyuan-stack
 
 知远数字员工平台的伞形 Helm chart：AEP 控制面（ns `aep-system`）+ DE operator +
-portal + 对话前端 + 管理台 + OpenViking 记忆栈 + 在线 GLM 的 Higress 模型路由。
+portal + 对话前端 + 管理台 + OpenViking 记忆栈 + WeKnora 知识库（vendored 子图，
+`charts/weknora`，见 `charts/weknora/VENDORING.md`）+ 在线 GLM 的 Higress 模型路由。
 
 ## 前置（不在本 chart 内）
 
@@ -23,9 +24,10 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 ```
 
 - `--take-ownership`：收编已存在的同名资源（迁移既有环境必需；helm ≥3.17）。
-- **占位符守卫**：`aepStack` 敏感项里任何 `<...>` 占位符没被
+  收编既有 `weknora` release 时同样靠它；收编后原 release 记录可删。
+- **占位符守卫**：`aepStack` 敏感项与 WeKnora 凭据里任何 `<...>` 占位符没被
   values-`<env>`.local.yaml 的真实值替换时，渲染直接失败（防止把无效配置静默
-  写进 ConfigMap，或让控制面在下次重启时 CrashLoop）。
+  写进 ConfigMap/Secret，或让控制面在下次重启时 CrashLoop）。
 - `aepStack.modelGatewayBaseUrl` 与 `agentControlAdvertiseUrl` 必须是**集群外
   可达**地址（control-service 启动校验拒绝 `.svc.cluster.local`；模板期另有
   同类拦截）。cicd 用节点 IP + NodePort（30181/30182）。
@@ -41,5 +43,11 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 ## 已知边界
 
 - operator 配置变更不滚动运行时 pod：改 employees 值后需重启对应运行时。
-- RWO 卷工作负载一律 `strategy: Recreate`（postgres/rustfs；
+- RWO 卷工作负载一律 `strategy: Recreate`（postgres/rustfs/weknora-app；
   2026-10-06 双写事故后固化）——新增挂 RWO PVC 的组件时先设 Recreate。
+- WeKnora 子图为 vendored fork chart：升级子图需按 VENDORING.md 重放补丁；
+  Deployment selector（`app.kubernetes.io/instance`）不可变，收编时以
+  `weknora.instanceName` 保持与活体一致。
+- 旧 weknora 数据卷（`weknora-postgres/-redis/-data-files`，local-path）迁
+  Longhorn 后保留为备份，不从 chart 渲染（overlay 里 `existingClaim` 指向
+  `*-lh`）。
