@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -57,12 +58,13 @@ func TestAccessReason(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.ident.accessReason(tc.team, tc.owner, tc.vis)
 			assert.Equal(t, tc.want, got)
-			// Consistency: a non-admin who sees the row never reports the
-			// admin fallback (that fallback is only reachable through the
-			// canAccessEmployee admin bypass).
-			if got.Kind == "admin" && !tc.ident.isAdmin(cfg) {
-				assert.False(t, tc.ident.canAccessEmployee(cfg, tc.team, tc.owner, tc.vis),
-					"admin fallback reported for a caller who cannot access the row")
+			// The load-bearing invariant: any non-admin who can access the
+			// row must get an informative reason — the admin fallback is
+			// only reachable through the canAccessEmployee admin bypass.
+			// This executes for the five non-admin callers above; if either
+			// helper's branch order drifts, it fails here.
+			if !tc.ident.isAdmin(cfg) && tc.ident.canAccessEmployee(cfg, tc.team, tc.owner, tc.vis) {
+				assert.NotEqual(t, "admin", got.Kind, "an accessible row reported the admin fallback")
 			}
 		})
 	}
@@ -338,6 +340,20 @@ func TestApplyNoteHandling(t *testing.T) {
 		assert.Equal(t, "note", out.Violations[0].Field)
 	})
 
+	t.Run("whitespace padding does not reject an in-bounds note", func(t *testing.T) {
+		h := newApplyHarness(t)
+		h.dbmock.ExpectExec(`INSERT INTO requests`).WillReturnResult(sqlmock.NewResult(1, 1))
+		note := strings.Repeat(" ", 301) + strings.Repeat("补", 200) // 501 raw runes, 200 stored
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/employees",
+			strings.NewReader(`{"name":"padded-helper","description":"整理资料","team":"rd-dept","note":"`+note+`","visibility":{"mode":"restricted","teams":["rd-dept"]}}`))
+		w := httptest.NewRecorder()
+		h.applyForEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		var item dev1alpha1.DigitalEmployee
+		require.NoError(t, h.k8s.Get(context.Background(), objectKey("padded-helper"), &item))
+		assert.Equal(t, strings.Repeat("补", 200), item.Annotations[applyNoteAnnotation])
+	})
+
 	t.Run("a parked request's spec_json carries the note to the approved CR", func(t *testing.T) {
 		h := newAPIHarness(t)
 		rows := sqlmock.NewRows([]string{"employee_name", "spec_json"}).
@@ -447,5 +463,55 @@ func TestLeakRoutesRequireAdmin(t *testing.T) {
 		status := response.StatusCode
 		_ = response.Body.Close()
 		assert.NotEqual(t, http.StatusForbidden, status, "admin identity must clear the gate")
+	})
+
+	t.Run("workbench routes are reachable through the real mux", func(t *testing.T) {
+		// Handler-level tests bypass mux registration, so a routes()
+		// regression (segment precedence, method typo) would surface as
+		// 404/405 in production with every handler test still green.
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		mock.MatchExpectationsInOrder(false) // session persistence shares the mock
+		p := &portal{
+			cfg:      config{namespace: "digital-employees", adminUsers: map[string]bool{"admin-user": true}},
+			db:       db,
+			k8s:      fake.NewClientBuilder().WithScheme(chatTestScheme(t)).Build(),
+			aep:      &aepAuthenticator{baseURL: aep.URL, http: aep.Client()},
+			sessions: newSessionStore(time.Hour),
+			logger:   slog.New(slog.DiscardHandler),
+		}
+		server := httptest.NewServer(p.routes())
+		t.Cleanup(server.Close)
+		jar, err := cookiejar.New(nil)
+		require.NoError(t, err)
+		client := &http.Client{Jar: jar}
+		resp, _ := postJSON(t, client, server.URL+"/api/v1/session", `{"username":"user1","password":"pw-one"}`)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		mock.ExpectQuery(`FROM requests WHERE owner_id=\$1 AND state='pending'`).WithArgs("user-1").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		response, err := client.Get(server.URL + "/api/v1/me")
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, response.StatusCode, "GET /api/v1/me must be registered")
+		_ = response.Body.Close()
+
+		mock.ExpectQuery(`FROM requests WHERE owner_id=\$1 ORDER BY created_at DESC LIMIT 100`).WithArgs("user-1").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "employee_name", "owner_id", "owner_name", "display_name", "state", "decision_reason", "created_at"}))
+		response, err = client.Get(server.URL + "/api/v1/requests/mine")
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, response.StatusCode, "GET /api/v1/requests/mine must win over the {id} wildcard")
+		_ = response.Body.Close()
+
+		mock.ExpectQuery(`FROM requests WHERE id=\$1`).WithArgs("req-missing").
+			WillReturnRows(sqlmock.NewRows([]string{"employee_name", "owner_id", "owner_name", "display_name", "spec_json", "state", "decision_reason", "decided_by", "created_at", "decided_at"}))
+		response, err = client.Get(server.URL + "/api/v1/requests/req-missing")
+		require.NoError(t, err)
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		assert.Equal(t, http.StatusNotFound, response.StatusCode)
+		// A missing id and a foreign id share one shape (existence must
+		// not leak); the body only echoes the caller-supplied id.
+		assert.JSONEq(t, `{"error":"request req-missing not found"}`, string(body))
 	})
 }

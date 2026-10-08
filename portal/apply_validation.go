@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	dev1alpha1 "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
@@ -409,8 +410,10 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		add("description", "用途说明不能超过 500 字")
 	}
 
-	// Note (补充说明): optional applicant context, bounded length.
-	if len([]rune(body.Note)) > 500 {
+	// Note (补充说明): optional applicant context, bounded length. The
+	// bound applies to the trimmed value — that is what renderSpec stores,
+	// so whitespace padding must not reject a note that lands in bounds.
+	if len([]rune(strings.TrimSpace(body.Note))) > 500 {
 		add("note", "补充说明不能超过 500 字")
 	}
 
