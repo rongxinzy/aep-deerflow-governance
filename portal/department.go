@@ -241,7 +241,12 @@ func (p *portal) adminToken(ctx context.Context) string {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 	adminTokenCache.token = result.AccessToken
-	adminTokenCache.expires = time.Now().Add(20 * time.Minute)
+	// Stay comfortably below the AEP access-token lifetime (AEP_ACCESS_TTL,
+	// default 15 minutes): a longer cache reuses a token the control plane
+	// has already expired and every consumer 401s until the cache expires
+	// (observed live: a five-minute outage window per cycle on the failover
+	// watcher). Re-login is cheap and the mutex serializes it.
+	adminTokenCache.expires = time.Now().Add(10 * time.Minute)
 	return result.AccessToken
 }
 
