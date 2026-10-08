@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"log/slog"
@@ -51,6 +52,15 @@ type config struct {
 	// Hibernation: how long handleChat waits for a scaled-to-zero employee
 	// to come back before giving up (the browser shows "waking up").
 	wakeTimeout time.Duration
+
+	// Model failover: the watcher interval, how long a classified model
+	// failure must persist before an employee is moved to the first healthy
+	// fallback, and how long the original must be healthy before it is
+	// restored. A non-positive interval disables the watcher; an empty
+	// deployment fallback chain makes every cycle a no-op.
+	failoverInterval     time.Duration
+	failoverMinUnhealthy time.Duration
+	failoverMinHealthy   time.Duration
 }
 
 func loadConfig() config {
@@ -84,6 +94,10 @@ func loadConfig() config {
 		dbURL: env("PORTAL_DB_URL", ""),
 
 		wakeTimeout: time.Duration(envInt("PORTAL_WAKE_TIMEOUT_SECONDS", 60)) * time.Second,
+
+		failoverInterval:     time.Duration(envIntNonNegative("PORTAL_FAILOVER_INTERVAL_SECONDS", 60)) * time.Second,
+		failoverMinUnhealthy: time.Duration(envInt("PORTAL_FAILOVER_MIN_UNHEALTHY_SECONDS", 300)) * time.Second,
+		failoverMinHealthy:   time.Duration(envInt("PORTAL_FAILOVER_MIN_HEALTHY_SECONDS", 1200)) * time.Second,
 	}
 }
 
@@ -143,6 +157,7 @@ func main() {
 		Handler:           portal.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	go portal.runModelFailover(context.Background())
 	slog.Info("de-portal listening", "addr", cfg.addr, "policy", cfg.policyMode, "namespace", cfg.namespace)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server stopped", "error", err)

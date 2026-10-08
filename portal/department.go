@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -202,11 +203,14 @@ func (p *portal) platformSecretKeyOrEmpty(ctx context.Context, key string) strin
 // platform secret. For the private-deployment single-instance model this
 // is acceptable; a dedicated service account replaces it in public mode.
 var adminTokenCache struct {
+	mu      sync.Mutex
 	token   string
 	expires time.Time
 }
 
 func (p *portal) adminToken(ctx context.Context) string {
+	adminTokenCache.mu.Lock()
+	defer adminTokenCache.mu.Unlock()
 	if adminTokenCache.token != "" && time.Now().Before(adminTokenCache.expires) {
 		return adminTokenCache.token
 	}

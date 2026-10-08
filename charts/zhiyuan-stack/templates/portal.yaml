@@ -29,6 +29,14 @@ spec:
             # (workbench form); checked against the live model catalog at
             # apply time, so a drifted value fails loudly there.
             - {name: PORTAL_MODEL, value: {{ .Values.portal.defaultModel | quote }}}
+            # Model failover watcher: when the deployment's fallback chain
+            # (AEP deployment setting modelFallbackIds) is configured and an
+            # employee's default model fails its health probe, the watcher
+            # substitutes the first healthy chain entry and restores the
+            # original once it recovers. 0 disables the watcher.
+            - {name: PORTAL_FAILOVER_INTERVAL_SECONDS, value: {{ .Values.portal.failover.intervalSeconds | quote }}}
+            - {name: PORTAL_FAILOVER_MIN_UNHEALTHY_SECONDS, value: {{ .Values.portal.failover.minUnhealthySeconds | quote }}}
+            - {name: PORTAL_FAILOVER_MIN_HEALTHY_SECONDS, value: {{ .Values.portal.failover.minHealthySeconds | quote }}}
           envFrom:
             - secretRef: {name: {{ .Values.secrets.portalDB }}}
           ports:
