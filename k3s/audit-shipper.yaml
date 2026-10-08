@@ -104,7 +104,7 @@ data:
 
     # 4. Portal requests (approval workflow audit trail)
     try:
-        reqs = api(PORTAL, "GET", "/api/v1/employees/requests?limit=100", token)
+        reqs = api(PORTAL, "GET", "/api/v1/requests?limit=100", token)
         for r in (reqs.get("requests") or []):
             docs.append({
                 "@timestamp": r.get("createdAt", now),
