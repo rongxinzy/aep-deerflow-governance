@@ -409,6 +409,11 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 		add("description", "用途说明不能超过 500 字")
 	}
 
+	// Note (补充说明): optional applicant context, bounded length.
+	if len([]rune(body.Note)) > 500 {
+		add("note", "补充说明不能超过 500 字")
+	}
+
 	return resolved, violations, nil
 }
 

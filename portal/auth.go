@@ -88,6 +88,54 @@ func (i identity) canAccessEmployee(cfg config, team, ownerID string, visibility
 	return i.inTeam(team)
 }
 
+// employeeAccessReason is the JSON shape for the workbench roster's
+// "why can I use this employee" column.
+type employeeAccessReason struct {
+	Kind     string `json:"kind"`
+	TeamID   string `json:"teamId,omitempty"`
+	TeamName string `json:"teamName,omitempty"`
+	UserID   string `json:"userId,omitempty"`
+}
+
+// employeeAccessReason reports why the caller can see one employee, in
+// machine-readable form for the workbench roster ("权限来源"). Kind is one
+// of owner | all | team | user | legacy-team | admin; team/user carry the
+// granting subject, and team carries the spec's name snapshot when present
+// (the client resolves legacy-team ids against /api/v1/me teams). The
+// admin bypass is deliberately NOT checked first, so admins get the
+// informative reason too; "admin" only falls out for rows the caller sees
+// purely through the administrator bypass (any other caller would have
+// been filtered by canAccessEmployee before reaching this).
+func (i identity) accessReason(team, ownerID string, visibility *dev1alpha1.VisibilitySpec) employeeAccessReason {
+	if ownerID != "" && i.UserID == ownerID {
+		return employeeAccessReason{Kind: "owner"}
+	}
+	if visibility != nil {
+		switch visibility.Mode {
+		case "all":
+			return employeeAccessReason{Kind: "all"}
+		case "restricted":
+			for _, entry := range visibility.Teams {
+				if entry.ID != "" && i.inTeam(entry.ID) {
+					return employeeAccessReason{Kind: "team", TeamID: entry.ID, TeamName: entry.Name}
+				}
+			}
+			for _, entry := range visibility.Users {
+				if entry.ID != "" && entry.ID == i.UserID {
+					return employeeAccessReason{Kind: "user", UserID: entry.ID}
+				}
+			}
+			return employeeAccessReason{Kind: "admin"}
+		default:
+			return employeeAccessReason{Kind: "admin"}
+		}
+	}
+	if i.inTeam(team) {
+		return employeeAccessReason{Kind: "legacy-team", TeamID: team}
+	}
+	return employeeAccessReason{Kind: "admin"}
+}
+
 func (i identity) isAdmin(cfg config) bool {
 	if cfg.adminUsers[i.UserID] || cfg.adminUsers[strings.ToLower(i.Username)] {
 		return true

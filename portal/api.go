@@ -33,6 +33,13 @@ type portal struct {
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
 
+// applyNoteAnnotation carries the applicant's free-text note (补充说明)
+// from the workbench apply form onto the CR. It rides the spec through the
+// pending request (spec_json) untouched, so approval needs no extra
+// plumbing. Operators never interpret CR annotations; the note is display
+// data for the request detail and the console's approval view.
+const applyNoteAnnotation = "digitalemployee.zhiyuan.io/apply-note"
+
 func (p *portal) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
@@ -41,20 +48,31 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
-	mux.HandleFunc("GET /api/v1/departments", p.auth(p.handleListDepartments))
+	// These read platform-wide data (every team, every employee's memory
+	// activity, the WeKnora catalog), so they are administrator-only: the
+	// workbench gives regular users their own scoped views instead, and an
+	// ungated probe would be a platform-wide data leak once every employee
+	// holds a session.
+	mux.HandleFunc("GET /api/v1/departments", p.auth(p.adminOnly(p.handleListDepartments)))
 	mux.HandleFunc("GET /api/v1/usage/stats", p.auth(p.handleUsageStats))
 	mux.HandleFunc("PATCH /api/v1/departments/{id}", p.auth(p.handleUpdateDepartment))
 	mux.HandleFunc("DELETE /api/v1/departments/{id}", p.auth(p.handleDeleteDepartment))
 	mux.HandleFunc("GET /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("PUT /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
-	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.handleMemoryStatus))
-	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.handleMemorySearch))
-	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.handleKnowledgeStatus))
+	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.adminOnly(p.handleMemoryStatus)))
+	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.adminOnly(p.handleMemorySearch)))
+	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.adminOnly(p.handleKnowledgeStatus)))
 	mux.HandleFunc("/api/v1/knowledge/proxy/{rest...}", p.auth(p.handleKnowledgeProxy))
-	mux.HandleFunc("GET /api/v1/knowledge/bases", p.auth(p.handleKnowledgeListBases))
+	mux.HandleFunc("GET /api/v1/knowledge/bases", p.auth(p.adminOnly(p.handleKnowledgeListBases)))
 	mux.HandleFunc("GET /api/v1/employees/{name}", p.auth(p.getEmployee))
 	mux.HandleFunc("DELETE /api/v1/employees/{name}", p.auth(p.deleteEmployee))
+	// Workbench (employee-facing) reads: profile + quota, own requests
+	// across all states, and one request's detail. The literal /mine
+	// segment beats the {id} wildcard (Go 1.22 mux precedence).
+	mux.HandleFunc("GET /api/v1/me", p.auth(p.handleMe))
+	mux.HandleFunc("GET /api/v1/requests/mine", p.auth(p.handleMyRequests))
+	mux.HandleFunc("GET /api/v1/requests/{id}", p.auth(p.handleRequestDetail))
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))
 	mux.HandleFunc("POST /api/v1/requests/{id}/approve", p.auth(p.adminOnly(p.decideRequest("approved"))))
 	mux.HandleFunc("POST /api/v1/requests/{id}/reject", p.auth(p.adminOnly(p.decideRequest("rejected"))))
@@ -133,6 +151,10 @@ type applyRequest struct {
 	// Visibility is the explicit open scope (who may see and converse).
 	// nil keeps the legacy owner/team rules; the console always sends it.
 	Visibility *visibilityInput `json:"visibility"`
+	// Note is the applicant's optional free-text context (补充说明, ≤500
+	// runes). It is stored as a CR annotation via applyNoteAnnotation and
+	// never interpreted by the operator.
+	Note string `json:"note"`
 }
 
 // updateRequest is the PATCH body: present fields are replaced (after the
@@ -217,8 +239,21 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "发布条件校验依赖的服务暂不可用：" + err.Error()})
 		return
 	}
-	if len(body.Models) == 0 && p.cfg.model == "" {
-		violations = append(violations, violation{Field: "models", Message: "使用模型为必填发布条件"})
+	if len(body.Models) == 0 {
+		switch {
+		case p.cfg.model == "":
+			violations = append(violations, violation{Field: "models", Message: "使用模型为必填发布条件"})
+		default:
+			// The workbench apply form has no model picker — employees
+			// created from it ride the platform default. Verify the
+			// default is still an enabled gateway model now; otherwise a
+			// stale default slips through approval and only surfaces at
+			// the first conversation.
+			if _, err := p.resolveRuntimeModels(r.Context(), ident, []string{p.cfg.model}); err != nil {
+				p.logger.Warn("platform default model unavailable", "model", p.cfg.model, "error", err)
+				violations = append(violations, violation{Field: "models", Message: fmt.Sprintf("平台默认模型 %s 当前不可用，请联系管理员", p.cfg.model)})
+			}
+		}
 	}
 	if len(violations) > 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -262,8 +297,12 @@ func (p *portal) renderSpec(body applyRequest, resolved applyContext, models []d
 		// the runtime default, later entries are name-selectable.
 		runtime = dev1alpha1.RuntimeSpec{Type: "deerflow", Image: p.cfg.runtimeImage, Models: models}
 	}
+	meta := metav1.ObjectMeta{Name: body.Name, Namespace: p.cfg.namespace}
+	if note := strings.TrimSpace(body.Note); note != "" {
+		meta.Annotations = map[string]string{applyNoteAnnotation: note}
+	}
 	return dev1alpha1.DigitalEmployee{
-		ObjectMeta: metav1.ObjectMeta{Name: body.Name, Namespace: p.cfg.namespace},
+		ObjectMeta: meta,
 		Spec: dev1alpha1.DigitalEmployeeSpec{
 			DisplayName: body.DisplayName,
 			Description: body.Description,
@@ -443,7 +482,11 @@ func (p *portal) listEmployees(w http.ResponseWriter, r *http.Request, ident ide
 		if !admin && !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner, item.Spec.Visibility) {
 			continue
 		}
-		out = append(out, summarize(item))
+		summary := summarize(item)
+		// "Why can I use this one" for the workbench roster; computed from
+		// data already in hand, no extra upstream call.
+		summary["accessReason"] = ident.accessReason(item.Spec.Team, item.Spec.Owner, item.Spec.Visibility)
+		out = append(out, summary)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"employees": out})
 }
@@ -461,7 +504,9 @@ func (p *portal) getEmployee(w http.ResponseWriter, r *http.Request, ident ident
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized for this digital employee"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"employee": summarize(&item)})
+	summary := summarize(&item)
+	summary["accessReason"] = ident.accessReason(item.Spec.Team, item.Spec.Owner, item.Spec.Visibility)
+	writeJSON(w, http.StatusOK, map[string]any{"employee": summary})
 }
 
 // updateEmployee applies partial configuration updates: model switches,
