@@ -205,7 +205,10 @@ kubectl 快览：`kubectl get de` 的 ACCOUNT 列。
 
 **登录链路**：`POST /api/v1/session`（AEP 密码登录或 token 换发）→ portal 签发
 HttpOnly 会话 cookie（内存 store，单副本，滑续 12h）+ 可读 `csrf_token`；选员工
-`POST /api/v1/session/employee`（复用 owner/admin 校验）设 `de_employee`。
+`POST /api/v1/session/employee`（复用 owner/admin 校验）设 `de_employee`（技术名，
+API 路径由它派生）与可读伴随 cookie `de_employee_display`（显示名，PathEscape
+编码——chat-ui 头部用 decodeURIComponent 解码，空格必须是 %20 而非 `+`；仅在
+选择时刻刷新，员工改名后需重新选择才更新）。
 cookie 不区分端口但**区分主机名**：30190 与 30195 须以同一主机串访问
 （见下「地址零硬编码」——地址已按请求主机名自推导）。
 

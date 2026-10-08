@@ -383,6 +383,19 @@ func TestSessionDropAndEvict(t *testing.T) {
 	})
 }
 
+// displayCookie parses the employee-display companion cookie out of a
+// recorded session/employee response.
+func displayCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range (&http.Response{Header: w.Header()}).Cookies() {
+		if c.Name == employeeDisplayCookie {
+			return c
+		}
+	}
+	t.Fatalf("display cookie missing: %s", w.Header().Values("Set-Cookie"))
+	return nil
+}
+
 func TestSessionEmployeeSelection(t *testing.T) {
 	t.Run("selection authorizes and sets the employee cookie", func(t *testing.T) {
 		h := newAPIHarness(t, readyCR("sales-helper", "admin-user"), memkey("sales-helper"))
@@ -392,6 +405,65 @@ func TestSessionEmployeeSelection(t *testing.T) {
 		h.handleSessionEmployee(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=sales-helper")
+	})
+
+	t.Run("selection mirrors the display name into the readable cookie", func(t *testing.T) {
+		cr := readyCR("rd-helper", "admin-user")
+		cr.Spec.DisplayName = "研发助理"
+		h := newAPIHarness(t, cr, memkey("rd-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"rd-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=rd-helper")
+		display := displayCookie(t, w)
+		// Golden wire value: the consumer decodes with decodeURIComponent,
+		// so the encoding itself is pinned here rather than recomputed with
+		// the same function the handler uses.
+		assert.Equal(t, "%E7%A0%94%E5%8F%91%E5%8A%A9%E7%90%86", display.Value)
+		assert.False(t, display.HttpOnly, "the chat UI header must be able to read it")
+		assert.Equal(t, "/", display.Path)
+	})
+
+	t.Run("display cookie encodes spaces as %20, never +", func(t *testing.T) {
+		// decodeURIComponent keeps a form-style `+` verbatim, so QueryEscape
+		// would render "Sales Assistant" as "Sales+Assistant" in the header.
+		cr := readyCR("sales-helper", "admin-user")
+		cr.Spec.DisplayName = "Sales Assistant"
+		h := newAPIHarness(t, cr, memkey("sales-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"sales-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		display := displayCookie(t, w)
+		assert.Equal(t, "Sales%20Assistant", display.Value)
+		assert.NotContains(t, display.Value, "+")
+	})
+
+	t.Run("display cookie trims the stored name", func(t *testing.T) {
+		cr := readyCR("rd-helper", "admin-user")
+		cr.Spec.DisplayName = " 研发助理 "
+		h := newAPIHarness(t, cr, memkey("rd-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"rd-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Equal(t, "%E7%A0%94%E5%8F%91%E5%8A%A9%E7%90%86", displayCookie(t, w).Value)
+	})
+
+	t.Run("display cookie falls back to the technical name when unset", func(t *testing.T) {
+		cr := readyCR("rd-helper", "admin-user")
+		cr.Spec.DisplayName = ""
+		h := newAPIHarness(t, cr, memkey("rd-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"rd-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "de_employee_display=rd-helper")
 	})
 
 	t.Run("selection refuses an employee the caller cannot use", func(t *testing.T) {
