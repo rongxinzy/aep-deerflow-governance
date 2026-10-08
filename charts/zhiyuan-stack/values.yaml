@@ -150,6 +150,17 @@ portal:
   # employee rides bench-qwen38-fast, which is also this default.
   defaultModel: bench-qwen38-fast
   nodePort: 30190
+  # Model failover watcher (productized, deployment-configurable): the
+  # fallback chain itself lives in the AEP deployment settings
+  # (modelFallbackIds, default chain [bench-qwen, bench-glm]); these knobs
+  # control the watcher cadence and hysteresis. A hard credential/access
+  # failure switches immediately; transient failures must persist for
+  # minUnhealthySeconds; the original model must stay healthy for
+  # minHealthySeconds before it is restored. intervalSeconds 0 disables.
+  failover:
+    intervalSeconds: 60
+    minUnhealthySeconds: 300
+    minHealthySeconds: 1200
 
 chatUI:
   gatewayBaseURL: http://de-portal.digital-employees.svc.cluster.local:8090
