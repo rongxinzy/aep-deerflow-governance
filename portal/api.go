@@ -240,19 +240,16 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 	if len(body.Models) == 0 {
-		switch {
-		case p.cfg.model == "":
+		if p.cfg.model == "" {
 			violations = append(violations, violation{Field: "models", Message: "使用模型为必填发布条件"})
-		default:
+		} else if _, err := p.resolveRuntimeModels(r.Context(), ident, []string{p.cfg.model}); err != nil {
 			// The workbench apply form has no model picker — employees
 			// created from it ride the platform default. Verify the
 			// default is still an enabled gateway model now; otherwise a
 			// stale default slips through approval and only surfaces at
 			// the first conversation.
-			if _, err := p.resolveRuntimeModels(r.Context(), ident, []string{p.cfg.model}); err != nil {
-				p.logger.Warn("platform default model unavailable", "model", p.cfg.model, "error", err)
-				violations = append(violations, violation{Field: "models", Message: fmt.Sprintf("平台默认模型 %s 当前不可用，请联系管理员", p.cfg.model)})
-			}
+			p.logger.Warn("platform default model unavailable", "model", p.cfg.model, "error", err)
+			violations = append(violations, violation{Field: "models", Message: fmt.Sprintf("平台默认模型 %s 当前不可用，请联系管理员", p.cfg.model)})
 		}
 	}
 	if len(violations) > 0 {
