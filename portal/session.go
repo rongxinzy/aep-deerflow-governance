@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,12 @@ const (
 	portalSessionCookie = "de_portal_session"
 	portalCsrfCookie    = "csrf_token"
 	employeeCookie      = "de_employee"
+	// employeeDisplayCookie mirrors the selected employee's display name for
+	// the chat UI header. It is deliberately readable by scripts (the header
+	// runs in the browser) and URL-escaped because cookie values are
+	// ASCII-only on the wire; de_employee itself must stay the technical
+	// name — API paths derive from it.
+	employeeDisplayCookie = "de_employee_display"
 )
 
 // sessionStore keeps portal sessions in memory with the portal database as
@@ -337,7 +344,7 @@ func (p *portal) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(portalSessionCookie); err == nil && cookie.Value != "" && p.sessions != nil {
 		p.sessions.drop(cookie.Value)
 	}
-	for _, name := range []string{portalSessionCookie, portalCsrfCookie, employeeCookie} {
+	for _, name := range []string{portalSessionCookie, portalCsrfCookie, employeeCookie, employeeDisplayCookie} {
 		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "logged out"})
@@ -401,10 +408,12 @@ func (p *portal) handleSessionEmployee(w http.ResponseWriter, r *http.Request, i
 		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
 	}
-	if _, code, errMsg := p.authorizeChat(r.Context(), body.Name, ident); code != 0 {
+	_, display, code, errMsg := p.authorizeChat(r.Context(), body.Name, ident)
+	if code != 0 {
 		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: employeeCookie, Value: body.Name, Path: "/", SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: employeeDisplayCookie, Value: url.QueryEscape(display), Path: "/", SameSite: http.SameSiteLaxMode})
 	writeJSON(w, http.StatusOK, map[string]any{"employee": body.Name, "chatURL": p.chatUIURL(r)})
 }

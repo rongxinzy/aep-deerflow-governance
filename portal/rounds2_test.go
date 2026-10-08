@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -392,6 +393,41 @@ func TestSessionEmployeeSelection(t *testing.T) {
 		h.handleSessionEmployee(w, req, adminIdentity())
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=sales-helper")
+	})
+
+	t.Run("selection mirrors the display name into the readable cookie", func(t *testing.T) {
+		cr := readyCR("rd-helper", "admin-user")
+		cr.Spec.DisplayName = "研发助理"
+		h := newAPIHarness(t, cr, memkey("rd-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"rd-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Header().Get("Set-Cookie"), "de_employee=rd-helper")
+		var display *http.Cookie
+		for _, c := range (&http.Response{Header: w.Header()}).Cookies() {
+			if c.Name == employeeDisplayCookie {
+				display = c
+			}
+		}
+		require.NotNil(t, display, "display cookie missing: %s", w.Header().Get("Set-Cookie"))
+		// Cookie values are ASCII-only on the wire; the browser decodes.
+		assert.Equal(t, url.QueryEscape("研发助理"), display.Value)
+		assert.False(t, display.HttpOnly, "the chat UI header must be able to read it")
+		assert.Equal(t, "/", display.Path)
+	})
+
+	t.Run("display cookie falls back to the technical name when unset", func(t *testing.T) {
+		cr := readyCR("rd-helper", "admin-user")
+		cr.Spec.DisplayName = ""
+		h := newAPIHarness(t, cr, memkey("rd-helper"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/session/employee",
+			strings.NewReader(`{"name":"rd-helper"}`))
+		w := httptest.NewRecorder()
+		h.handleSessionEmployee(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "de_employee_display=rd-helper")
 	})
 
 	t.Run("selection refuses an employee the caller cannot use", func(t *testing.T) {

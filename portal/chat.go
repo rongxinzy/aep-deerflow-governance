@@ -41,32 +41,40 @@ func (p *portal) runtimeBaseURL(employee string) string {
 }
 
 // authorizeChat resolves the employee CR, enforces owner/admin visibility,
-// and returns the internal token from the memkey Secret.
-func (p *portal) authorizeChat(ctx context.Context, name string, ident identity) (string, int, string) {
+// and returns the internal token from the memkey Secret plus the display
+// name (spec.displayName, falling back to the technical name).
+func (p *portal) authorizeChat(ctx context.Context, name string, ident identity) (string, string, int, string) {
 	var item dev1alpha1.DigitalEmployee
 	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &item); err != nil {
-		return "", statusOf(err), err.Error()
+		return "", "", statusOf(err), err.Error()
+	}
+	// The display name rides along for callers that surface the employee to
+	// the user (the chat UI header via the session handler); the technical
+	// name is the fallback so the UI always has something to show.
+	display := strings.TrimSpace(item.Spec.DisplayName)
+	if display == "" {
+		display = name
 	}
 	if !ident.canAccessEmployee(p.cfg, item.Spec.Team, item.Spec.Owner, item.Spec.Visibility) {
-		return "", http.StatusForbidden, "not authorized for this digital employee (owner, team member, or admin required)"
+		return "", "", http.StatusForbidden, "not authorized for this digital employee (owner, team member, or admin required)"
 	}
 	// Sleeping (KEDA scaled to zero) is fine to authorize: the memkey
 	// Secret persists, and handleChat wakes the runtime before proxying.
 	if item.Status.Phase != dev1alpha1.PhaseReady && item.Status.Phase != dev1alpha1.PhaseSleeping {
-		return "", http.StatusConflict, "digital employee is not Ready (phase " + string(item.Status.Phase) + ")"
+		return "", "", http.StatusConflict, "digital employee is not Ready (phase " + string(item.Status.Phase) + ")"
 	}
 	var secret corev1.Secret
 	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: memkeySecretName(name)}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", http.StatusServiceUnavailable, "runtime credentials not provisioned yet"
+			return "", "", http.StatusServiceUnavailable, "runtime credentials not provisioned yet"
 		}
-		return "", http.StatusInternalServerError, err.Error()
+		return "", "", http.StatusInternalServerError, err.Error()
 	}
 	token := strings.TrimSpace(string(secret.Data["DEER_FLOW_INTERNAL_AUTH_TOKEN"]))
 	if token == "" {
-		return "", http.StatusServiceUnavailable, "runtime internal token missing from credentials secret"
+		return "", "", http.StatusServiceUnavailable, "runtime internal token missing from credentials secret"
 	}
-	return token, 0, ""
+	return token, display, 0, ""
 }
 
 // handleChat proxies one HTTP request to the employee runtime.
@@ -76,7 +84,7 @@ func (p *portal) authorizeChat(ctx context.Context, name string, ident identity)
 func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identity) {
 	name := r.PathValue("name")
 	rest := r.PathValue("rest")
-	token, code, errMsg := p.authorizeChat(r.Context(), name, ident)
+	token, _, code, errMsg := p.authorizeChat(r.Context(), name, ident)
 	if code != 0 {
 		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
