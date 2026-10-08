@@ -30,9 +30,12 @@ const (
 	employeeCookie      = "de_employee"
 	// employeeDisplayCookie mirrors the selected employee's display name for
 	// the chat UI header. It is deliberately readable by scripts (the header
-	// runs in the browser) and URL-escaped because cookie values are
+	// runs in the browser) and path-escaped because cookie values are
 	// ASCII-only on the wire; de_employee itself must stay the technical
-	// name — API paths derive from it.
+	// name — API paths derive from it. PathEscape (not QueryEscape) is the
+	// encoding: the consumer decodes with decodeURIComponent, which keeps a
+	// form-style `+` for space verbatim, while %20 round-trips for every
+	// rune and stays cookie-safe.
 	employeeDisplayCookie = "de_employee_display"
 )
 
@@ -414,6 +417,6 @@ func (p *portal) handleSessionEmployee(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: employeeCookie, Value: body.Name, Path: "/", SameSite: http.SameSiteLaxMode})
-	http.SetCookie(w, &http.Cookie{Name: employeeDisplayCookie, Value: url.QueryEscape(display), Path: "/", SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: employeeDisplayCookie, Value: url.PathEscape(display), Path: "/", SameSite: http.SameSiteLaxMode})
 	writeJSON(w, http.StatusOK, map[string]any{"employee": body.Name, "chatURL": p.chatUIURL(r)})
 }

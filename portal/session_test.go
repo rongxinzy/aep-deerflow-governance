@@ -297,6 +297,18 @@ func TestSessionLogoutDropsSession(t *testing.T) {
 		t.Fatalf("logout status = %d", response.StatusCode)
 	}
 
+	// The clearing response expires every selection cookie client-side —
+	// including the display-name companion.
+	var clearedDisplay bool
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == employeeDisplayCookie {
+			clearedDisplay = cookie.MaxAge < 0
+		}
+	}
+	if !clearedDisplay {
+		t.Errorf("logout must expire %s: %+v", employeeDisplayCookie, response.Cookies())
+	}
+
 	// Cookies are expired client-side; the server-side session is gone even
 	// for a replayed cookie value.
 	request, _ = http.NewRequest(http.MethodGet, server.URL+"/api/v1/session", nil)
