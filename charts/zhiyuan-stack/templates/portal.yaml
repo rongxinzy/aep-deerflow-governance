@@ -25,6 +25,10 @@ spec:
             # here so the chart — not an ad-hoc `kubectl set env` — is the
             # record of what new employees run.
             - {name: PORTAL_RUNTIME_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag) | quote }}}
+            # Platform default model for applies without an explicit pick
+            # (workbench form); checked against the live model catalog at
+            # apply time, so a drifted value fails loudly there.
+            - {name: PORTAL_MODEL, value: {{ .Values.portal.defaultModel | quote }}}
           envFrom:
             - secretRef: {name: {{ .Values.secrets.portalDB }}}
           ports:

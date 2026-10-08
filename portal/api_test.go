@@ -356,6 +356,7 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 				return
 			}
 			_, _ = w.Write([]byte(`{"models":[
+				{"id":"bench-glm","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
 				{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}]}`))

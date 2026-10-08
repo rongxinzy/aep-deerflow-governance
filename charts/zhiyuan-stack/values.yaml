@@ -142,6 +142,13 @@ portal:
   quotaPerUser: "2"
   adminUsers: admin
   adminRoles: admin,platform-admin
+  # Platform default model for employees created without an explicit model
+  # pick (the workbench apply form has no model field). Validated against
+  # the live model catalog at apply time — a stale value fails the apply
+  # instead of creating an employee that cannot converse. 2026-10-08 real
+  # check: bench-glm is DISABLED in the cicd catalog; every existing
+  # employee rides bench-qwen38-fast, which is also this default.
+  defaultModel: bench-qwen38-fast
   nodePort: 30190
 
 chatUI:
