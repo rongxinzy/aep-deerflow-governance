@@ -95,7 +95,7 @@ func loadConfig() config {
 
 		wakeTimeout: time.Duration(envInt("PORTAL_WAKE_TIMEOUT_SECONDS", 60)) * time.Second,
 
-		failoverInterval:     time.Duration(envInt("PORTAL_FAILOVER_INTERVAL_SECONDS", 60)) * time.Second,
+		failoverInterval:     time.Duration(envIntNonNegative("PORTAL_FAILOVER_INTERVAL_SECONDS", 60)) * time.Second,
 		failoverMinUnhealthy: time.Duration(envInt("PORTAL_FAILOVER_MIN_UNHEALTHY_SECONDS", 300)) * time.Second,
 		failoverMinHealthy:   time.Duration(envInt("PORTAL_FAILOVER_MIN_HEALTHY_SECONDS", 1200)) * time.Second,
 	}

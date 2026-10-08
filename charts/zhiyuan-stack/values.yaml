@@ -150,13 +150,17 @@ portal:
   # employee rides bench-qwen38-fast, which is also this default.
   defaultModel: bench-qwen38-fast
   nodePort: 30190
-  # Model failover watcher (productized, deployment-configurable): the
-  # fallback chain itself lives in the AEP deployment settings
-  # (modelFallbackIds, default chain [bench-qwen, bench-glm]); these knobs
-  # control the watcher cadence and hysteresis. A hard credential/access
+  # Model failover watcher (productized, deployment-configurable). The
+  # fallback chain itself is deployment DATA, not code: it ships EMPTY
+  # (AEP deployment setting modelFallbackIds, or the control plane's
+  # AEP_MODEL_FALLBACK_IDS environment default) — until an operator
+  # configures a chain the watcher never switches anyone, while employees
+  # already on a fallback still restore when their original model recovers.
+  # These knobs control cadence and hysteresis: a hard credential/access
   # failure switches immediately; transient failures must persist for
-  # minUnhealthySeconds; the original model must stay healthy for
-  # minHealthySeconds before it is restored. intervalSeconds 0 disables.
+  # minUnhealthySeconds; the original must stay healthy for
+  # minHealthySeconds before it is restored. intervalSeconds 0 disables the
+  # watcher entirely.
   failover:
     intervalSeconds: 60
     minUnhealthySeconds: 300

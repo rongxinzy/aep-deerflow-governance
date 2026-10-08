@@ -65,10 +65,8 @@ func (p *portal) failoverOnce(ctx context.Context, now time.Time) {
 	}
 	chain, err := p.failoverChain(ctx, token)
 	if err != nil {
+		// Settings unavailable: fail safe, take no action at all this cycle.
 		p.logger.Warn("model failover: deployment settings unavailable", "error", err)
-		return
-	}
-	if len(chain) == 0 {
 		return
 	}
 	health, err := p.modelHealth(ctx, token)
@@ -76,6 +74,9 @@ func (p *portal) failoverOnce(ctx context.Context, now time.Time) {
 		p.logger.Warn("model failover: model catalog unavailable", "error", err)
 		return
 	}
+	// An empty chain only prevents NEW switches; restores and record
+	// cleanups must keep working so employees are not pinned to a fallback
+	// after the operator clears the chain.
 	var employees dev1alpha1.DigitalEmployeeList
 	if err := p.k8s.List(ctx, &employees, client.InNamespace(p.cfg.namespace)); err != nil {
 		p.logger.Warn("model failover: employee list failed", "error", err)
@@ -168,7 +169,14 @@ func (p *portal) reconcileEmployeeFailover(ctx context.Context, employee *dev1al
 	if len(models) == 0 || models[0].Name == "" {
 		return
 	}
-	state, hasState := parseFailoverState(employee)
+	state, hasState, corrupt := parseFailoverState(employee)
+	if corrupt {
+		// The record exists but is unreadable. Treating it as absent would
+		// overwrite it with a fresh switch and lose the original model id,
+		// so leave the employee untouched for a human to inspect.
+		p.logger.Warn("model failover: unreadable failover record; leaving the employee untouched", "employee", employee.Name)
+		return
+	}
 	if hasState {
 		if models[0].Name != state.Active {
 			// The default model changed after our switch (operator edit);
@@ -187,6 +195,27 @@ func (p *portal) reconcileEmployeeFailover(ctx context.Context, employee *dev1al
 			employee.Spec.Runtime.Models = prependModel(route[0], models)
 			clearFailoverState(employee)
 			p.updateForFailover(ctx, employee, "model failover: restored", "employee", employee.Name, "model", state.Original)
+			return
+		}
+		// The active fallback itself can fail while the original is still
+		// down; advance along the chain instead of pinning the employee to a
+		// second dead model.
+		activeView := health[state.Active]
+		if eligible, reason := failoverEligible(activeView, p.cfg.failoverMinUnhealthy, now); eligible {
+			next := firstHealthyEntry(chain, health, state.Active, state.Original)
+			if next == "" {
+				p.logger.Warn("model failover: active fallback unhealthy and no further healthy entry", "employee", employee.Name, "model", state.Active, "reason", reason)
+				return
+			}
+			route, err := p.resolveRuntimeModels(ctx, identity{}, []string{next})
+			if err != nil || len(route) == 0 {
+				p.logger.Warn("model failover: cannot resolve the next fallback", "employee", employee.Name, "model", next, "error", err)
+				return
+			}
+			employee.Spec.Runtime.Models = prependModel(route[0], models)
+			setFailoverState(employee, failoverState{Original: state.Original, Active: next, SwitchedAt: now.Format(time.RFC3339)})
+			p.updateForFailover(ctx, employee, "model failover: advanced to the next healthy fallback",
+				"employee", employee.Name, "from", state.Active, "to", next, "reason", reason)
 		}
 		return
 	}
@@ -197,17 +226,10 @@ func (p *portal) reconcileEmployeeFailover(ctx context.Context, employee *dev1al
 	if !eligible {
 		return
 	}
-	fallback := ""
-	for _, id := range chain {
-		if id == primary {
-			continue
-		}
-		candidate := health[id]
-		if candidate.Present && candidate.Enabled && candidate.HealthStatus == "healthy" {
-			fallback = id
-			break
-		}
+	if len(chain) == 0 {
+		return // a switch requires a configured chain
 	}
+	fallback := firstHealthyEntry(chain, health, primary)
 	if fallback == "" {
 		p.logger.Warn("model failover: no healthy fallback available", "employee", employee.Name, "model", primary, "reason", reason)
 		return
@@ -261,6 +283,28 @@ func healthyFor(view modelHealthView, minHealthy time.Duration, now time.Time) b
 	return now.Sub(*view.HealthSince) >= minHealthy
 }
 
+// firstHealthyEntry returns the first chain entry that is neither excluded
+// nor the working model and that the probe currently rates healthy.
+func firstHealthyEntry(chain []string, health map[string]modelHealthView, exclude ...string) string {
+	for _, id := range chain {
+		skip := false
+		for _, excluded := range exclude {
+			if id == excluded {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		candidate := health[id]
+		if candidate.Present && candidate.Enabled && candidate.HealthStatus == "healthy" {
+			return id
+		}
+	}
+	return ""
+}
+
 // prependModel puts entry first and drops any later duplicate by name,
 // preserving the order of the remaining entries.
 func prependModel(entry dev1alpha1.RuntimeModel, models []dev1alpha1.RuntimeModel) []dev1alpha1.RuntimeModel {
@@ -275,16 +319,17 @@ func prependModel(entry dev1alpha1.RuntimeModel, models []dev1alpha1.RuntimeMode
 	return result
 }
 
-func parseFailoverState(employee *dev1alpha1.DigitalEmployee) (failoverState, bool) {
+// parseFailoverState distinguishes an absent record from a corrupt one: the
+// caller must never treat a key it cannot read as "no failover happened".
+func parseFailoverState(employee *dev1alpha1.DigitalEmployee) (state failoverState, present bool, corrupt bool) {
 	raw := employee.GetAnnotations()[failoverAnnotation]
 	if raw == "" {
-		return failoverState{}, false
+		return failoverState{}, false, false
 	}
-	var state failoverState
 	if err := json.Unmarshal([]byte(raw), &state); err != nil || state.Original == "" || state.Active == "" {
-		return failoverState{}, false
+		return failoverState{}, false, true
 	}
-	return state, true
+	return state, true, false
 }
 
 func setFailoverState(employee *dev1alpha1.DigitalEmployee, state failoverState) {

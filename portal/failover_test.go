@@ -127,8 +127,9 @@ func TestFailoverSwitchesImmediatelyOnCredentialFailure(t *testing.T) {
 	assert.Equal(t, "bench-qwen", employee.Spec.Runtime.Models[0].Name)
 	assert.Equal(t, "http://gw.example/bench-qwen", employee.Spec.Runtime.Models[0].BaseURL)
 	assert.Equal(t, "bench-qwen38-fast", employee.Spec.Runtime.Models[1].Name)
-	state, ok := parseFailoverState(employee)
+	state, ok, corrupt := parseFailoverState(employee)
 	require.True(t, ok, "the switch must be recorded on the employee")
+	require.False(t, corrupt)
 	assert.Equal(t, "bench-qwen38-fast", state.Original)
 	assert.Equal(t, "bench-qwen", state.Active)
 }
@@ -201,7 +202,7 @@ func TestFailoverRestoresWhenOriginalRecovers(t *testing.T) {
 	restored := loadEmployee(t, p, "de-a")
 	assert.Equal(t, "bench-qwen38-fast", restored.Spec.Runtime.Models[0].Name)
 	assert.Len(t, restored.Spec.Runtime.Models, 2, "the fallback stays available as a secondary")
-	_, ok := parseFailoverState(restored)
+	_, ok, _ := parseFailoverState(restored)
 	assert.False(t, ok, "a completed restore clears the failover record")
 }
 
@@ -217,7 +218,7 @@ func TestFailoverClearsRecordWhenModelChangedExternally(t *testing.T) {
 
 	updated := loadEmployee(t, p, "de-a")
 	assert.Equal(t, "bench-glm", updated.Spec.Runtime.Models[0].Name, "external changes win")
-	_, ok := parseFailoverState(updated)
+	_, ok, _ := parseFailoverState(updated)
 	assert.False(t, ok)
 }
 
@@ -243,6 +244,81 @@ func TestFailoverSkipsIncompleteCatalogPage(t *testing.T) {
 	employee := loadEmployee(t, p, "de-a")
 	assert.Equal(t, "bench-qwen38-fast", employee.Spec.Runtime.Models[0].Name,
 		"a partial catalog must never trigger a false not-in-catalog failover")
+}
+
+func TestFailoverRestoresWhenChainCleared(t *testing.T) {
+	// Clearing the deployment chain must not pin an already-switched
+	// employee to the fallback forever.
+	healthyLong := time.Now().Add(-30 * time.Minute)
+	catalog := catalogJSON(
+		catalogEntry("bench-qwen38-fast", "healthy", &healthyLong),
+		catalogEntry("bench-qwen", "healthy", &healthyLong),
+	)
+	employee := failoverEmployee("de-a", "bench-qwen")
+	employee.Spec.Runtime.Models = append(employee.Spec.Runtime.Models, dev1alpha1.RuntimeModel{
+		Name: "bench-qwen38-fast", Provider: "anthropic", BaseURL: "http://gw.example/bench-qwen38-fast", ApiKeyEnv: "DEER_BENCH_API_KEY",
+	})
+	state, _ := json.Marshal(failoverState{Original: "bench-qwen38-fast", Active: "bench-qwen", SwitchedAt: time.Now().Add(-time.Hour).Format(time.RFC3339)})
+	employee.SetAnnotations(map[string]string{failoverAnnotation: string(state)})
+	p := newFailoverPortal(t, catalog, settingsJSON(), employee) // empty chain
+
+	p.failoverOnce(context.Background(), time.Now().UTC())
+
+	restored := loadEmployee(t, p, "de-a")
+	assert.Equal(t, "bench-qwen38-fast", restored.Spec.Runtime.Models[0].Name)
+	_, ok, _ := parseFailoverState(restored)
+	assert.False(t, ok, "the failover record clears even without a configured chain")
+}
+
+func TestFailoverAdvancesWhenActiveFallbackFails(t *testing.T) {
+	recent := time.Now().Add(-time.Minute)
+	catalog := catalogJSON(
+		catalogEntry("bench-qwen38-fast", "unreachable", &recent), // original still down
+		catalogEntry("bench-qwen", "credential_invalid", &recent), // active now dead too
+		catalogEntry("bench-glm", "healthy", &recent),             // next entry is fine
+	)
+	employee := failoverEmployee("de-a", "bench-qwen")
+	employee.Spec.Runtime.Models = append(employee.Spec.Runtime.Models, dev1alpha1.RuntimeModel{
+		Name: "bench-qwen38-fast", Provider: "anthropic", BaseURL: "http://gw.example/bench-qwen38-fast", ApiKeyEnv: "DEER_BENCH_API_KEY",
+	})
+	state, _ := json.Marshal(failoverState{Original: "bench-qwen38-fast", Active: "bench-qwen", SwitchedAt: time.Now().Add(-time.Hour).Format(time.RFC3339)})
+	employee.SetAnnotations(map[string]string{failoverAnnotation: string(state)})
+	p := newFailoverPortal(t, catalog, settingsJSON("bench-qwen", "bench-glm"), employee)
+
+	p.failoverOnce(context.Background(), time.Now().UTC())
+
+	advanced := loadEmployee(t, p, "de-a")
+	assert.Equal(t, "bench-glm", advanced.Spec.Runtime.Models[0].Name, "a dead fallback must advance along the chain")
+	updated, ok, _ := parseFailoverState(advanced)
+	require.True(t, ok)
+	assert.Equal(t, "bench-qwen38-fast", updated.Original, "the original model stays recorded across advances")
+	assert.Equal(t, "bench-glm", updated.Active)
+}
+
+func TestFailoverCorruptRecordIsLeftUntouched(t *testing.T) {
+	recent := time.Now().Add(-time.Minute)
+	catalog := catalogJSON(
+		catalogEntry("bench-qwen", "credential_invalid", &recent),
+		catalogEntry("bench-glm", "healthy", &recent),
+	)
+	employee := failoverEmployee("de-a", "bench-qwen")
+	employee.SetAnnotations(map[string]string{failoverAnnotation: "{corrupt"})
+	p := newFailoverPortal(t, catalog, settingsJSON("bench-glm"), employee)
+
+	p.failoverOnce(context.Background(), time.Now().UTC())
+
+	untouched := loadEmployee(t, p, "de-a")
+	assert.Equal(t, "bench-qwen", untouched.Spec.Runtime.Models[0].Name,
+		"an unreadable record must never be overwritten — the original model id would be lost")
+	assert.Equal(t, "{corrupt", untouched.GetAnnotations()[failoverAnnotation])
+}
+
+func TestFailoverIntervalZeroDisablesWatcher(t *testing.T) {
+	t.Setenv("PORTAL_FAILOVER_INTERVAL_SECONDS", "0")
+	cfg := loadConfig()
+	if cfg.failoverInterval > 0 {
+		t.Fatalf("interval 0 must disable the watcher, got %s", cfg.failoverInterval)
+	}
 }
 
 func TestFailoverReportsNoHealthyFallback(t *testing.T) {

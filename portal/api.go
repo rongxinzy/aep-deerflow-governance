@@ -794,7 +794,7 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 	// Surface an active model failover so every employee list (workbench and
 	// console) can warn that the default model is temporarily substituted.
 	var modelFailover any
-	if state, ok := parseFailoverState(item); ok {
+	if state, ok, _ := parseFailoverState(item); ok {
 		modelFailover = map[string]any{"original": state.Original, "active": state.Active, "switchedAt": state.SwitchedAt}
 	}
 	return map[string]any{
