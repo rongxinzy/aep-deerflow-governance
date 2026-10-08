@@ -229,6 +229,22 @@ func TestFailoverNoopWithoutChain(t *testing.T) {
 	assert.Equal(t, "bench-qwen38-fast", loadEmployee(t, p, "de-a").Spec.Runtime.Models[0].Name)
 }
 
+func TestFailoverSkipsIncompleteCatalogPage(t *testing.T) {
+	recent := time.Now().Add(-time.Minute)
+	next := "cursor-2"
+	raw, _ := json.Marshal(map[string]any{
+		"models":     []map[string]any{catalogEntry("bench-qwen", "healthy", &recent)},
+		"nextCursor": next,
+	})
+	p := newFailoverPortal(t, string(raw), settingsJSON("bench-qwen"), failoverEmployee("de-a", "bench-qwen38-fast"))
+
+	p.failoverOnce(context.Background(), time.Now().UTC())
+
+	employee := loadEmployee(t, p, "de-a")
+	assert.Equal(t, "bench-qwen38-fast", employee.Spec.Runtime.Models[0].Name,
+		"a partial catalog must never trigger a false not-in-catalog failover")
+}
+
 func TestFailoverReportsNoHealthyFallback(t *testing.T) {
 	recent := time.Now().Add(-time.Minute)
 	catalog := catalogJSON(

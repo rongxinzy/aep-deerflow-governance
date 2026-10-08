@@ -139,9 +139,16 @@ func (p *portal) modelHealth(ctx context.Context, token string) (map[string]mode
 			HealthStatus string  `json:"healthStatus"`
 			HealthSince  *string `json:"healthSince"`
 		} `json:"models"`
+		NextCursor *string `json:"nextCursor"`
 	}
 	if err := json.Unmarshal(raw, &page); err != nil {
 		return nil, fmt.Errorf("model catalog response was invalid: %w", err)
+	}
+	if page.NextCursor != nil && *page.NextCursor != "" {
+		// A partial catalog would make every model on the unseen pages look
+		// "not in catalog" — which this watcher treats as an immediate
+		// failover trigger. Refuse to judge instead of guessing.
+		return nil, fmt.Errorf("model catalog exceeded one page; refusing to evaluate with a partial view")
 	}
 	health := make(map[string]modelHealthView, len(page.Models))
 	for _, model := range page.Models {
