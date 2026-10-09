@@ -9,6 +9,34 @@ kind: Namespace
 metadata:
   name: logging
 ---
+# Fluent Bit enriches every record with pod/namespace metadata through the
+# `kubernetes` filter — that filter calls the API server, so it needs a
+# service account with pods/namespaces read access. Without this RBAC the
+# filter silently emits bare records (log text + @timestamp only), which
+# makes the ES/Kibana views un-filterable per service (observed live).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-logging
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-logging
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fluent-bit-logging}
+subjects:
+  - {kind: ServiceAccount, name: fluent-bit, namespace: logging}
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -152,6 +180,7 @@ spec:
     metadata:
       labels: {app: fluent-bit}
     spec:
+      serviceAccountName: fluent-bit
       tolerations:
         - {key: node-role.kubernetes.io/controlplane, operator: Exists, effect: NoSchedule}
       containers:
