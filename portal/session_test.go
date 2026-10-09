@@ -48,8 +48,9 @@ func fakeAEP(t *testing.T) *httptest.Server {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"user":  map[string]string{"id": user[0], "displayName": user[1], "kind": "human"},
-			"roles": []string{"sales"},
+			"deploymentId": "demo",
+			"user":         map[string]string{"id": user[0], "displayName": user[1], "kind": "human"},
+			"roles":        []string{"sales"},
 		})
 	})
 	server := httptest.NewServer(mux)

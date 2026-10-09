@@ -28,17 +28,20 @@ type config struct {
 	quotaPerUser int
 	namespace    string
 
-	runtimeImage      string
-	model             string
-	gatewayBaseURL    string
-	modelKeyEnv       string
-	memoryServer      string
-	memoryAccount     string
-	knowledgeMCPURL   string
-	knowledgeAPIURL   string
-	knowledgeUIURL    string // browser-facing WeKnora URL override; default derives per request
-	credentialsSecret string
-	a2aImage          string
+	runtimeImage               string
+	model                      string
+	gatewayBaseURL             string
+	modelKeyEnv                string
+	memoryServer               string
+	memoryAccount              string
+	knowledgeMCPURL            string
+	knowledgeAPIURL            string
+	knowledgeUIURL             string // browser-facing WeKnora URL override; default derives per request
+	knowledgeTenantID          string
+	knowledgeAPIKeySecretField string
+	knowledgeEmbeddingModelID  string
+	credentialsSecret          string
+	a2aImage                   string
 
 	// Web-chat entry: session cookie TTL, the AEP deployment id used by the
 	// /chat login form, and where the reused DeerFlow frontend is served.
@@ -65,17 +68,20 @@ func loadConfig() config {
 		quotaPerUser: envIntNonNegative("PORTAL_QUOTA_PER_USER", 2),
 		namespace:    env("PORTAL_NAMESPACE", "digital-employees"),
 
-		runtimeImage:      env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v10"),
-		model:             env("PORTAL_MODEL", "bench-glm"),
-		gatewayBaseURL:    env("PORTAL_GATEWAY_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local"),
-		modelKeyEnv:       env("PORTAL_MODEL_KEY_ENV", "BIGMODEL_API_KEY"),
-		memoryServer:      env("PORTAL_MEMORY_SERVER", "http://openviking.memory-system.svc.cluster.local:1933"),
-		memoryAccount:     env("PORTAL_MEMORY_ACCOUNT", "zhiyuan"),
-		knowledgeMCPURL:   env("PORTAL_KNOWLEDGE_MCP_URL", "http://weknora-mcp.weknora.svc.cluster.local:8830/mcp"),
-		knowledgeAPIURL:   env("PORTAL_KNOWLEDGE_API_URL", "http://app.weknora.svc.cluster.local:8080"),
-		knowledgeUIURL:    env("PORTAL_KNOWLEDGE_UI_URL", ""),
-		credentialsSecret: env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
-		a2aImage:          env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
+		runtimeImage:               env("PORTAL_RUNTIME_IMAGE", "172.18.5.251:8081/zhiyuan/deerflow-gov:v10"),
+		model:                      env("PORTAL_MODEL", "bench-glm"),
+		gatewayBaseURL:             env("PORTAL_GATEWAY_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local"),
+		modelKeyEnv:                env("PORTAL_MODEL_KEY_ENV", "BIGMODEL_API_KEY"),
+		memoryServer:               env("PORTAL_MEMORY_SERVER", "http://openviking.memory-system.svc.cluster.local:1933"),
+		memoryAccount:              env("PORTAL_MEMORY_ACCOUNT", "zhiyuan"),
+		knowledgeMCPURL:            env("PORTAL_KNOWLEDGE_MCP_URL", "http://weknora-mcp.weknora.svc.cluster.local:8830/mcp"),
+		knowledgeAPIURL:            env("PORTAL_KNOWLEDGE_API_URL", "http://app.weknora.svc.cluster.local:8080"),
+		knowledgeUIURL:             env("PORTAL_KNOWLEDGE_UI_URL", ""),
+		knowledgeTenantID:          env("PORTAL_KNOWLEDGE_TENANT_ID", ""),
+		knowledgeAPIKeySecretField: env("PORTAL_KNOWLEDGE_API_KEY_SECRET_FIELD", "WEKNORA_KNOWLEDGE_API_KEY"),
+		knowledgeEmbeddingModelID:  env("PORTAL_KNOWLEDGE_EMBEDDING_MODEL_ID", ""),
+		credentialsSecret:          env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
+		a2aImage:                   env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
 
 		sessionTTL:      time.Duration(envInt("PORTAL_SESSION_TTL_MINUTES", 720)) * time.Minute,
 		aepDeploymentID: env("PORTAL_AEP_DEPLOYMENT_ID", "demo"),
@@ -181,7 +187,31 @@ CREATE INDEX IF NOT EXISTS channel_wake_pending ON channel_wake (employee) WHERE
 CREATE TABLE IF NOT EXISTS employee_activity (
 	employee    TEXT PRIMARY KEY,
 	last_active TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
+);
+CREATE TABLE IF NOT EXISTS knowledge_base_registry (
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	knowledge_base_id TEXT NOT NULL,
+	name_snapshot TEXT NOT NULL,
+	created_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
+);
+CREATE TABLE IF NOT EXISTS knowledge_audit_events (
+	id BIGSERIAL PRIMARY KEY,
+	operation_id TEXT NOT NULL UNIQUE,
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	actor_user_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	resource_type TEXT NOT NULL,
+	resource_id TEXT NOT NULL DEFAULT '',
+	outcome TEXT NOT NULL,
+	status_code INTEGER NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS knowledge_audit_events_deployment_created ON knowledge_audit_events (deployment_id, created_at DESC)`)
 	return err
 }
 

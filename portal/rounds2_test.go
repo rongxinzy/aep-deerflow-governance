@@ -345,7 +345,7 @@ func TestMigrateCreatesTables(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS requests`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`(?s)CREATE TABLE IF NOT EXISTS requests.*knowledge_base_registry.*knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 0))
 	require.NoError(t, migrate(db))
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

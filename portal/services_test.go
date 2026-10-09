@@ -1,10 +1,12 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
@@ -188,50 +190,148 @@ func TestServiceStatusHandlers(t *testing.T) {
 }
 
 func TestKnowledgeProxy(t *testing.T) {
-	t.Run("proxies the subtree with server-side auth", func(t *testing.T) {
-		var seenPath, seenAuth string
-		sawLogin := false
-		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			seenPath = r.URL.Path
-			seenAuth = r.Header.Get("Authorization")
+	t.Run("preserves query parameters and authenticates server-side", func(t *testing.T) {
+		var seenPath, seenQuery, seenAuth string
+		h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/auth/login") {
-				sawLogin = true
 				_, _ = w.Write([]byte(`{"token":"wk-token"}`))
 				return
 			}
+			seenPath, seenQuery, seenAuth = r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization")
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		}))
 		defer target.Close()
-		scheme := runtime.NewScheme()
-		require.NoError(t, k8sscheme.AddToScheme(scheme))
-		db, mock, err := sqlmock.New()
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = mock.ExpectationsWereMet() })
-		p := &portal{
-			cfg: config{
-				namespace:         "digital-employees",
-				adminUsers:        map[string]bool{"admin-user": true},
-				knowledgeAPIURL:   target.URL,
-				credentialsSecret: "de-platform-creds",
-			},
-			db: db,
-			k8s: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "de-platform-creds", Namespace: "digital-employees"},
-				Data:       map[string][]byte{"WEKNORA_ADMIN_USER": []byte("wk-admin"), "WEKNORA_ADMIN_PASSWORD": []byte("wk-pass")},
-			}).Build(),
-			aep:      &aepAuthenticator{},
-			logger:   discardLogger(),
-			sessions: newSessionStore(0),
-		}
-		h := &apiTestPortal{portal: p, dbmock: mock}
-		// Login + knowledge bases proxied calls.
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases?page=2&search=a%2Fb", nil)
+		req.SetPathValue("rest", "knowledge-bases")
+		w := httptest.NewRecorder()
+		h.handleKnowledgeProxy(w, req, adminIdentity())
+
+		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Equal(t, "/api/v1/knowledge-bases", seenPath)
+		assert.Equal(t, "page=2&search=a%2Fb", seenQuery)
+		assert.Equal(t, "Bearer wk-token", seenAuth)
+	})
+
+	t.Run("forwards multipart upload body and content type", func(t *testing.T) {
+		var seenType, seenBody string
+		h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/auth/login") {
+				_, _ = w.Write([]byte(`{"token":"wk-token"}`))
+				return
+			}
+			seenType = r.Header.Get("Content-Type")
+			body, _ := io.ReadAll(r.Body)
+			seenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"doc-1"}`))
+		}))
+		defer target.Close()
+
+		body := "--upload-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nsynthetic upload\r\n--upload-boundary--\r\n"
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/proxy/knowledge-bases/kb-1/knowledge/file", strings.NewReader(body))
+		req.SetPathValue("rest", "knowledge-bases/kb-1/knowledge/file")
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=upload-boundary")
+		w := httptest.NewRecorder()
+		h.handleKnowledgeProxy(w, req, adminIdentity())
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, "multipart/form-data; boundary=upload-boundary", seenType)
+		assert.Contains(t, seenBody, "synthetic upload")
+	})
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status)+" response is sanitized", func(t *testing.T) {
+			h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/auth/login") {
+					_, _ = w.Write([]byte(`{"token":"wk-token"}`))
+					return
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":"internal details and secret"}`))
+			}))
+			defer target.Close()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases", nil)
+			req.SetPathValue("rest", "knowledge-bases")
+			w := httptest.NewRecorder()
+			h.handleKnowledgeProxy(w, req, adminIdentity())
+
+			assert.Equal(t, status, w.Code)
+			assert.NotContains(t, w.Body.String(), "internal details")
+			assert.NotContains(t, w.Body.String(), "secret")
+		})
+	}
+
+	t.Run("refuses upstream redirects without following or relaying location", func(t *testing.T) {
+		redirectHits := 0
+		redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			redirectHits++
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer redirectTarget.Close()
+		h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/auth/login") {
+				_, _ = w.Write([]byte(`{"token":"wk-token"}`))
+				return
+			}
+			http.Redirect(w, r, redirectTarget.URL+"/capture", http.StatusFound)
+		}))
+		defer target.Close()
+
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases", nil)
 		req.SetPathValue("rest", "knowledge-bases")
 		w := httptest.NewRecorder()
 		h.handleKnowledgeProxy(w, req, adminIdentity())
-		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		assert.True(t, sawLogin, "proxy must authenticate server-side first")
-		assert.Contains(t, seenPath, "knowledge-bases")
-		assert.Equal(t, "Bearer wk-token", seenAuth)
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Empty(t, w.Header().Get("Location"))
+		assert.Equal(t, 0, redirectHits)
 	})
+
+	t.Run("non-admin is refused before contacting upstream", func(t *testing.T) {
+		upstreamHits := 0
+		h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstreamHits++
+		}))
+		defer target.Close()
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases", nil)
+		req.SetPathValue("rest", "knowledge-bases")
+		w := httptest.NewRecorder()
+		h.handleKnowledgeProxy(w, req, identity{UserID: "ordinary-user"})
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Equal(t, 0, upstreamHits)
+	})
+
+	t.Run("invalid upstream URL returns a safe error", func(t *testing.T) {
+		h, target := newKnowledgeProxyHarness(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		defer target.Close()
+		h.cfg.knowledgeAPIURL = "://invalid"
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/knowledge/proxy/knowledge-bases", nil)
+		req.SetPathValue("rest", "knowledge-bases")
+		w := httptest.NewRecorder()
+		h.handleKnowledgeProxy(w, req, adminIdentity())
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.NotContains(t, w.Body.String(), "invalid")
+	})
+
+	t.Run("transfer timeouts are independent from service probes", func(t *testing.T) {
+		assert.Equal(t, 10*time.Second, knowledgeAuthClient.Timeout)
+		assert.Equal(t, 2*time.Minute, knowledgeTransferClient.Timeout)
+		assert.Equal(t, 5*time.Second, serviceProbeClient.Timeout)
+	})
+}
+
+func newKnowledgeProxyHarness(t *testing.T, upstream http.Handler) (*apiTestPortal, *httptest.Server) {
+	t.Helper()
+	target := httptest.NewServer(upstream)
+	t.Cleanup(target.Close)
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	h.cfg.knowledgeAPIURL = target.URL
+	return h, target
 }
