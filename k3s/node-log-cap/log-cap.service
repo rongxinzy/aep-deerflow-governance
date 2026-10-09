@@ -1,0 +1,6 @@
+[Unit]
+Description=Hard cap on per-node rsyslog volume
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/log-cap.sh

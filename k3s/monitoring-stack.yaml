@@ -20,6 +20,9 @@ data:
       scrape_interval: 15s
       evaluation_interval: 15s
 
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
     scrape_configs:
       - job_name: prometheus
         static_configs:
@@ -48,9 +51,12 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app]
             regex: de-.*-helper
             action: keep
-          # kubernetes_sd sets __address__ to pod_ip:declared_container_port;
-          # employee runtimes declare 8001 so the default is correct — no
-          # port annotation rewriting needed.
+          # One target is generated per declared container port; the helper
+          # sidecar declares none, so pod SD also yields a bogus :80 target
+          # that can never scrape. Keep only the runtime's declared 8001.
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "8001"
+            action: keep
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
           - source_labels: [__meta_kubernetes_namespace]
@@ -66,6 +72,15 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app]
             regex: kube-state-metrics
             action: keep
+
+      # The AEP control plane registers /metrics on its main API listener
+      # (both the all-in-one control-service and the split agent-control).
+      - job_name: aep-control-service
+        static_configs:
+          - targets: ['aep-control-service.aep-system.svc.cluster.local:8080']
+      - job_name: aep-agent-control
+        static_configs:
+          - targets: ['aep-agent-control.aep-system.svc.cluster.local:8080']
 
 ---
 apiVersion: v1
@@ -98,6 +113,8 @@ metadata:
   namespace: monitoring
 spec:
   replicas: 1
+  # RWO PVC: the old pod must let go of the volume before a new one starts.
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: prometheus}
   template:
@@ -122,12 +139,15 @@ spec:
             limits: {memory: 1Gi}
           volumeMounts:
             - {name: config, mountPath: /etc/prometheus}
+            - {name: rules, mountPath: /etc/prometheus/rules}
             - {name: data, mountPath: /prometheus}
       volumes:
         - name: config
           configMap: {name: prometheus-config}
+        - name: rules
+          configMap: {name: prometheus-rules}
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: {claimName: prometheus-data}
 ---
 apiVersion: v1
 kind: Service
@@ -137,6 +157,152 @@ metadata:
 spec:
   selector: {app: prometheus}
   ports: [{port: 9090, targetPort: 9090}]
+---
+# 7d retention survives pod restarts (was emptyDir: every restart wiped it).
+# local-path on purpose: metrics are regenerable soft data, and this keeps the
+# monitoring stack independent of Longhorn attach health. Durable data (Harbor
+# et al.) stays on Longhorn.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: monitoring
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: {requests: {storage: 10Gi}}
+---
+# Alert rules. Prometheus owns hold-down semantics (for:) and resolved state;
+# the evaluator CronJob below only forwards what is firing. These rules cover
+# the incident classes that ran silently before (node disk pressure / volume,
+# scrape targets vanishing, node NotReady) plus AEP 5xx.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+data:
+  zhiyuan.yml: |
+    groups:
+      - name: zhiyuan-infra
+        rules:
+          - alert: ScrapeTargetDown
+            expr: up == 0
+            for: 3m
+            labels: {severity: warning}
+            annotations:
+              summary: "Scrape target {{ $labels.job }} ({{ $labels.instance }}) has been unreachable for 3m"
+          - alert: NodeDiskPressure
+            expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+            for: 5m
+            labels: {severity: critical}
+            annotations:
+              summary: "Node {{ $labels.node }} reports DiskPressure (5m)"
+          - alert: NodeDiskLow
+            expr: (node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) < 0.12
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "Node {{ $labels.instance }} root filesystem below 12% free (10m)"
+          - alert: NodeNotReady
+            expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+            for: 5m
+            labels: {severity: critical}
+            annotations:
+              summary: "Node {{ $labels.node }} has been NotReady for 5m"
+          - alert: PodRestarting
+            expr: increase(kube_pod_container_status_restarts_total[30m]) > 5
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} restarted >5x in 30m"
+          - alert: AEP5xx
+            expr: sum(rate(aep_control_service_http_requests_total{status=~"5.."}[5m])) > 0.2
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "AEP control-service 5xx rate above 0.2/s for 10m"
+---
+# Alert evaluator: forwards the current firing set from Prometheus to a
+# webhook every 2 minutes. ALERT_WEBHOOK_URL is a placeholder for now — while
+# unset, firing alerts are printed to the pod log (kubectl logs) and nothing
+# is pushed. Set the secret key to a WeCom group-robot URL to enable push
+# (note: re-applying this file would reset it; set it live, not in git).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-evaluator-script
+  namespace: monitoring
+data:
+  evaluate.py: |
+    """Forward firing Prometheus alerts to the configured webhook."""
+    import json, os, sys, urllib.request
+
+    PROM = os.environ.get("PROM_URL", "http://prometheus.monitoring.svc.cluster.local:9090")
+    HOOK = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+
+    alerts = json.load(urllib.request.urlopen(PROM + "/api/v1/alerts", timeout=15)).get("data", {}).get("alerts", [])
+    firing = [a for a in alerts if a.get("state") == "firing"]
+    if not firing:
+        print("OK: no firing alerts")
+        sys.exit(0)
+
+    lines = []
+    for a in firing:
+        lb = a.get("labels", {})
+        lines.append("[{}] {}: {}".format(lb.get("severity", "?"), lb.get("alertname", "?"),
+                                          a.get("annotations", {}).get("summary", "")))
+    print("FIRING {}:".format(len(firing)))
+    for line in lines:
+        print("  " + line)
+
+    if not HOOK:
+        print("ALERT_WEBHOOK_URL unset: log-only (placeholder)")
+        sys.exit(0)
+    body = json.dumps({"msgtype": "text", "text": {"content": "知远平台告警\n" + "\n".join(lines)}}).encode()
+    req = urllib.request.Request(HOOK, data=body, headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+    print("pushed {} alerts".format(len(firing)))
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alert-webhook
+  namespace: monitoring
+type: Opaque
+stringData:
+  url: ""  # placeholder: set a WeCom group-robot webhook URL to enable push
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alert-evaluator
+  namespace: monitoring
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: evaluator
+              image: 172.18.5.251:8081/zhiyuan/python:3.12-slim-bookworm
+              command: ["python3", "/script/evaluate.py"]
+              env:
+                - name: ALERT_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef: {name: alert-webhook, key: url, optional: true}
+              volumeMounts:
+                - {name: script, mountPath: /script}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {memory: 64Mi}
+          volumes:
+            - name: script
+              configMap: {name: alert-evaluator-script}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -245,19 +411,29 @@ data:
           "targets": [{"expr": "sum(deerflow_conversations_active)"}]
         },
         {
-          "id": 2, "title": "Messages Total",
+          "id": 2, "title": "Runtime Instances",
           "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
-          "targets": [{"expr": "sum(deerflow_messages_total)"}]
+          "targets": [{"expr": "count(deerflow_process_info)"}]
         },
         {
-          "id": 3, "title": "Model Calls (5m)",
+          "id": 3, "title": "AEP HTTP Requests (5m, by status)",
           "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-          "targets": [{"expr": "sum(rate(deerflow_model_calls_total[5m])) by (model)"}]
+          "targets": [{"expr": "sum(rate(aep_control_service_http_requests_total[5m])) by (status)"}]
         },
         {
-          "id": 4, "title": "Node Memory",
+          "id": 4, "title": "AEP HTTP p95 Latency",
           "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(aep_control_service_http_request_duration_seconds_bucket[5m])) by (le))"}]
+        },
+        {
+          "id": 5, "title": "Node Memory",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
           "targets": [{"expr": "100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)"}]
+        },
+        {
+          "id": 6, "title": "Node Disk Free (/)",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+          "targets": [{"expr": "node_filesystem_avail_bytes{mountpoint=\"/\"} / 1024 / 1024 / 1024"}]
         }
       ]
     }
