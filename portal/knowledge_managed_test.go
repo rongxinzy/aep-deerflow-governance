@@ -44,7 +44,7 @@ func TestManagedKnowledgeFileUploadUsesOnlyFileAndAuditsDocumentID(t *testing.T)
 				t.Errorf("file field: %v", err)
 				return
 			}
-			defer file.Close()
+			defer func() { _ = file.Close() }()
 			data, _ := io.ReadAll(file)
 			uploaded = string(data)
 			_, _ = w.Write([]byte(`{"data":{"id":"doc-1","knowledge_base_id":"kb-1","file_name":"note.txt","parse_status":"pending"}}`))

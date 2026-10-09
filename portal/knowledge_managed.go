@@ -147,7 +147,7 @@ func (p *portal) managedTenant(ctx context.Context, key string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("tenant verification rejected")
 	}
@@ -170,7 +170,7 @@ func (p *portal) managedTenant(ctx context.Context, key string) (string, error) 
 }
 
 func decodeManagedData(resp *http.Response, out any) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
@@ -326,7 +326,7 @@ func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Requ
 		p.managedWriteError(w, 500, "REGISTRY_UNAVAILABLE", "知识库目录暂不可用", "")
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make([]managedKB, 0)
 	for rows.Next() {
 		var kb managedKB
@@ -543,12 +543,12 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		status := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		_ = p.finishManagedAudit(r.Context(), op, id, "failed", status)
 		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝删除知识库", "")
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if err := p.finishManagedAudit(r.Context(), op, id, "succeeded", 200); err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已删除但审计结果更新失败", op)
 		return
@@ -580,7 +580,7 @@ func (p *portal) managedKnowledgeReferenced(ctx context.Context, id string) (boo
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
@@ -696,7 +696,7 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		p.managedWriteError(w, 400, "INVALID_UPLOAD", "必须提供 file 文件字段", "")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	part, err := mw.CreateFormFile("file", header.Filename)
