@@ -355,9 +355,9 @@ func TestApplyNoteHandling(t *testing.T) {
 	})
 
 	t.Run("a parked request's spec_json carries the note to the approved CR", func(t *testing.T) {
-		h := newAPIHarness(t)
+		h := newApplyHarness(t)
 		rows := sqlmock.NewRows([]string{"employee_name", "spec_json"}).
-			AddRow("note-helper", `{"metadata":{"name":"note-helper","namespace":"digital-employees","annotations":{"digitalemployee.zhiyuan.io/apply-note":"仅使用销售团队可见资料。"}},"spec":{"owner":"user-1"}}`)
+			AddRow("note-helper", `{"metadata":{"name":"note-helper","namespace":"digital-employees","annotations":{"digitalemployee.zhiyuan.io/apply-note":"仅使用销售团队可见资料。"}},"spec":{"owner":"u-owner","team":"sales-dept","governance":{"deploymentID":"deployment-acme"}}}`)
 		h.dbmock.ExpectQuery(`SELECT employee_name, spec_json FROM requests`).WithArgs("req-note").WillReturnRows(rows)
 		h.dbmock.ExpectExec(`UPDATE requests SET state=`).WillReturnResult(sqlmock.NewResult(0, 1))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/requests/req-note/approve", nil)

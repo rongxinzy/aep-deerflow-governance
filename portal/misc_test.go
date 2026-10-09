@@ -129,9 +129,9 @@ func TestSessionLoginFlow(t *testing.T) {
 }
 
 func TestDecideRequestApprovesAndCreates(t *testing.T) {
-	h := newAPIHarness(t)
+	h := newApplyHarness(t)
 	rows := sqlmock.NewRows([]string{"employee_name", "spec_json"}).
-		AddRow("parked-helper", `{"metadata":{"name":"parked-helper","namespace":"digital-employees"},"spec":{"displayName":"助手"}}`)
+		AddRow("parked-helper", `{"metadata":{"name":"parked-helper","namespace":"digital-employees"},"spec":{"displayName":"助手","team":"sales-dept","owner":"u-owner","governance":{"deploymentID":"deployment-acme"}}}`)
 	h.dbmock.ExpectQuery(`SELECT employee_name, spec_json FROM requests`).WithArgs("req-9").WillReturnRows(rows)
 	h.dbmock.ExpectExec(`UPDATE requests SET state=`).WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -143,6 +143,8 @@ func TestDecideRequestApprovesAndCreates(t *testing.T) {
 	var item dev1alpha1.DigitalEmployee
 	require.NoError(t, h.k8s.Get(t.Context(), objectKey("parked-helper"), &item))
 	assert.Equal(t, "助手", item.Spec.DisplayName)
+	assert.Equal(t, "示例企业", item.Spec.Governance.DeploymentName)
+	assert.Equal(t, "销售部", item.Spec.TeamName)
 }
 
 func TestKnowledgeUIURLDerivation(t *testing.T) {
