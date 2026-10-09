@@ -1,3 +1,5 @@
+# 已产品化：charts/zhiyuan-stack/templates/observability-monitoring.yaml
+# （observability.enabled=true 即得全套）。本文件保留为 cicd 参考实例/收编源。
 # Monitoring stack: Prometheus + Grafana + node-exporter.
 # Deployed without the prometheus-operator to keep the image footprint
 # small and avoid registry.k8s.io (unreachable from this network).
