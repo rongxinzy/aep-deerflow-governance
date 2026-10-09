@@ -60,6 +60,10 @@ aepStack:
   # .svc.cluster.local / 单标签名）会让控制面 CrashLoop。cicd 用节点
   # IP:30181（authorizer NodePort），见 values-cicd.example.yaml。
   modelGatewayBaseUrl: "<client-reachable-model-gateway-url>"
+  # 模型健康状态迁移的推送 webhook（企微群机器人 text 格式；AEP 侧
+  # AEP_MODEL_HEALTH_WEBHOOK，仅状态变化时推送一次）。空 = 仅落库/审计/UI
+  # （与旧行为一致）。真实 URL 属凭据：只放 values-<env>.local.yaml。
+  modelHealthWebhook: ""
   gatewayUpstreamUrl: "http://higress-gateway.higress-system.svc.cluster.local:80"
   gatewayRequireEntitlement: "false"
   reconcilerInterval: 15s
