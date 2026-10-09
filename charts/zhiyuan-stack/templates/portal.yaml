@@ -17,6 +17,8 @@ spec:
         - name: portal
           image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.portal.repository "tag" .Values.images.portal.tag) }}
           env:
+            - {name: PORTAL_AEP_BASE_URL, value: {{ .Values.aep.baseURL | quote }}}
+            - {name: PORTAL_AEP_DEPLOYMENT_ID, value: {{ .Values.aep.deploymentID | quote }}}
             - {name: PORTAL_POLICY_MODE, value: {{ .Values.portal.policyMode | quote }}}
             - {name: PORTAL_QUOTA_PER_USER, value: {{ .Values.portal.quotaPerUser | quote }}}
             - {name: PORTAL_ADMIN_USERS, value: {{ .Values.portal.adminUsers | quote }}}

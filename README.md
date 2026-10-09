@@ -3,7 +3,10 @@
 AEP 数字员工治理层 —— DeerFlow 运行时上的身份、数据范围与工具强制中间件，以及 k3s/K8s 部署清单。
 
 DeerFlow 是执行引擎，治理（企业身份、按请求者数据范围、fail-closed 语义）由本包以
-DeerFlow 官方 `extensions.middlewares` 扩展点注入，**不改 DeerFlow 源码**。迁移自
+DeerFlow 官方 `extensions.middlewares` 扩展点注入。数字员工自称使用 fork 的
+`lead_identity` 配置接口：operator 将 CR 中的企业实例、员工、部门和负责人快照写入
+运行配置，fork 把这些可由业务用户影响的标签作为 user-role 数据提供给模型，而非
+作为权限依据或原样拼入 system prompt。迁移自
 picoclaw 时代的 aepgate 资产（语义 1:1：活查、缓存、fail-closed、结构性拒绝）。
 
 ## 组件
@@ -32,6 +35,16 @@ subagent 两条中间件链同时生效。
 fail-closed；受管工具（`governed_tools`）调用范围外部门**不执行**，返回显式拒绝。
 
 ## 配置（config.yaml）
+
+Portal 创建或更新员工时从 AEP 认证方式目录校验 deployment ID/名称；部门名称来自已校验
+的团队目录，归属人名称来自已校验的用户目录。`spec.governance.deploymentID`
+与 Portal 登录使用的 `PORTAL_AEP_DEPLOYMENT_ID` 保持一致。组织、部门或归属人
+改名后，需通过 Portal 重新提交该员工的 `team` 或 `owner` 字段以刷新对应的
+显示名称快照。运行时权限仍由
+AEP 治理中间件按调用者身份实时判定。
+
+发布顺序：先发布支持 `lead_identity` 的 deer-flow fork 运行镜像及更新后的 CRD，
+再发布 operator/Portal；旧镜像不会按新配置改变默认角色。
 
 ```yaml
 extensions:

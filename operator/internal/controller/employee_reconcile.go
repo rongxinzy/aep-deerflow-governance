@@ -263,9 +263,19 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		models = append(models, renderModelEntry(route))
 	}
 	config := map[string]any{
-		"config_version": 46,
+		"config_version": 51,
 		"log_level":      "info",
-		"models":         models,
+		"lead_identity": map[string]any{
+			"deployment_id":   spec.Governance.DeploymentID,
+			"deployment_name": spec.Governance.DeploymentName,
+			"employee_name":   spec.DisplayName,
+			"purpose":         spec.Description,
+			"team_id":         spec.Team,
+			"team_name":       spec.TeamName,
+			"owner_id":        spec.Owner,
+			"owner_name":      spec.OwnerName,
+		},
+		"models": models,
 		"sandbox": map[string]any{
 			"use":             "deerflow.sandbox.local:LocalSandboxProvider",
 			"allow_host_bash": false,

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -200,10 +201,18 @@ func TestDatabaseConfigBackends(t *testing.T) {
 
 func TestRenderConfigVariants(t *testing.T) {
 	employee := fullEmployee()
+	employee.Spec.Governance.DeploymentName = "示例企业"
+	employee.Spec.TeamName = "研发部"
 	employee.Spec.NodePort = 30300
 	cfg := renderConfig(employee, conversationURLKey(employee))
 	assert.Contains(t, cfg, "ChatAnthropic")
 	assert.Contains(t, cfg, "AepGovernanceMiddleware")
+	var decoded map[string]any
+	assert.NoError(t, json.Unmarshal([]byte(cfg), &decoded))
+	identity := decoded["lead_identity"].(map[string]any)
+	assert.Equal(t, "示例企业", identity["deployment_name"])
+	assert.Equal(t, "研发部", identity["team_name"])
+	assert.Equal(t, "用户一", identity["owner_name"])
 
 	rendered, err := (&DigitalEmployeeReconciler{}).renderDeployment(employee, "checksum-for-test")
 	assert.NoError(t, err)

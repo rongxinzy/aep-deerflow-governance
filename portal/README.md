@@ -27,6 +27,12 @@ operator 之外唯一的 DigitalEmployee CR 写入口。终端用户持 AEP toke
 - **owner 落 CR spec**（spec.owner = AEP user id）：配额、列表隔离、删除权限都
   以它为准；governance.defaultAEPUser 同步设为 owner——员工默认以属主的
   数据范围行事。
+- **内置身份快照**：创建/更新时用 AEP `/aep/v1/auth/methods` 核对部署实例 ID 和名称，
+  部门与归属人名称取已验证的 AEP 目录记录；这些名称供对话中自我介绍，
+  不参与授权。实例 ID 不一致时拒绝发布。目录改名后重新提交员工的 `team`
+  或 `owner` 字段刷新相应快照。
+- **审批时重查**：待审批申请落地前重新核对 AEP 实例、部门和负责人，避免
+  使用申请时已过期的显示名称或已停用的负责人。
 - **审批状态机**存 Postgres（deportal 库，requests 表）；spec_json 保存申请时
   渲染的完整 CR，审批通过原样落 CR。
 - **教训**：operator 的 typed 客户端读 CR 时丢弃其结构体没有的字段，任何
