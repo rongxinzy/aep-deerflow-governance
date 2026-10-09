@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -202,11 +203,14 @@ func (p *portal) platformSecretKeyOrEmpty(ctx context.Context, key string) strin
 // platform secret. For the private-deployment single-instance model this
 // is acceptable; a dedicated service account replaces it in public mode.
 var adminTokenCache struct {
+	mu      sync.Mutex
 	token   string
 	expires time.Time
 }
 
 func (p *portal) adminToken(ctx context.Context) string {
+	adminTokenCache.mu.Lock()
+	defer adminTokenCache.mu.Unlock()
 	if adminTokenCache.token != "" && time.Now().Before(adminTokenCache.expires) {
 		return adminTokenCache.token
 	}
@@ -237,7 +241,12 @@ func (p *portal) adminToken(ctx context.Context) string {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 	adminTokenCache.token = result.AccessToken
-	adminTokenCache.expires = time.Now().Add(20 * time.Minute)
+	// Stay comfortably below the AEP access-token lifetime (AEP_ACCESS_TTL,
+	// default 15 minutes): a longer cache reuses a token the control plane
+	// has already expired and every consumer 401s until the cache expires
+	// (observed live: a five-minute outage window per cycle on the failover
+	// watcher). Re-login is cheap and the mutex serializes it.
+	adminTokenCache.expires = time.Now().Add(10 * time.Minute)
 	return result.AccessToken
 }
 

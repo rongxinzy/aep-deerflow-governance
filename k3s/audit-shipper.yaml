@@ -95,6 +95,7 @@ data:
                 "display_name": e.get("displayName"),
                 "phase": e.get("phase"),
                 "model": e.get("model"),
+                "model_failover": e.get("modelFailover"),
                 "runtime_account": e.get("runtimeAccount"),
                 "wecom": (e.get("channels") or {}).get("wecom", False),
                 "shipped_at": now,
@@ -104,7 +105,7 @@ data:
 
     # 4. Portal requests (approval workflow audit trail)
     try:
-        reqs = api(PORTAL, "GET", "/api/v1/employees/requests?limit=100", token)
+        reqs = api(PORTAL, "GET", "/api/v1/requests?limit=100", token)
         for r in (reqs.get("requests") or []):
             docs.append({
                 "@timestamp": r.get("createdAt", now),
@@ -118,6 +119,37 @@ data:
             })
     except Exception as e:
         print(f"WARN: portal requests: {e}", file=sys.stderr)
+
+    # 5. Model health snapshot (probe verdicts). A model going unhealthy is the
+    # failure the failover chain reacts to — keep the evidence in the audit
+    # trail, not only in probe logs.
+    try:
+        cursor = ""
+        pages = 0
+        while True:
+            path = "/aep/v1/admin/models?limit=100" + (f"&cursor={cursor}" if cursor else "")
+            catalog = api(AEP, "GET", path, token)
+            for m in (catalog.get("models") or []):
+                docs.append({
+                    "@timestamp": now,
+                    "audit_type": "model_health_snapshot",
+                    "model_id": m.get("id"),
+                    "display_name": m.get("displayName"),
+                    "source_type": m.get("sourceType"),
+                    "protocol": m.get("protocol"),
+                    "enabled": m.get("enabled"),
+                    "health_status": m.get("healthStatus"),
+                    "health_checked_at": m.get("healthCheckedAt"),
+                    "health_since": m.get("healthSince"),
+                    "health_detail": m.get("healthDetail"),
+                    "shipped_at": now,
+                })
+            cursor = catalog.get("nextCursor") or ""
+            pages += 1
+            if not cursor or pages >= 50:
+                break
+    except Exception as e:
+        print(f"WARN: model health: {e}", file=sys.stderr)
 
     indexed = es_bulk(docs)
     print(f"OK: {indexed}/{len(docs)} audit docs indexed")

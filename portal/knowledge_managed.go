@@ -66,11 +66,12 @@ type managedModel struct {
 }
 
 type managedKnowledge struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	FileName    string `json:"file_name"`
-	ParseStatus string `json:"parse_status"`
-	CreatedAt   string `json:"created_at"`
+	ID              string `json:"id"`
+	KnowledgeBaseID string `json:"knowledge_base_id"`
+	Name            string `json:"name"`
+	FileName        string `json:"file_name"`
+	ParseStatus     string `json:"parse_status"`
+	CreatedAt       string `json:"created_at"`
 }
 
 type managedError struct {
@@ -78,6 +79,7 @@ type managedError struct {
 		Code        string `json:"code"`
 		Message     string `json:"message"`
 		OperationID string `json:"operationId,omitempty"`
+		ResourceID  string `json:"resourceId,omitempty"`
 	} `json:"error"`
 }
 
@@ -91,16 +93,23 @@ func (p *portal) managedWriteError(w http.ResponseWriter, status int, code, mess
 	writeJSON(w, status, body)
 }
 
+func (p *portal) managedWriteErrorResource(w http.ResponseWriter, status int, code, message, op, resourceID string) {
+	body := managedError{}
+	body.Error.Code, body.Error.Message = code, message
+	body.Error.OperationID, body.Error.ResourceID = op, resourceID
+	writeJSON(w, status, body)
+}
+
 func (p *portal) managedContext(w http.ResponseWriter, r *http.Request, ident identity) (string, string, bool) {
 	if !p.managedReadyIdentity(ident) {
 		p.managedWriteError(w, http.StatusForbidden, "DEPLOYMENT_MISMATCH", "会话部署与当前服务不匹配", "")
 		return "", "", false
 	}
-	if p.cfg.knowledgeTenantID == "" || p.cfg.knowledgeAPIKeySecretField == "" {
+	if p.cfg.managedKnowledge.tenantID == "" || p.cfg.managedKnowledge.apiKeySecretField == "" {
 		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_NOT_CONFIGURED", "知识库服务尚未完成租户和凭据配置", "")
 		return "", "", false
 	}
-	key, err := p.platformSecretKey(r.Context(), p.cfg.knowledgeAPIKeySecretField)
+	key, err := p.platformSecretKey(r.Context(), p.cfg.managedKnowledge.apiKeySecretField)
 	if err != nil || strings.TrimSpace(key) == "" {
 		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_CREDENTIAL_UNAVAILABLE", "知识库服务凭据不可用", "")
 		return "", "", false
@@ -110,7 +119,7 @@ func (p *portal) managedContext(w http.ResponseWriter, r *http.Request, ident id
 		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "无法验证知识库服务租户", "")
 		return "", "", false
 	}
-	if tenant != p.cfg.knowledgeTenantID {
+	if tenant != p.cfg.managedKnowledge.tenantID {
 		p.managedWriteError(w, http.StatusForbidden, "KNOWLEDGE_TENANT_MISMATCH", "知识库服务租户与配置不匹配", "")
 		return "", "", false
 	}
@@ -218,9 +227,9 @@ func safeKnowledgeID(id string) (string, bool) {
 	return id, true
 }
 
-func (p *portal) beginManagedAudit(ctx context.Context, ident identity, tenant, action, resourceType string) (string, error) {
+func (p *portal) beginManagedAudit(ctx context.Context, ident identity, tenant, action, resourceType, resourceID, parentResourceID string) (string, error) {
 	op := fmt.Sprintf("kbop-%d", time.Now().UnixNano())
-	_, err := p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,'','pending',0)`, op, ident.DeploymentID, tenant, ident.UserID, action, resourceType)
+	_, err := p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0)`, op, ident.DeploymentID, tenant, ident.UserID, action, resourceType, resourceID, parentResourceID)
 	return op, err
 }
 
@@ -237,6 +246,42 @@ func (p *portal) finishManagedAudit(ctx context.Context, op, resourceID, outcome
 		return errors.New("audit intent missing")
 	}
 	return nil
+}
+
+func (p *portal) rememberManagedAuditResource(ctx context.Context, op, resourceID string) error {
+	result, err := p.db.ExecContext(ctx, `UPDATE knowledge_audit_events SET resource_id=$2 WHERE operation_id=$1`, op, resourceID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return errors.New("audit intent missing")
+	}
+	return nil
+}
+
+func (p *portal) registerCreatedManagedBase(ctx context.Context, ident identity, tenant string, kb managedKB, op string) error {
+	// Persist the upstream ID first so a later transaction failure is still
+	// recoverable from the pending audit intent, then atomically commit the
+	// registry row and successful audit outcome.
+	if err := p.rememberManagedAuditResource(ctx, op, kb.ID); err != nil {
+		return err
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_audit_events SET outcome='succeeded',status_code=201 WHERE operation_id=$1`, op); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge_base_registry (deployment_id,weknora_tenant_id,knowledge_base_id,name_snapshot,created_by) VALUES ($1,$2,$3,$4,$5)`, ident.DeploymentID, tenant, kb.ID, kb.Name, ident.UserID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (p *portal) handleManagedKnowledgeReadiness(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -256,19 +301,19 @@ func (p *portal) handleManagedKnowledgeReadiness(w http.ResponseWriter, r *http.
 	}
 	var selected *managedModel
 	for i := range models {
-		if models[i].ID == p.cfg.knowledgeEmbeddingModelID && strings.EqualFold(models[i].Type, "embedding") {
+		if models[i].ID == p.cfg.managedKnowledge.embeddingModelID && strings.EqualFold(models[i].Type, "embedding") {
 			selected = &models[i]
 			break
 		}
 	}
 	modelState := "not_configured"
-	if p.cfg.knowledgeEmbeddingModelID != "" {
+	if p.cfg.managedKnowledge.embeddingModelID != "" {
 		modelState = "unavailable"
 		if selected != nil {
-			modelState = "ready"
+			modelState = "configured"
 		}
 	}
-	writeJSON(w, 200, map[string]any{"deploymentId": ident.DeploymentID, "tenantId": tenant, "tenant": "verified", "embeddingModel": map[string]any{"state": modelState, "id": p.cfg.knowledgeEmbeddingModelID}, "storage": "unverified", "parser": "unverified"})
+	writeJSON(w, 200, map[string]any{"deploymentId": ident.DeploymentID, "tenantId": tenant, "tenant": "verified", "embeddingModel": map[string]any{"state": modelState, "id": p.cfg.managedKnowledge.embeddingModelID, "availability": "unverified"}, "storage": "unverified", "parser": "unverified"})
 }
 
 func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -348,7 +393,7 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	if p.cfg.knowledgeEmbeddingModelID == "" {
+	if p.cfg.managedKnowledge.embeddingModelID == "" {
 		p.managedWriteError(w, 422, "KNOWLEDGE_MODEL_UNAVAILABLE", "尚未配置可用的 Embedding 模型", "")
 		return
 	}
@@ -364,7 +409,7 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 	}
 	valid := false
 	for _, m := range models {
-		if m.ID == p.cfg.knowledgeEmbeddingModelID && strings.EqualFold(m.Type, "embedding") {
+		if m.ID == p.cfg.managedKnowledge.embeddingModelID && strings.EqualFold(m.Type, "embedding") {
 			valid = true
 			break
 		}
@@ -373,31 +418,27 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 		p.managedWriteError(w, 422, "KNOWLEDGE_MODEL_UNAVAILABLE", "配置的 Embedding 模型不存在或类型不匹配", "")
 		return
 	}
-	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "create", "knowledge-base")
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "create", "knowledge-base", "", "")
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未创建知识库", "")
 		return
 	}
-	input := map[string]any{"name": strings.TrimSpace(in.Name), "description": strings.TrimSpace(in.Description), "type": "document", "embedding_model_id": p.cfg.knowledgeEmbeddingModelID, "chunking_config": map[string]any{"chunk_size": 512, "chunk_overlap": 0, "separators": []string{"\n"}, "enable_multimodal": false}, "question_generation_config": map[string]any{"enabled": false}}
+	input := map[string]any{"name": strings.TrimSpace(in.Name), "description": strings.TrimSpace(in.Description), "type": "document", "embedding_model_id": p.cfg.managedKnowledge.embeddingModelID, "chunking_config": map[string]any{"chunk_size": 512, "chunk_overlap": 0, "separators": []string{"\n"}, "enable_multimodal": false}, "question_generation_config": map[string]any{"enabled": false}}
 	payload, _ := json.Marshal(input)
 	resp, err := p.managedRequest(r.Context(), key, http.MethodPost, "knowledge-bases", nil, bytes.NewReader(payload), "application/json")
 	if err != nil {
-		_ = p.finishManagedAudit(r.Context(), op, "", "failed", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "创建知识库失败", "")
+		_ = p.finishManagedAudit(r.Context(), op, "", "uncertain", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "创建结果不确定，请使用操作编号核对", op)
 		return
 	}
 	var created managedKB
 	if decodeManagedData(resp, &created) != nil || created.ID == "" || created.TenantID != tenant || created.Name != strings.TrimSpace(in.Name) {
 		_ = p.finishManagedAudit(r.Context(), op, created.ID, "unverified", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游创建结果无法安全验证", "")
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游创建结果无法安全验证，请使用操作编号核对", op)
 		return
 	}
-	if err := p.finishManagedAudit(r.Context(), op, created.ID, "succeeded", 201); err != nil {
-		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已创建但审计结果更新失败，请联系管理员并提供操作编号", op)
-		return
-	}
-	if _, err = p.db.ExecContext(r.Context(), `INSERT INTO knowledge_base_registry (deployment_id,weknora_tenant_id,knowledge_base_id,name_snapshot,created_by) VALUES ($1,$2,$3,$4,$5)`, ident.DeploymentID, tenant, created.ID, created.Name, ident.UserID); err != nil {
-		p.managedWriteError(w, 503, "REGISTRY_WRITE_FAILED", "知识库已创建但登记失败，请联系管理员并提供操作编号", op)
+	if err := p.registerCreatedManagedBase(r.Context(), ident, tenant, created, op); err != nil {
+		p.managedWriteErrorResource(w, 503, "REGISTRY_WRITE_FAILED", "知识库已创建但登记失败，请使用操作编号与资源编号核对", op, created.ID)
 		return
 	}
 	writeJSON(w, 201, map[string]any{"data": created, "operationId": op})
@@ -441,7 +482,7 @@ func (p *portal) handleManagedKnowledgeUpdateBase(w http.ResponseWriter, r *http
 	if in.Description != nil {
 		kb.Description = strings.TrimSpace(*in.Description)
 	}
-	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "update", "knowledge-base")
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "update", "knowledge-base", id, "")
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未更新知识库", "")
 		return
@@ -449,8 +490,8 @@ func (p *portal) handleManagedKnowledgeUpdateBase(w http.ResponseWriter, r *http
 	payload, _ := json.Marshal(map[string]any{"name": kb.Name, "description": kb.Description})
 	resp, err := p.managedRequest(r.Context(), key, http.MethodPut, "knowledge-bases/"+url.PathEscape(id), nil, bytes.NewReader(payload), "application/json")
 	if err != nil {
-		_ = p.finishManagedAudit(r.Context(), op, id, "failed", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "更新知识库失败", "")
+		_ = p.finishManagedAudit(r.Context(), op, id, "uncertain", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "更新结果不确定，请使用操作编号核对", op)
 		return
 	}
 	var updated managedKB
@@ -460,10 +501,13 @@ func (p *portal) handleManagedKnowledgeUpdateBase(w http.ResponseWriter, r *http
 		return
 	}
 	if err := p.finishManagedAudit(r.Context(), op, id, "succeeded", 200); err != nil {
-		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已更新但审计写入失败", "")
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已更新但审计结果更新失败", op)
 		return
 	}
-	_, _ = p.db.ExecContext(r.Context(), `UPDATE knowledge_base_registry SET name_snapshot=$4,updated_at=now() WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, id, updated.Name)
+	if _, err := p.db.ExecContext(r.Context(), `UPDATE knowledge_base_registry SET name_snapshot=$4,updated_at=now() WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, id, updated.Name); err != nil {
+		p.managedWriteError(w, 503, "REGISTRY_WRITE_FAILED", "知识库已更新但目录未同步，请使用操作编号核对", op)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"data": updated, "operationId": op})
 }
 
@@ -486,15 +530,15 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 		p.managedWriteError(w, 409, "KNOWLEDGE_BASE_IN_USE", "该知识库仍被数字员工或待审批请求关联", "")
 		return
 	}
-	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "delete", "knowledge-base")
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "delete", "knowledge-base", id, "")
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未删除知识库", "")
 		return
 	}
 	resp, err := p.managedRequest(r.Context(), key, http.MethodDelete, "knowledge-bases/"+url.PathEscape(id), nil, nil, "")
 	if err != nil {
-		_ = p.finishManagedAudit(r.Context(), op, id, "failed", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "删除知识库失败", "")
+		_ = p.finishManagedAudit(r.Context(), op, id, "uncertain", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "删除结果不确定，请使用操作编号核对", op)
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -506,7 +550,7 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 	}
 	resp.Body.Close()
 	if err := p.finishManagedAudit(r.Context(), op, id, "succeeded", 200); err != nil {
-		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已删除但审计写入失败", "")
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "知识库已删除但审计结果更新失败", op)
 		return
 	}
 	_, err = p.db.ExecContext(r.Context(), `DELETE FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, id)
@@ -588,6 +632,13 @@ func (p *portal) handleManagedKnowledgeDocuments(w http.ResponseWriter, r *http.
 		p.managedWriteError(w, 400, "INVALID_QUERY", "分页参数无效", "")
 		return
 	}
+	if page := q.Get("page"); page != "" {
+		n, _ := strconv.Atoi(page)
+		if n < 1 {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "页码必须大于等于 1", "")
+			return
+		}
+	}
 	if pageSize := q.Get("page_size"); pageSize != "" {
 		n, err := strconv.Atoi(pageSize)
 		if err != nil || n < 1 || n > 200 {
@@ -611,6 +662,12 @@ func (p *portal) handleManagedKnowledgeDocuments(w http.ResponseWriter, r *http.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || decodeErr != nil {
 		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文档列表读取失败", "")
 		return
+	}
+	for _, document := range page.Data {
+		if document.ID == "" || document.KnowledgeBaseID != id {
+			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "文档列表包含不属于当前知识库的项目", "")
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]any{"data": page.Data, "total": page.Total, "page": page.Page, "pageSize": page.PageSize})
 }
@@ -652,25 +709,25 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	_ = mw.Close()
-	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "upload_file", "document")
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "upload_file", "document", "", id)
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未上传文件", "")
 		return
 	}
 	resp, err := p.managedRequest(r.Context(), key, http.MethodPost, "knowledge-bases/"+url.PathEscape(id)+"/knowledge/file", nil, &body, mw.FormDataContentType())
 	if err != nil {
-		_ = p.finishManagedAudit(r.Context(), op, "", "failed", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传失败", "")
+		_ = p.finishManagedAudit(r.Context(), op, "", "uncertain", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传结果不确定，请使用操作编号核对", op)
 		return
 	}
 	var result managedKnowledge
-	if decodeManagedData(resp, &result) != nil {
+	if decodeManagedData(resp, &result) != nil || result.ID == "" || result.KnowledgeBaseID != id {
 		_ = p.finishManagedAudit(r.Context(), op, "", "unverified", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传失败", "")
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传结果无法验证，请使用操作编号核对", op)
 		return
 	}
 	if err := p.finishManagedAudit(r.Context(), op, result.ID, "accepted", 202); err != nil {
-		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "文件已提交但审计结果更新失败", op)
+		p.managedWriteErrorResource(w, 503, "AUDIT_UNAVAILABLE", "文件已提交但审计结果更新失败", op, result.ID)
 		return
 	}
 	writeJSON(w, 202, map[string]any{"data": result, "operationId": op})

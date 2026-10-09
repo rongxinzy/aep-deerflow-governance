@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
@@ -218,4 +219,41 @@ func TestDepartmentOrchestration(t *testing.T) {
 		h.enrichTeams(context.Background(), &ident)
 		assert.Equal(t, []string{"rd-dept"}, ident.Teams)
 	})
+}
+
+func TestAdminTokenCacheTTLBelowAccessTokenLifetime(t *testing.T) {
+	stubs := newDepartmentStubs(t)
+	h := newDepartmentHarness(t, stubs)
+
+	// adminTokenCache is package-global; clear it before and after so this
+	// test is hermetic and cannot hand a stale token to other tests.
+	resetCache := func() {
+		adminTokenCache.mu.Lock()
+		defer adminTokenCache.mu.Unlock()
+		adminTokenCache.token = ""
+		adminTokenCache.expires = time.Time{}
+	}
+	resetCache()
+	t.Cleanup(resetCache)
+
+	ctx := context.Background()
+	before := stubs.aepCalls
+	token := h.adminToken(ctx)
+	require.Equal(t, "admin-token", token)
+	require.Equal(t, before+1, stubs.aepCalls, "first call must log in")
+
+	adminTokenCache.mu.Lock()
+	remaining := time.Until(adminTokenCache.expires)
+	adminTokenCache.mu.Unlock()
+	// The cached lifetime must stay below the AEP access-token lifetime
+	// (AEP_ACCESS_TTL, default 15m); anything at or above it reuses a token
+	// the control plane has already expired. The upper bound distinguishes
+	// the fixed 10m TTL from the previous 20m one.
+	assert.LessOrEqual(t, remaining, 11*time.Minute, "cache TTL must stay below the 15m token lifetime")
+	assert.Greater(t, remaining, 9*time.Minute, "cache TTL must not collapse roughly to zero")
+
+	// A second call inside the TTL must reuse the cached token without a login.
+	again := h.adminToken(ctx)
+	assert.Equal(t, "admin-token", again)
+	assert.Equal(t, before+1, stubs.aepCalls, "second call within the TTL must not re-login")
 }
