@@ -322,6 +322,11 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 				_, _ = w.Write([]byte(`{"id":"u-off","username":"off","displayName":"停用者","status":"disabled","kind":"human"}`))
 			case "u-agent":
 				_, _ = w.Write([]byte(`{"id":"u-agent","username":"bot","displayName":"机器人","status":"active","kind":"agent"}`))
+			case "u-no-display":
+				_, _ = w.Write([]byte(`{"id":"u-no-display","username":"account-name","status":"active","kind":"human"}`))
+			case "boom":
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"upstream down"}`))
 			default:
 				http.NotFound(w, r)
 			}
