@@ -115,6 +115,23 @@ def create_oci_archive(path, arch="amd64"):
 
 
 class VerifySourceTests(unittest.TestCase):
+    def test_windows_checkout_conversion_does_not_hide_real_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            update.run(["git", "init", str(repo)])
+            update.git(repo, "config", "user.name", "Updater test")
+            update.git(repo, "config", "user.email", "updater@example.invalid")
+            tracked = repo / "tracked.txt"
+            tracked.write_bytes(b"original\r\n")
+            update.git(repo, "add", "tracked.txt")
+            update.git(repo, "commit", "-m", "test fixture")
+            self.assertEqual("", update.git(repo, "status", "--porcelain"))
+            tracked.write_bytes(b"changed\r\n")
+            self.assertIn("tracked.txt", update.git(repo, "status", "--porcelain"))
+            tracked.write_bytes(b"original\r\n")
+            (repo / "untracked.txt").write_text("untracked", encoding="utf-8")
+            self.assertIn("?? untracked.txt", update.git(repo, "status", "--porcelain", "--untracked-files=all"))
+
     def test_rejects_wrong_commit_dirty_tree_and_wrong_branch(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp) / "actual-directory"

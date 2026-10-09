@@ -76,7 +76,10 @@ def git(repo: Path, *args: str) -> str:
     else:
         raise UpdateError("RepositoryPath has no Git metadata")
     return run([
-        "git", "-c", f"safe.directory={repo.resolve()}",
+        # The source is a Windows checkout inspected through WSL. Match the
+        # Windows Git checkout conversion without changing repository/global
+        # configuration; real content edits and untracked files still fail.
+        "git", "-c", f"safe.directory={repo.resolve()}", "-c", "core.autocrlf=true",
         f"--git-dir={git_dir}", f"--work-tree={repo.resolve()}", *args,
     ]).strip()
 
