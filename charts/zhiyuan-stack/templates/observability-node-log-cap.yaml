@@ -1,0 +1,90 @@
+{{- if and .Values.observability.enabled .Values.observability.nodeLogCap.enabled }}
+{{- $obs := .Values.observability }}
+{{- $cap := $obs.nodeLogCap }}
+# 节点日志体积硬上限（DaemonSet 形态，免 ssh）：轮转档案超限即删（logrotate
+# 的 size 只管活跃文件，巨型档案可以无限期驻留——2026-10-08 的 35.6G 僵尸
+# 日志教训），活跃文件超限截留尾部。journald 的 SystemMaxUse 是主机单元，
+# 维持文档化手工步骤（k3s/node-log-cap/README.md）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-log-cap-script
+  namespace: {{ $obs.monitoringNamespace }}
+data:
+  cap.py: |
+    """Cap /var/log volume on the host (productized form of k3s/node-log-cap).
+
+    Rotated archives over ARCHIVE_MAX_MIB are deleted (logrotate's `size`
+    only bounds the live file — a giant archive lingers forever); live files
+    over LIVE_MAX_GIB keep only their newest 100MiB tail.
+    """
+    import glob, os, time
+
+    ARCHIVE_MAX = int(os.environ.get("ARCHIVE_MAX_MIB", "200")) * 2**20
+    LIVE_MAX = int(os.environ.get("LIVE_MAX_GIB", "1")) * 2**30
+    KEEP = 100 * 2**20
+    LIVE = ("syslog", "kern.log", "daemon.log", "auth.log")
+    LOOP = int(os.environ.get("LOOP_SECONDS", "900"))
+
+    def purge():
+        for pattern in ("*.[0-9]", "*.[0-9].gz"):
+            for path in glob.glob("/var/log/" + pattern):
+                try:
+                    if os.path.getsize(path) > ARCHIVE_MAX:
+                        os.remove(path)
+                except OSError:
+                    pass
+
+    def trim_live():
+        for name in LIVE:
+            path = "/var/log/" + name
+            try:
+                if os.path.getsize(path) <= LIVE_MAX:
+                    continue
+                with open(path, "rb") as source:
+                    source.seek(max(0, os.path.getsize(path) - KEEP))
+                    data = source.read()
+                tmp = path + ".trim"
+                with open(tmp, "wb") as target:
+                    target.write(data)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+
+    while True:
+        purge()
+        trim_live()
+        time.sleep(LOOP)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-log-cap
+  namespace: {{ $obs.monitoringNamespace }}
+spec:
+  selector:
+    matchLabels: {app: node-log-cap}
+  template:
+    metadata:
+      labels: {app: node-log-cap}
+    spec:
+      tolerations:
+        - {operator: Exists}
+      containers:
+        - name: cap
+          image: {{ $cap.image.repository }}:{{ $cap.image.tag }}
+          command: ["python3", "/script/cap.py"]
+          env:
+            - {name: LOOP_SECONDS, value: {{ $cap.loopSeconds | quote }}}
+            - {name: ARCHIVE_MAX_MIB, value: {{ $cap.archiveMaxMiB | quote }}}
+            - {name: LIVE_MAX_GIB, value: {{ $cap.liveMaxGiB | quote }}}
+          volumeMounts:
+            - {name: varlog, mountPath: /var/log}
+            - {name: script, mountPath: /script}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 32Mi}
+      volumes:
+        - {name: varlog, hostPath: {path: /var/log}}
+        - {name: script, configMap: {name: node-log-cap-script}}
+{{- end }}

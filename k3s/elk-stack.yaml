@@ -1,3 +1,5 @@
+# 已产品化：charts/zhiyuan-stack/templates/observability-logging.yaml
+# （observability.logging.enabled=true）。本文件保留为 cicd 参考实例/收编源。
 # ELK stack (single-node ES, Kibana, Fluent Bit) for unified zhiyuan log
 # management. Scoped to the zhiyuan namespaces only: files are tailed by
 # namespace-glob path, NOT by a grep on kubernetes metadata (the field

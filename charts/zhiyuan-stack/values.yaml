@@ -215,6 +215,74 @@ memory:
       model: bge-small-zh-v1.5
       dimension: 512
 
+# Observability 底座（2026-10-09 从 cicd 活体产品化收编）：Prometheus+Grafana+
+# 节点/集群指标、告警规则与评估器、ES+Kibana+fluent-bit 日志聚合、audit-shipper
+# 审计快照、节点日志体积硬上限。任何环境 helm 一装即有；告警 webhook 未配置时
+# 评估器只把 firing 集合打到 pod 日志（不推送）。
+observability:
+  # 默认关闭 = opt-in。新环境置 true 即得全套（指标/日志/审计/告警/日志上限）；
+  # 已在跑 k3s/*.yaml 实例的环境（如 cicd）必须先把既有对象 helm 收编
+  # （加 meta.helm.sh/release-* 标注）再置 true，否则 helm upgrade 会因
+  # "already exists" 冲突。步骤见 chart README「Observability 底座」。
+  enabled: false
+  monitoringNamespace: monitoring
+  loggingNamespace: logging
+  prometheus:
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/prom/prometheus", tag: "v3.5.0" }
+    retention: 7d
+    scrapeInterval: 15s
+    # 指标属可再生软数据：默认 local-path，不受 Longhorn attach 故障面牵连。
+    storage: { size: 10Gi, storageClass: local-path }
+  grafana:
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/grafana/grafana", tag: "12.0.0" }
+    nodePort: 30161
+    # 匿名只读 + 内置口令 = 内网信任域默认；生产环境必须覆盖（文档已注明）。
+    adminPassword: "admin"
+  nodeExporter:
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/prometheus/node-exporter", tag: "v1.9.1" }
+  kubeStateMetrics:
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/kube-state-metrics/kube-state-metrics", tag: "v2.17.0" }
+  alerts:
+    # 根文件系统可用低于该百分比、持续 10 分钟 → 告警（0–100）。
+    diskLowPercent: 12
+    # AEP control-service 5xx 速率阈值（次/秒，10 分钟持续）。
+    aep5xxRate: "0.2"
+    # 推送通道（企微群机器人 URL）；空 = 仅日志。真实 URL 是凭据：只放
+    # values-<env>.local.yaml（gitignored）——不要装完后临时 kubectl patch
+    # Secret，下一次 helm upgrade 会重置回此处渲染值。
+    webhookUrl: ""
+  logging:
+    enabled: true
+    elasticsearch:
+      image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/elasticsearch", tag: "8.18.3" }
+      storage: { size: 20Gi, storageClass: longhorn }
+      javaOpts: "-Xms1g -Xmx1g"
+    kibana:
+      image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/kibana", tag: "8.18.3" }
+      nodePort: 30160
+    fluentBit:
+      image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/fluent-bit", tag: "3.2.10" }
+      # 只采集列出的命名空间（路径 glob 作用域）。共享集群纪律：不属本平台
+      # 的命名空间不列即不采。
+      namespaces: [aep-system, digital-employees, memory-system, higress-system, weknora]
+  auditShipper:
+    enabled: true
+    schedule: "*/5 * * * *"
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/python", tag: "3.12-slim-bookworm" }
+    esURL: http://elasticsearch.logging.svc.cluster.local:9200
+    # AEP 管理员口令走一次性 Secret（不入 chart，同 de-platform-creds 纪律）。
+    credentialsSecret: audit-shipper-creds
+  nodeLogCap:
+    # 节点日志硬上限（DaemonSet 形态，免 ssh）：每 loopSeconds 清理超过
+    # archiveMaxMiB 的轮转档案，并把超过 liveMaxGiB 的活跃文件截留尾部。
+    # journald 的 SystemMaxUse 是主机单元，维持文档化手工步骤
+    # （k3s/node-log-cap/README.md）。
+    enabled: true
+    loopSeconds: 900
+    archiveMaxMiB: 200
+    liveMaxGiB: 1
+    image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/python", tag: "3.12-slim-bookworm" }
+
 # Digital employees. wecom requires the bot's WS session (single instance
 # cluster-wide); knowledge is absent until WeKnora is wired per employee.
 conversationStore:

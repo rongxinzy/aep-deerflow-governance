@@ -1,0 +1,195 @@
+{{- if and .Values.observability.enabled .Values.observability.auditShipper.enabled }}
+{{- $obs := .Values.observability }}
+{{- $ln := $obs.loggingNamespace }}
+# Audit-event shipper：轮询 AEP/portal 管理 API，把结构化审计数据 bulk 进
+# ES 的 zhiyuan-audit-* 索引（业务层审计轨迹；基础设施日志由 fluent-bit 负责）。
+# 含模型健康快照与员工 model_failover —— 回答「哪个模型何时坏了、影响了谁」
+# 不必再靠现场人肉。管理员口令走一次性 Secret（{{ $obs.auditShipper.credentialsSecret }}），不入 chart。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-shipper-script
+  namespace: {{ $ln }}
+data:
+  ship.py: |
+    """Poll AEP + portal admin APIs; bulk-index structured audit docs into ES."""
+    import json, os, sys, time, urllib.request
+
+    AEP = os.environ.get("AEP_BASE_URL", "http://aep-control-service.aep-system.svc.cluster.local:8080")
+    PORTAL = os.environ.get("PORTAL_BASE_URL", "http://de-portal.digital-employees.svc.cluster.local:8090")
+    ES = os.environ.get("ES_URL", "http://elasticsearch.logging.svc.cluster.local:9200")
+    DEPLOYMENT = os.environ.get("AEP_DEPLOYMENT_ID", "demo")
+    USER = os.environ.get("AEP_ADMIN_USER", "admin")
+    PASS = os.environ.get("AEP_ADMIN_PASSWORD", "")
+
+    def api(base, method, path, token=None, body=None):
+        headers = {"Content-Type": "application/json", "X-AEP-Protocol-Version": "1.0"}
+        if token: headers["Authorization"] = "Bearer " + token
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read()) if resp.status == 200 else {}
+
+    def es_bulk(docs):
+        if not docs: return 0
+        idx = f"zhiyuan-audit-{time.strftime('%Y.%m.%d')}"
+        lines = []
+        meta = json.dumps({"index": {"_index": idx}})
+        for doc in docs:
+            lines.append(meta)
+            lines.append(json.dumps(doc, ensure_ascii=False, default=str))
+        body = "\n".join(lines) + "\n"
+        req = urllib.request.Request(ES + "/_bulk", data=body.encode(), method="POST",
+                                     headers={"Content-Type": "application/x-ndjson"})
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read())
+        errors = [i for i in result.get("items", []) if "error" in i.get("index", {})]
+        return len(docs) - len(errors)
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    docs = []
+
+    # Login to AEP for admin credentials
+    token = api(AEP, "POST", "/aep/v1/auth/password/login", body={
+        "deploymentId": DEPLOYMENT, "sessionId": f"audit-{int(time.time())}",
+        "username": USER, "password": PASS,
+    }).get("accessToken", "")
+    if not token:
+        print("ERROR: AEP login failed", file=sys.stderr); sys.exit(1)
+
+    # 1. AEP control events (lifecycle commands, approvals)
+    try:
+        events = api(AEP, "GET", "/aep/v1/admin/events?limit=200", token)
+        for ev in (events.get("items") or []):
+            docs.append({
+                "@timestamp": ev.get("createdAt", now),
+                "audit_type": "control_event",
+                "event_id": ev.get("eventId") or ev.get("id"),
+                "event_type": ev.get("type"),
+                "state": ev.get("state"),
+                "created_by": ev.get("createdBy"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: events: {e}", file=sys.stderr)
+
+    # 2. AEP users snapshot
+    try:
+        users = api(AEP, "GET", "/aep/v1/admin/users?limit=100", token)
+        for u in (users.get("users") or users.get("items") or []):
+            docs.append({
+                "@timestamp": now,
+                "audit_type": "user_snapshot",
+                "user_id": u.get("id"),
+                "username": u.get("username"),
+                "display_name": u.get("displayName"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: users: {e}", file=sys.stderr)
+
+    # 3. Portal digital-employee snapshots (the real workload state)
+    try:
+        emps = api(PORTAL, "GET", "/api/v1/employees", token)
+        for e in (emps.get("employees") or []):
+            docs.append({
+                "@timestamp": now,
+                "audit_type": "employee_snapshot",
+                "name": e.get("name"),
+                "display_name": e.get("displayName"),
+                "phase": e.get("phase"),
+                "model": e.get("model"),
+                "model_failover": e.get("modelFailover"),
+                "runtime_account": e.get("runtimeAccount"),
+                "wecom": (e.get("channels") or {}).get("wecom", False),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: portal employees: {e}", file=sys.stderr)
+
+    # 4. Portal requests (approval workflow audit trail)
+    try:
+        reqs = api(PORTAL, "GET", "/api/v1/requests?limit=100", token)
+        for r in (reqs.get("requests") or []):
+            docs.append({
+                "@timestamp": r.get("createdAt", now),
+                "audit_type": "employee_request",
+                "request_id": r.get("id"),
+                "employee_name": r.get("employeeName"),
+                "state": r.get("state"),
+                "decided_by": r.get("decidedBy"),
+                "decision_reason": r.get("decisionReason"),
+                "shipped_at": now,
+            })
+    except Exception as e:
+        print(f"WARN: portal requests: {e}", file=sys.stderr)
+
+    # 5. Model health snapshot (probe verdicts). A model going unhealthy is the
+    # failure the failover chain reacts to — keep the evidence in the audit
+    # trail, not only in probe logs.
+    try:
+        cursor = ""
+        pages = 0
+        while True:
+            path = "/aep/v1/admin/models?limit=100" + (f"&cursor={cursor}" if cursor else "")
+            catalog = api(AEP, "GET", path, token)
+            for m in (catalog.get("models") or []):
+                docs.append({
+                    "@timestamp": now,
+                    "audit_type": "model_health_snapshot",
+                    "model_id": m.get("id"),
+                    "display_name": m.get("displayName"),
+                    "source_type": m.get("sourceType"),
+                    "protocol": m.get("protocol"),
+                    "enabled": m.get("enabled"),
+                    "health_status": m.get("healthStatus"),
+                    "health_checked_at": m.get("healthCheckedAt"),
+                    "health_since": m.get("healthSince"),
+                    "health_detail": m.get("healthDetail"),
+                    "shipped_at": now,
+                })
+            cursor = catalog.get("nextCursor") or ""
+            pages += 1
+            if not cursor or pages >= 50:
+                break
+    except Exception as e:
+        print(f"WARN: model health: {e}", file=sys.stderr)
+
+    indexed = es_bulk(docs)
+    print(f"OK: {indexed}/{len(docs)} audit docs indexed")
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-shipper
+  namespace: {{ $ln }}
+spec:
+  schedule: {{ $obs.auditShipper.schedule | quote }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: shipper
+              image: {{ $obs.auditShipper.image.repository }}:{{ $obs.auditShipper.image.tag }}
+              command: ["python3", "/script/ship.py"]
+              env:
+                - {name: AEP_BASE_URL, value: "http://aep-control-service.aep-system.svc.cluster.local:8080"}
+                - {name: PORTAL_BASE_URL, value: "http://de-portal.digital-employees.svc.cluster.local:8090"}
+                - {name: ES_URL, value: {{ $obs.auditShipper.esURL | quote }}}
+                - {name: AEP_DEPLOYMENT_ID, value: {{ .Values.aepStack.deploymentId | quote }}}
+                - name: AEP_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: {{ $obs.auditShipper.credentialsSecret }}, key: AEP_ADMIN_PASSWORD}
+              volumeMounts:
+                - {name: script, mountPath: /script}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {memory: 64Mi}
+          volumes:
+            - name: script
+              configMap: {name: audit-shipper-script}
+{{- end }}

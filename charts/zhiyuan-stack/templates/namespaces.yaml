@@ -17,6 +17,22 @@ metadata:
   name: aep-system
   labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
 {{- end }}
+{{- if .Values.observability.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.observability.monitoringNamespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- if .Values.observability.logging.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.observability.loggingNamespace }}
+  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+{{- end }}
+{{- end }}
 {{- if .Values.weknora.enabled }}
 {{/* WeKnora 凭据占位符守卫（父侧，覆盖 vendored 子图的 required 盲区：
      `<...>` 是非空字符串，required 放行）。 */}}

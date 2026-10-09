@@ -56,3 +56,42 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 - 旧 weknora 数据卷（`weknora-postgres/-redis/-data-files`，local-path）迁
   Longhorn 后保留为备份，不从 chart 渲染（overlay 里 `existingClaim` 指向
   `*-lh`）。
+
+## Observability 底座（observability.*，2026-10-09 产品化）
+
+默认 **opt-in**（`observability.enabled: false`）。置 true 即部署：
+
+- **监控**（ns `monitoring`）：Prometheus（AEP/运行时/节点/ksm 抓取 + 6 条告警
+  规则：DiskPressure/磁盘低/NotReady/抓取目标消失/重启/AEP 5xx；存储默认
+  local-path——指标是软数据，不受 Longhorn 故障面牵连）、Grafana（NodePort 30161，
+  匿名只读——生产必须覆盖 `grafana.adminPassword`）、node-exporter、
+  kube-state-metrics。
+- **告警评估器**：每 2 分钟把 Prometheus 的 firing 集合转发到
+  `observability.alerts.webhookUrl`（企微群机器人 text 格式）。留空时只打 pod
+  日志。真实 URL 属于凭据：只放 values-`<env>`.local.yaml（gitignored），
+  **不要**装完后用 kubectl patch 临时写 Secret——下一次 helm upgrade 会把它
+  重置回 values 渲染值。已知增强点：启用推送后会每 2 分钟重复推送整个 firing
+  集合（暂无静默/去重）。
+- **日志**（ns `logging`）：单节点 ES + Kibana（NodePort 30160）+ fluent-bit
+  （SA/RBAC 齐备的 kubernetes filter → ES 文档带 pod/namespace 元数据）。采集
+  范围 = `observability.logging.fluentBit.namespaces`（共享集群纪律：不列不采）。
+- **审计**：audit-shipper CronJob（AEP 事件/用户 + portal 员工/申请快照 + 模型
+  健康快照与 model_failover 字段）。管理员口令来自一次性 Secret
+  `observability.auditShipper.credentialsSecret`（不入 chart，同 de-platform-creds 纪律）。
+- **节点日志上限**：node-log-cap DaemonSet（清 >200MiB 轮转档案、活跃文件超 1GiB
+  截留尾部）。journald 的 SystemMaxUse 是主机单元，维持
+  `k3s/node-log-cap/README.md` 的手工步骤。
+
+### 收编既有环境（先读再置 true）
+
+已按 `k3s/*.yaml` 跑着实例的环境（cicd）直接升 true 会因对象已存在而失败：
+
+1. 对每个将收编的对象打 helm 归属标注：annotations
+   `meta.helm.sh/release-name: <release>` + `meta.helm.sh/release-namespace: <ns>`，
+   label `app.kubernetes.io/managed-by: Helm`；
+2. 先 `helm template` diff 活体（尤其 ES StatefulSet 的不可变字段），差异先对齐；
+3. `helm upgrade` 收编后 `kubectl -n monitoring rollout restart deploy/prometheus`
+   （规则文件变更需重启或启用 lifecycle reload）；
+4. cicd 的 systemd 版 node-log-cap 与 DaemonSet 版**二选一**（避免双写者）：
+   收编时在 local values 关掉 DS（`observability.nodeLogCap.enabled: false`）
+   或先卸载主机单元。
