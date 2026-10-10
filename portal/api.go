@@ -71,6 +71,10 @@ func (p *portal) routes() http.Handler {
 	// across all states, and one request's detail. The literal /mine
 	// segment beats the {id} wildcard (Go 1.22 mux precedence).
 	mux.HandleFunc("GET /api/v1/me", p.auth(p.handleMe))
+	// Workbench messenger directory (通讯录): company-wide human accounts,
+	// projected to id/username/displayName by the portal (AEP's user listing
+	// is admin-scoped, so employees never call it directly).
+	mux.HandleFunc("GET /api/v1/contacts", p.auth(p.handleContacts))
 	mux.HandleFunc("GET /api/v1/requests/mine", p.auth(p.handleMyRequests))
 	mux.HandleFunc("GET /api/v1/requests/{id}", p.auth(p.handleRequestDetail))
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))
