@@ -84,7 +84,7 @@ models:
 # and every image ref must render through the Harbor DNS registry above.
 images:
   operator: { repository: rongxinzy/de-operator, tag: "0.18.0" }
-  portal: { repository: rongxinzy/de-portal, tag: "0.22.1" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.22.3" }
   # 2026-10-10 起默认不部署（chatUI.enabled=false）；条目仅回滚保留。
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
   adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.14.2" }

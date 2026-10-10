@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -257,36 +258,53 @@ func (p *portal) weknoraAdminCreds(ctx context.Context) (string, string) {
 	return user, pass
 }
 
-// enrichTeams fetches the user's AEP team memberships via the admin API
-// and stores them on the identity. Called once at login, cached in the
-// portal session — /user/me doesn't include teamIds.
+// enrichTeams fetches the user's AEP team memberships and stores them on
+// the identity. Called once at login and on stale-cache refresh — /user/me's
+// browser contract doesn't include teamIds, but the token-authenticated call
+// does (AEP contract enhancement): real-time team data with zero admin
+// credential usage. When the user token is absent or rejected (the norm for
+// sessions restored after a rolling restart — their mint-time AEP token has
+// long expired), the admin user listing is the fallback so department scope
+// self-heals instead of staying collapsed until the next login.
 func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
 	if len(ident.Teams) > 0 && !ident.needsTeamRefresh() {
 		return // fresh enough
 	}
-	if ident.Token == "" {
-		return // no token to verify against
+	if p.enrichTeamsWithToken(ctx, ident) {
+		return
 	}
-	// Use the user's own token against /user/me — the response now
-	// includes teamIds (AEP contract enhancement). This gives real-time
-	// team data with zero admin credential usage: "authenticate once,
-	// authorize per-request".
+	p.enrichTeamsFromAdmin(ctx, ident)
+}
+
+// enrichTeamsWithToken tries the user's own token against /user/me.
+// Returns false when the token is missing or rejected (caller falls back).
+func (p *portal) enrichTeamsWithToken(ctx context.Context, ident *identity) bool {
+	if ident.Token == "" {
+		return false // no token to verify against
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		p.cfg.aepBaseURL+"/aep/v1/user/me", nil)
 	if err != nil {
-		return
+		return false
 	}
 	request.Header.Set("Authorization", "Bearer "+ident.Token)
 	request.Header.Set("X-AEP-Protocol-Version", "1.0")
 	resp, err := serviceProbeClient.Do(request)
 	if err != nil {
 		p.logger.Warn("enrichTeams: /user/me unreachable", "error", err)
-		return // keep cached teams; next request retries
+		return false // caller falls back to the admin listing
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		p.logger.Warn("enrichTeams: /user/me returned non-OK", "status", resp.StatusCode)
-		return
+		// Expired/rejected tokens are the steady state for restored
+		// sessions (the fallback below is their designed path) — keep those
+		// quiet; upstream outages deserve a warning.
+		if resp.StatusCode >= 500 {
+			p.logger.Warn("enrichTeams: /user/me upstream error", "status", resp.StatusCode)
+		} else {
+			p.logger.Info("enrichTeams: /user/me rejected, falling back to admin lookup", "status", resp.StatusCode)
+		}
+		return false
 	}
 	var result struct {
 		User struct {
@@ -294,9 +312,64 @@ func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
 		} `json:"user"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
-		return
+		return false
 	}
 	ident.Teams = result.User.TeamIDs
+	if ident.Teams == nil {
+		ident.Teams = []string{}
+	}
+	ident.TeamsFetchedAt = time.Now()
+	return true
+}
+
+// enrichTeamsFromAdmin recovers team memberships through the admin
+// single-user lookup (one exact request, no directory scan). Only reached
+// when the user-token path is unavailable — the cost is bounded by the
+// staleness window: every failure exit stamps TeamsFetchedAt so a broken
+// upstream is retried at most once per window per session instead of on
+// every request (which would stack two probe timeouts onto the hot path).
+func (p *portal) enrichTeamsFromAdmin(ctx context.Context, ident *identity) {
+	giveUp := func(stage string, detail string) {
+		if p.logger != nil {
+			p.logger.Warn("enrichTeams: admin fallback failed", "stage", stage, "detail", detail, "userId", ident.UserID)
+		}
+		// Negative cache for one staleness window: keeps whatever Teams the
+		// session already carries (possibly empty) rather than hammering a
+		// broken upstream on every request.
+		ident.TeamsFetchedAt = time.Now()
+	}
+	adminToken := p.adminToken(ctx)
+	if adminToken == "" {
+		giveUp("admin-token", "unavailable")
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		p.cfg.aepBaseURL+"/aep/v1/admin/users/"+url.PathEscape(ident.UserID), nil)
+	if err != nil {
+		giveUp("build-request", err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(req)
+	if err != nil {
+		giveUp("do", err.Error())
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		giveUp("status", fmt.Sprintf("aep returned %d: %s", resp.StatusCode, string(raw)))
+		return
+	}
+	var user struct {
+		TeamIDs []string `json:"teamIds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		giveUp("decode", err.Error())
+		return
+	}
+	ident.Teams = user.TeamIDs
 	if ident.Teams == nil {
 		ident.Teams = []string{}
 	}
