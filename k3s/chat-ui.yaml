@@ -1,3 +1,5 @@
+# 已停用（2026-10-10）：员工对话入口统一为 zhiyuanBotUI（NodePort 30202）；
+# 此手工清单仅作历史归档，勿再 apply。
 # deerflow-chat-ui: the reused DeerFlow frontend in platform mode.
 # Serves the web chat for digital employees: the browser arrives from the
 # portal's /chat entry page (login + employee picker) holding the portal
