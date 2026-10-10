@@ -296,9 +296,14 @@ func (p *portal) enrichTeamsWithToken(ctx context.Context, ident *identity) bool
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		// Expired tokens are the steady state for restored sessions; keep
-		// this quiet — the fallback below is the designed path for them.
-		p.logger.Info("enrichTeams: /user/me rejected, falling back to admin listing", "status", resp.StatusCode)
+		// Expired/rejected tokens are the steady state for restored
+		// sessions (the fallback below is their designed path) — keep those
+		// quiet; upstream outages deserve a warning.
+		if resp.StatusCode >= 500 {
+			p.logger.Warn("enrichTeams: /user/me upstream error", "status", resp.StatusCode)
+		} else {
+			p.logger.Info("enrichTeams: /user/me rejected, falling back to admin lookup", "status", resp.StatusCode)
+		}
 		return false
 	}
 	var result struct {
@@ -317,63 +322,58 @@ func (p *portal) enrichTeamsWithToken(ctx context.Context, ident *identity) bool
 	return true
 }
 
-// enrichTeamsFromAdmin recovers team memberships through the admin user
-// listing (same paginated surface contacts uses). Only reached when the
-// user-token path is unavailable — the cost is bounded by the 5-minute
-// staleness window per session.
+// enrichTeamsFromAdmin recovers team memberships through the admin
+// single-user lookup (one exact request, no directory scan). Only reached
+// when the user-token path is unavailable — the cost is bounded by the
+// staleness window: every failure exit stamps TeamsFetchedAt so a broken
+// upstream is retried at most once per window per session instead of on
+// every request (which would stack two probe timeouts onto the hot path).
 func (p *portal) enrichTeamsFromAdmin(ctx context.Context, ident *identity) {
+	giveUp := func(stage string, detail string) {
+		if p.logger != nil {
+			p.logger.Warn("enrichTeams: admin fallback failed", "stage", stage, "detail", detail, "userId", ident.UserID)
+		}
+		// Negative cache for one staleness window: keeps whatever Teams the
+		// session already carries (possibly empty) rather than hammering a
+		// broken upstream on every request.
+		ident.TeamsFetchedAt = time.Now()
+	}
 	adminToken := p.adminToken(ctx)
 	if adminToken == "" {
+		giveUp("admin-token", "unavailable")
 		return
 	}
-	cursor := ""
-	for page := 0; page < 10; page++ {
-		query := url.Values{"limit": {"200"}}
-		if cursor != "" {
-			query.Set("cursor", cursor)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			p.cfg.aepBaseURL+"/aep/v1/admin/users?"+query.Encode(), nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+adminToken)
-		req.Header.Set("X-AEP-Protocol-Version", "1.0")
-		resp, err := serviceProbeClient.Do(req)
-		if err != nil {
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			return
-		}
-		var body struct {
-			Items []struct {
-				ID      string   `json:"id"`
-				TeamIDs []string `json:"teamIds"`
-			} `json:"items"`
-			Next *string `json:"nextCursor"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&body)
-		_ = resp.Body.Close()
-		if err != nil {
-			return
-		}
-		for _, u := range body.Items {
-			if u.ID == ident.UserID {
-				ident.Teams = u.TeamIDs
-				if ident.Teams == nil {
-					ident.Teams = []string{}
-				}
-				ident.TeamsFetchedAt = time.Now()
-				return
-			}
-		}
-		if body.Next == nil || *body.Next == "" {
-			return
-		}
-		cursor = *body.Next
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		p.cfg.aepBaseURL+"/aep/v1/admin/users/"+url.PathEscape(ident.UserID), nil)
+	if err != nil {
+		giveUp("build-request", err.Error())
+		return
 	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
+	resp, err := serviceProbeClient.Do(req)
+	if err != nil {
+		giveUp("do", err.Error())
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		giveUp("status", fmt.Sprintf("aep returned %d: %s", resp.StatusCode, string(raw)))
+		return
+	}
+	var user struct {
+		TeamIDs []string `json:"teamIds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		giveUp("decode", err.Error())
+		return
+	}
+	ident.Teams = user.TeamIDs
+	if ident.Teams == nil {
+		ident.Teams = []string{}
+	}
+	ident.TeamsFetchedAt = time.Now()
 }
 
 // refreshSessionTeams re-fetches team memberships from AEP and updates

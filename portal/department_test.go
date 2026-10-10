@@ -268,14 +268,9 @@ func TestEnrichTeamsFallsBackToAdminListing(t *testing.T) {
 				_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
 			case r.URL.Path == "/aep/v1/user/me":
 				w.WriteHeader(http.StatusUnauthorized)
-			case r.URL.Path == "/aep/v1/admin/users":
-				cursor := r.URL.Query().Get("cursor")
-				if cursor != "" {
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
+			case r.URL.Path == "/aep/v1/admin/users/u9":
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"items":[{"id":"someone-else","teamIds":[]},{"id":"u9","teamIds":["rd-dept"]}],"nextCursor":null}`))
+				_, _ = w.Write([]byte(`{"id":"u9","teamIds":["rd-dept"]}`))
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
