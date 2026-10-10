@@ -192,8 +192,11 @@ type SubjectRef struct {
 
 // GovernanceSpec carries AEP governance middleware parameters.
 type GovernanceSpec struct {
-	AEPBaseURL     string `json:"aepBaseURL"`
-	DeploymentID   string `json:"deploymentID"`
+	AEPBaseURL   string `json:"aepBaseURL"`
+	DeploymentID string `json:"deploymentID"`
+	// DeploymentName is the AEP deployment's verified display name.
+	// +optional
+	DeploymentName string `json:"deploymentName,omitempty"`
 	DefaultAEPUser string `json:"defaultAEPUser"`
 	// +optional
 	IdentitySource string `json:"identitySource,omitempty"`
@@ -334,6 +337,9 @@ type DigitalEmployeeSpec struct {
 	// (legacy behavior for employees created before team scoping).
 	// +optional
 	Team string `json:"team,omitempty"`
+	// TeamName is the owning team's verified AEP display-name snapshot.
+	// +optional
+	TeamName string `json:"teamName,omitempty"`
 
 	// Skills are the AEP skills enabled for this employee (set by the
 	// business layer; the operator never interprets them). Each entry

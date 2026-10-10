@@ -1,5 +1,9 @@
 # Node log volume caps
 
+> 已产品化：chart 侧为 `templates/observability-node-log-cap.yaml`（DaemonSet，
+> 免 ssh，observability.nodeLogCap.enabled）。本目录保留为 cicd 的 systemd 实例
+> 与 journald 手工步骤。二者二选一，避免双写者。
+
 Hard ceiling on per-node log volume. Rationale (2026-10-08): a one-off
 kernel/systemd message flood on the Strata host (`burst6`) left two 17.8G
 rotated files (`syslog.1`, `kern.log.1`) in `/var/log`. `logrotate`'s `size`

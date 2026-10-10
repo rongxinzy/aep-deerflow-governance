@@ -305,6 +305,9 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 	aep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.URL.Path == "/aep/v1/auth/methods":
+			assert.Equal(t, "deployment-acme", r.URL.Query().Get("deploymentHint"))
+			_, _ = w.Write([]byte(`{"deployment":{"id":"deployment-acme","name":"示例企业"}}`))
 		case r.URL.Path == "/aep/v1/auth/password/login":
 			_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
 		case strings.HasPrefix(r.URL.Path, "/aep/v1/admin/users/"):
@@ -319,6 +322,11 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 				_, _ = w.Write([]byte(`{"id":"u-off","username":"off","displayName":"停用者","status":"disabled","kind":"human"}`))
 			case "u-agent":
 				_, _ = w.Write([]byte(`{"id":"u-agent","username":"bot","displayName":"机器人","status":"active","kind":"agent"}`))
+			case "u-no-display":
+				_, _ = w.Write([]byte(`{"id":"u-no-display","username":"account-name","status":"active","kind":"human"}`))
+			case "boom":
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"upstream down"}`))
 			default:
 				http.NotFound(w, r)
 			}
@@ -381,6 +389,7 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 		},
 	})
 	h.cfg.aepBaseURL = aep.URL
+	h.cfg.aepDeploymentID = "deployment-acme"
 	h.cfg.knowledgeAPIURL = weknora.URL
 	h.cfg.credentialsSecret = "de-platform-creds"
 	h.cfg.model = "bench-glm"
@@ -410,6 +419,9 @@ func TestApplyExtendedFields(t *testing.T) {
 		assert.Equal(t, "u-owner", item.Spec.Owner)
 		assert.Equal(t, "李四", item.Spec.OwnerName)
 		assert.Equal(t, "u-owner", item.Spec.Governance.DefaultAEPUser, "the employee acts with the designated owner's scope")
+		assert.Equal(t, "deployment-acme", item.Spec.Governance.DeploymentID)
+		assert.Equal(t, "示例企业", item.Spec.Governance.DeploymentName)
+		assert.Equal(t, "销售部", item.Spec.TeamName)
 		require.Len(t, item.Spec.Knowledge.Bases, 2)
 		assert.Equal(t, "kb-1", item.Spec.Knowledge.Bases[0].ID)
 		assert.Equal(t, "销售知识库", item.Spec.Knowledge.Bases[0].Name)

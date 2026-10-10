@@ -1,3 +1,5 @@
+# 已产品化：charts/zhiyuan-stack/templates/observability-audit.yaml
+# （observability.auditShipper.enabled=true）。本文件保留为 cicd 参考实例/收编源。
 # Audit-event shipper: polls AEP admin APIs and the DE portal for structured
 # audit data, bulk-indexing into the zhiyuan-audit-* ES index. This is the
 # business-layer audit trail; infra-layer logs are already in ES via Fluent Bit.

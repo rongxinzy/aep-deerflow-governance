@@ -1,0 +1,193 @@
+{{- if and .Values.observability.enabled .Values.observability.logging.enabled }}
+{{- $obs := .Values.observability }}
+{{- $ln := $obs.loggingNamespace }}
+# 日志聚合：单节点 ES + Kibana + fluent-bit（采集列出的命名空间容器日志）。
+# fluent-bit 需要 SA/RBAC 才能用 kubernetes filter 注入 pod/namespace 元数据
+# ——没有 RBAC 时 filter 静默产出裸记录（实测教训）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: {{ $ln }}
+spec:
+  selector: {app: elasticsearch}
+  ports: [{port: 9200, targetPort: 9200, name: http}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: {{ $ln }}
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels: {app: elasticsearch}
+  template:
+    metadata:
+      labels: {app: elasticsearch}
+    spec:
+      containers:
+        - name: elasticsearch
+          image: {{ $obs.logging.elasticsearch.image.repository }}:{{ $obs.logging.elasticsearch.image.tag }}
+          env:
+            - {name: discovery.type, value: single-node}
+            - {name: xpack.security.enabled, value: "false"}
+            - {name: ES_JAVA_OPTS, value: {{ $obs.logging.elasticsearch.javaOpts | quote }}}
+          ports: [{containerPort: 9200}]
+          readinessProbe:
+            httpGet: {path: /_cluster/health, port: 9200}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 200m, memory: 1536Mi}
+            limits: {memory: 2.5Gi}
+          volumeMounts:
+            - {name: lh, mountPath: /usr/share/elasticsearch/data}
+  volumeClaimTemplates:
+    # 卷名保持 lh（= 活体迁移后的 lh-elasticsearch-0）：StatefulSet 的
+    # volumeClaimTemplates 不可变，改名会让 helm 收编失败并孤立已绑定 PVC。
+    - metadata: {name: lh}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ $obs.logging.elasticsearch.storage.storageClass }}
+        resources: {requests: {storage: {{ $obs.logging.elasticsearch.storage.size }}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: {{ $ln }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kibana}
+  template:
+    metadata:
+      labels: {app: kibana}
+    spec:
+      containers:
+        - name: kibana
+          image: {{ $obs.logging.kibana.image.repository }}:{{ $obs.logging.kibana.image.tag }}
+          env:
+            - {name: ELASTICSEARCH_HOSTS, value: "http://elasticsearch.{{ $ln }}.svc.cluster.local:9200"}
+          ports: [{containerPort: 5601}]
+          readinessProbe:
+            httpGet: {path: /api/status, port: 5601}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1.5Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: {{ $ln }}
+spec:
+  type: NodePort
+  selector: {app: kibana}
+  ports: [{port: 5601, targetPort: 5601, nodePort: {{ $obs.logging.kibana.nodePort }}}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+  namespace: {{ $ln }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-logging
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-logging
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fluent-bit-logging}
+subjects:
+  - {kind: ServiceAccount, name: fluent-bit, namespace: {{ $ln }}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: {{ $ln }}
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        # 路径 glob 作用域采集（文件命名 <pod>_<ns>_<container>.log）。共享集群
+        # 纪律：不在列表里的命名空间不采。不用 grep 过滤——kubernetes.namespace_name
+        # 在 Replace_Dots 之前不可用于 grep，会静默丢全部。
+        Path              {{ range $i, $ns := $obs.logging.fluentBit.namespaces }}{{ if $i }}, {{ end }}/var/log/containers/*_{{ $ns }}_*.log{{ end }}
+        Tag               kube.*
+        Read_from_Head    true
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+
+    [FILTER]
+        Name    kubernetes
+        Match   kube.*
+        Kube_URL https://kubernetes.default.svc:443
+        # 需要本文件的 SA/RBAC：无 API 访问时 filter 静默产出裸记录
+        # （无 namespace/pod 字段，Kibana 无法按服务过滤）。
+        Merge_Log On
+        Keep_Log Off
+
+    [OUTPUT]
+        Name    es
+        Match   kube.*
+        Host    elasticsearch.{{ $ln }}.svc.cluster.local
+        Port    9200
+        Index   logstash
+        Logstash_Format On
+        Logstash_Prefix logstash
+        Replace_Dots On
+        # ES 8.x 拒绝 bulk 里的 _type；缺了这句每批 400。
+        Suppress_Type_Name On
+        Retry_Limit False
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: {{ $ln }}
+spec:
+  selector:
+    matchLabels: {app: fluent-bit}
+  template:
+    metadata:
+      labels: {app: fluent-bit}
+    spec:
+      serviceAccountName: fluent-bit
+      tolerations:
+        - {key: node-role.kubernetes.io/controlplane, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: fluent-bit
+          image: {{ $obs.logging.fluentBit.image.repository }}:{{ $obs.logging.fluentBit.image.tag }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 192Mi}
+          volumeMounts:
+            - {name: varlog, mountPath: /var/log/pods}
+            - {name: varlogcontainers, mountPath: /var/log/containers}
+            - {name: config, mountPath: /fluent-bit/etc}
+      volumes:
+        - {name: varlog, hostPath: {path: /var/log/pods}}
+        - {name: varlogcontainers, hostPath: {path: /var/log/containers}}
+        - {name: config, configMap: {name: fluent-bit-config}}
+{{- end }}

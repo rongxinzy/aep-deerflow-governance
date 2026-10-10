@@ -152,6 +152,10 @@ spec:
                     type: string
                   deploymentID:
                     type: string
+                  deploymentName:
+                    description: DeploymentName is the AEP deployment's verified display
+                      name.
+                    type: string
                   governedTools:
                     items:
                       type: string
@@ -435,6 +439,10 @@ spec:
                   can see and converse with the employee in addition to the owner;
                   admins bypass all team scoping. Empty means visible to everyone
                   (legacy behavior for employees created before team scoping).
+                type: string
+              teamName:
+                description: TeamName is the owning team's verified AEP display-name
+                  snapshot.
                 type: string
               visibility:
                 description: |-

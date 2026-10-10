@@ -279,6 +279,12 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 		})
 		return
 	}
+	deploymentName, err := p.deploymentName(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "企业实例身份暂不可用：" + err.Error()})
+		return
+	}
+	resolved.DeploymentName = deploymentName
 	spec := p.renderSpec(body, resolved, runtimeModels)
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
@@ -324,6 +330,7 @@ func (p *portal) renderSpec(body applyRequest, resolved applyContext, models []d
 			DisplayName: body.DisplayName,
 			Description: body.Description,
 			Team:        body.Team,
+			TeamName:    resolved.TeamName,
 			Runtime:     runtime,
 			// Conversation threads ride the central postgres instance
 			// (one database per employee — the operator renders the DSN
@@ -341,7 +348,8 @@ func (p *portal) renderSpec(body applyRequest, resolved applyContext, models []d
 			Governance: dev1alpha1.GovernanceSpec{
 				// The employee acts with its owner's data scope by default.
 				AEPBaseURL:     p.cfg.aepBaseURL,
-				DeploymentID:   "demo",
+				DeploymentID:   p.cfg.aepDeploymentID,
+				DeploymentName: resolved.DeploymentName,
 				DefaultAEPUser: resolved.OwnerID,
 			},
 			Credentials: dev1alpha1.CredentialsRef{Name: p.cfg.credentialsSecret},
@@ -596,6 +604,17 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 		})
 		return
 	}
+	// Only directory-dependent edits refresh the enterprise snapshot. A
+	// displayName-only update must work while AEP is temporarily unavailable.
+	if body.Team != nil || body.Owner != nil {
+		deploymentName, err := p.deploymentName(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "企业实例身份暂不可用：" + err.Error()})
+			return
+		}
+		item.Spec.Governance.DeploymentID = p.cfg.aepDeploymentID
+		item.Spec.Governance.DeploymentName = deploymentName
+	}
 	if body.DisplayName != nil && *body.DisplayName != "" {
 		item.Spec.DisplayName = *body.DisplayName
 	}
@@ -604,6 +623,7 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 	}
 	if body.Team != nil {
 		item.Spec.Team = *body.Team
+		item.Spec.TeamName = resolved.TeamName
 	}
 	if body.Owner != nil && resolved.OwnerID != "" {
 		item.Spec.Owner = resolved.OwnerID
@@ -741,6 +761,10 @@ func (p *portal) decideRequest(finalState string) func(http.ResponseWriter, *htt
 			var spec dev1alpha1.DigitalEmployee
 			if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stored spec corrupt: " + err.Error()})
+				return
+			}
+			if err := p.refreshApprovalIdentity(r.Context(), &spec); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "审批时企业身份校验失败：" + err.Error()})
 				return
 			}
 			spec.ResourceVersion = ""

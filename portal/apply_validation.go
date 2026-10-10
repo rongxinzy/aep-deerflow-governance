@@ -83,11 +83,13 @@ func (r *referenceResolver) lookupTeam(id string) (*aepTeam, bool, error) {
 
 // applyContext carries the resolved, validated pieces of an apply request.
 type applyContext struct {
-	OwnerID    string
-	OwnerName  string
-	KBs        []dev1alpha1.KnowledgeBaseRef
-	Skills     []dev1alpha1.SkillRef
-	Visibility *dev1alpha1.VisibilitySpec
+	DeploymentName string
+	OwnerID        string
+	OwnerName      string
+	TeamName       string
+	KBs            []dev1alpha1.KnowledgeBaseRef
+	Skills         []dev1alpha1.SkillRef
+	Visibility     *dev1alpha1.VisibilitySpec
 }
 
 // aepAdminGet performs an authenticated GET against the AEP admin API with
@@ -292,10 +294,12 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 	// Team is a required release condition and must reference a real team.
 	if body.Team == "" {
 		add("team", "所属团队为必填发布条件")
-	} else if _, found, err := lookupTeam(body.Team); err != nil {
+	} else if team, found, err := lookupTeam(body.Team); err != nil {
 		return resolved, nil, err
 	} else if !found {
 		add("team", "团队 %s 不存在", body.Team)
+	} else {
+		resolved.TeamName = team.Name
 	}
 
 	// Knowledge bases: nil input keeps the legacy unrestricted policy; a
@@ -404,6 +408,9 @@ func (p *portal) validateApply(ctx context.Context, ident identity, body applyRe
 	}
 
 	// Description: required release condition, bounded length.
+	if len([]rune(body.DisplayName)) > 200 {
+		add("displayName", "员工名称不能超过 200 字")
+	}
 	if len([]rune(body.Description)) == 0 {
 		add("description", "用途说明为必填发布条件")
 	} else if len([]rune(body.Description)) > 500 {
@@ -464,10 +471,12 @@ func (p *portal) validateUpdate(ctx context.Context, ident identity, body update
 	if body.Team != nil {
 		if *body.Team == "" {
 			add("team", "所属团队为必填发布条件")
-		} else if _, found, err := resolver.lookupTeam(*body.Team); err != nil {
+		} else if team, found, err := resolver.lookupTeam(*body.Team); err != nil {
 			return resolved, nil, err
 		} else if !found {
 			add("team", "团队 %s 不存在", *body.Team)
+		} else {
+			resolved.TeamName = team.Name
 		}
 	}
 
@@ -478,6 +487,9 @@ func (p *portal) validateUpdate(ctx context.Context, ident identity, body update
 		case runes > 500:
 			add("description", "用途说明不能超过 500 字")
 		}
+	}
+	if body.DisplayName != nil && len([]rune(*body.DisplayName)) > 200 {
+		add("displayName", "员工名称不能超过 200 字")
 	}
 
 	// Same knowledge semantics as apply: an explicit empty list is a valid

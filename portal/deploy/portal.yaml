@@ -60,6 +60,9 @@ spec:
         - name: portal
           image: 172.18.5.251:8081/zhiyuan/de-portal:0.4.10
           env:
+            # Keep this deployment ID aligned with the AEP instance and
+            # employee governance.deploymentID. Override for non-demo clusters.
+            - {name: PORTAL_AEP_DEPLOYMENT_ID, value: demo}
             - {name: PORTAL_POLICY_MODE, value: approval}
             - {name: PORTAL_QUOTA_PER_USER, value: "2"}
             - {name: PORTAL_ADMIN_USERS, value: "admin"}

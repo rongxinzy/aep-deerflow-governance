@@ -55,6 +55,7 @@ data:
   AEP_MINIO_ENDPOINT: {{ .Values.aepStack.minioEndpoint | quote }}
   AEP_MODEL_ACCESS_TTL: {{ .Values.aepStack.modelAccessTTL | quote }}
   AEP_MODEL_GATEWAY_BASE_URL: {{ .Values.aepStack.modelGatewayBaseUrl | quote }}
+  AEP_MODEL_HEALTH_WEBHOOK: {{ .Values.aepStack.modelHealthWebhook | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap

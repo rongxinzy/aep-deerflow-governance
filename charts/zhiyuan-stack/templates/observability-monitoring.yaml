@@ -1,0 +1,492 @@
+{{- if .Values.observability.enabled }}
+{{- $obs := .Values.observability }}
+{{- $mn := $obs.monitoringNamespace }}
+# Prometheus + Grafana + node-exporter + kube-state-metrics + 告警。
+# 产品化自 cicd 活体（k3s/monitoring-stack.yaml，2026-10-09）：对象名保持
+# 一致以便后续 helm 收编既有集群。规则 summary 为静态文案，身份标识由
+# 评估器从告警 labels 拼接（规避 Prometheus 的 {{ "{{ $labels.* }}" }} 与 Helm
+# 模板语法冲突）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: {{ $mn }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ $obs.prometheus.scrapeInterval }}
+      evaluation_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: node-exporter
+            action: keep
+          - source_labels: [__address__]
+            regex: '(.*):.*'
+            replacement: '${1}:9100'
+            target_label: __address__
+
+      - job_name: deerflow-runtimes
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace]
+            regex: {{ .Values.global.namespaces.main }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: de-.*-helper
+            action: keep
+          # 每个声明的容器端口各生成一条 target；helper sidecar 未声明端口，
+          # pod SD 会额外出无用的 :80 目标。只保留运行时声明的 8001。
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "8001"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace]
+            regex: {{ $mn }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: kube-state-metrics
+            action: keep
+
+      # AEP 控制面在 API 监听端口自带 /metrics（HTTP 级指标）。
+      - job_name: aep-control-service
+        static_configs:
+          - targets: ['aep-control-service.aep-system.svc.cluster.local:8080']
+      - job_name: aep-agent-control
+        static_configs:
+          - targets: ['aep-agent-control.aep-system.svc.cluster.local:8080']
+---
+# 告警规则。Prometheus 负责 hold-down（for:）与 resolved；evaluator 只转发
+# firing。覆盖曾经静默发生的故障类：节点磁盘压力/体积、抓取目标消失、
+# 节点 NotReady、pod 反复重启，以及 AEP 5xx。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: {{ $mn }}
+data:
+  zhiyuan.yml: |
+    groups:
+      - name: zhiyuan-infra
+        rules:
+          - alert: ScrapeTargetDown
+            expr: up == 0
+            for: 3m
+            labels: {severity: warning}
+            annotations:
+              summary: "Scrape target unreachable for 3m"
+          - alert: NodeDiskPressure
+            expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+            for: 5m
+            labels: {severity: critical}
+            annotations:
+              summary: "Node reports DiskPressure (5m)"
+          - alert: NodeDiskLow
+            expr: (node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"} * 100) < {{ $obs.alerts.diskLowPercent }}
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "Root filesystem below {{ $obs.alerts.diskLowPercent }}% free (10m)"
+          - alert: NodeNotReady
+            expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+            for: 5m
+            labels: {severity: critical}
+            annotations:
+              summary: "Node NotReady for 5m"
+          - alert: PodRestarting
+            expr: increase(kube_pod_container_status_restarts_total[30m]) > 5
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "Pod restarted more than 5 times in 30m"
+          - alert: AEP5xx
+            expr: sum(rate(aep_control_service_http_requests_total{status=~"5.."}[5m])) > {{ $obs.alerts.aep5xxRate }}
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "AEP control-service 5xx rate above threshold for 10m"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: {{ $mn }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-monitoring
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-monitoring
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: prometheus-monitoring}
+subjects:
+  - {kind: ServiceAccount, name: prometheus, namespace: {{ $mn }}}
+---
+# 指标属可再生软数据：默认 local-path（不受 Longhorn attach 故障面牵连），
+# RWO + Recreate（旧 pod 先退场）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: {{ $mn }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ $obs.prometheus.storage.storageClass }}
+  resources: {requests: {storage: {{ $obs.prometheus.storage.size }}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ $mn }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: {{ $obs.prometheus.image.repository }}:{{ $obs.prometheus.image.tag }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ $obs.prometheus.retention }}
+          ports: [{containerPort: 9090}]
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 9090}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: rules, mountPath: /etc/prometheus/rules}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: rules
+          configMap: {name: prometheus-rules}
+        - name: data
+          persistentVolumeClaim: {claimName: prometheus-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {{ $mn }}
+spec:
+  selector: {app: prometheus}
+  ports: [{port: 9090, targetPort: 9090}]
+---
+# 告警评估器：把 Prometheus 当前 firing 集合转发到 webhook。webhook 未配置时
+# 只把 firing 打到 pod 日志。行格式：[severity] alertname {identity labels}。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-evaluator-script
+  namespace: {{ $mn }}
+data:
+  evaluate.py: |
+    """Forward firing Prometheus alerts to the configured webhook."""
+    import json, os, sys, urllib.request
+
+    PROM = os.environ.get("PROM_URL", "http://prometheus.monitoring.svc.cluster.local:9090")
+    HOOK = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+    IDENTITY = ("instance", "node", "job", "namespace", "pod", "route", "model")
+
+    alerts = json.load(urllib.request.urlopen(PROM + "/api/v1/alerts", timeout=15)).get("data", {}).get("alerts", [])
+    firing = [a for a in alerts if a.get("state") == "firing"]
+    if not firing:
+        print("OK: no firing alerts")
+        sys.exit(0)
+
+    lines = []
+    for a in firing:
+        lb = a.get("labels", {})
+        ident = " ".join("{}={}".format(k, lb[k]) for k in IDENTITY if k in lb)
+        lines.append("[{}] {}{}: {}".format(lb.get("severity", "?"), lb.get("alertname", "?"),
+                                            (" {" + ident + "}") if ident else "",
+                                            a.get("annotations", {}).get("summary", "")))
+    print("FIRING {}:".format(len(firing)))
+    for line in lines:
+        print("  " + line)
+
+    if not HOOK:
+        print("ALERT_WEBHOOK_URL unset: log-only (placeholder)")
+        sys.exit(0)
+    body = json.dumps({"msgtype": "text", "text": {"content": "知远平台告警\n" + "\n".join(lines)}}).encode()
+    req = urllib.request.Request(HOOK, data=body, headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+    print("pushed {} alerts".format(len(firing)))
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alert-webhook
+  namespace: {{ $mn }}
+type: Opaque
+stringData:
+  url: {{ $obs.alerts.webhookUrl | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alert-evaluator
+  namespace: {{ $mn }}
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: evaluator
+              image: {{ $obs.auditShipper.image.repository }}:{{ $obs.auditShipper.image.tag }}
+              command: ["python3", "/script/evaluate.py"]
+              env:
+                - name: ALERT_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef: {name: alert-webhook, key: url, optional: true}
+              volumeMounts:
+                - {name: script, mountPath: /script}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {memory: 64Mi}
+          volumes:
+            - name: script
+              configMap: {name: alert-evaluator-script}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: {{ $mn }}
+spec:
+  selector:
+    matchLabels: {app: node-exporter}
+  template:
+    metadata:
+      labels: {app: node-exporter}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - {operator: Exists}
+      containers:
+        - name: node-exporter
+          image: {{ $obs.nodeExporter.image.repository }}:{{ $obs.nodeExporter.image.tag }}
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+          ports: [{containerPort: 9100, hostPort: 9100}]
+          resources:
+            requests: {cpu: 10m, memory: 24Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: proc, mountPath: /host/proc, readOnly: true}
+            - {name: sys, mountPath: /host/sys, readOnly: true}
+            - {name: root, mountPath: /host/root, readOnly: true}
+      volumes:
+        - {name: proc, hostPath: {path: /proc}}
+        - {name: sys, hostPath: {path: /sys}}
+        - {name: root, hostPath: {path: /}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: {{ $mn }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-state-metrics}
+  template:
+    metadata:
+      labels: {app: kube-state-metrics}
+    spec:
+      containers:
+        - name: kube-state-metrics
+          image: {{ $obs.kubeStateMetrics.image.repository }}:{{ $obs.kubeStateMetrics.image.tag }}
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: {{ $mn }}
+spec:
+  selector: {app: kube-state-metrics}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: {{ $mn }}
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus.{{ $mn }}.svc.cluster.local:9090
+        isDefault: true
+        access: proxy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: {{ $mn }}
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        folder: Zhiyuan
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: {{ $mn }}
+data:
+  default-dashboard.json: |
+    {
+      "title": "Zhiyuan Platform Overview",
+      "tags": ["zhiyuan"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "panels": [
+        {
+          "id": 1, "title": "Active Conversations",
+          "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+          "targets": [{"expr": "sum(deerflow_conversations_active)"}]
+        },
+        {
+          "id": 2, "title": "Runtime Instances",
+          "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+          "targets": [{"expr": "count(deerflow_process_info)"}]
+        },
+        {
+          "id": 3, "title": "AEP HTTP Requests (5m, by status)",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "targets": [{"expr": "sum(rate(aep_control_service_http_requests_total[5m])) by (status)"}]
+        },
+        {
+          "id": 4, "title": "AEP HTTP p95 Latency",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(aep_control_service_http_request_duration_seconds_bucket[5m])) by (le))"}]
+        },
+        {
+          "id": 5, "title": "Node Memory",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+          "targets": [{"expr": "100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)"}]
+        },
+        {
+          "id": 6, "title": "Node Disk Free (/)",
+          "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+          "targets": [{"expr": "node_filesystem_avail_bytes{mountpoint=\"/\"} / 1024 / 1024 / 1024"}]
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: {{ $mn }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      containers:
+        - name: grafana
+          image: {{ $obs.grafana.image.repository }}:{{ $obs.grafana.image.tag }}
+          env:
+            - {name: GF_SECURITY_ADMIN_PASSWORD, value: {{ $obs.grafana.adminPassword | quote }}}
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_INSTALL_PLUGINS, value: ""}
+          ports: [{containerPort: 3000}]
+          readinessProbe:
+            httpGet: {path: /api/health, port: 3000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources}
+            - {name: dashboards-provider, mountPath: /etc/grafana/provisioning/dashboards}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: dashboards-provider
+          configMap: {name: grafana-dashboard-provider}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: {{ $mn }}
+spec:
+  type: NodePort
+  selector: {app: grafana}
+  ports: [{port: 3000, targetPort: 3000, nodePort: {{ $obs.grafana.nodePort }}}]
+{{- end }}
