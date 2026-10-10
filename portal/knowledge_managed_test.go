@@ -47,7 +47,7 @@ func TestManagedKnowledgeFileUploadUsesOnlyFileAndAuditsDocumentID(t *testing.T)
 			defer func() { _ = file.Close() }()
 			data, _ := io.ReadAll(file)
 			uploaded = string(data)
-			_, _ = w.Write([]byte(`{"data":{"id":"doc-1","knowledge_base_id":"kb-1","file_name":"note.txt","parse_status":"pending"}}`))
+			_, _ = w.Write([]byte(`{"data":{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"kb-1","file_name":"note.txt","parse_status":"pending"}}`))
 		default:
 			t.Errorf("unexpected upstream request %s", r.URL.Path)
 		}
@@ -213,7 +213,7 @@ func TestManagedKnowledgeRejectsDocumentTenantDrift(t *testing.T) {
 		assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
 		assert.NoError(t, h.dbmock.ExpectationsWereMet())
 	})
-	t.Run("upload result belongs to different base", func(t *testing.T) {
+	t.Run("list item belongs to different tenant", func(t *testing.T) {
 		stub := newServicesStubs(t)
 		h := newServicesHarness(t, stub)
 		configureManagedTest(t, h, "10000")
@@ -223,31 +223,66 @@ func TestManagedKnowledgeRejectsDocumentTenantDrift(t *testing.T) {
 				_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
 			case "/api/v1/knowledge-bases/kb-1":
 				_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
-			case "/api/v1/knowledge-bases/kb-1/knowledge/file":
-				_, _ = w.Write([]byte(`{"data":{"id":"doc-1","knowledge_base_id":"other-kb"}}`))
+			case "/api/v1/knowledge-bases/kb-1/knowledge":
+				_, _ = w.Write([]byte(`{"data":[{"id":"doc-1","tenant_id":90000,"knowledge_base_id":"kb-1","name":"foreign"}],"total":1,"page":1,"page_size":20}`))
 			}
 		}))
 		defer server.Close()
 		h.cfg.knowledgeAPIURL = server.URL
 		h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-		h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
-		h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "unverified", 502).WillReturnResult(sqlmock.NewResult(0, 1))
-		var body bytes.Buffer
-		form := multipart.NewWriter(&body)
-		part, err := form.CreateFormFile("file", "note.txt")
-		require.NoError(t, err)
-		_, _ = part.Write([]byte("text"))
-		require.NoError(t, form.Close())
-		req := httptest.NewRequest(http.MethodPost, "/", &body)
-		req.Header.Set("Content-Type", form.FormDataContentType())
+		req := httptest.NewRequest(http.MethodGet, "/?page=1", nil)
 		req.SetPathValue("baseID", "kb-1")
 		w := httptest.NewRecorder()
-		h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+		h.handleManagedKnowledgeDocuments(w, req, adminIdentityForManagedTest())
 		assert.Equal(t, http.StatusBadGateway, w.Code)
-		assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_UNAVAILABLE")
-		assert.Contains(t, w.Body.String(), `"operationId":"kbop-`)
+		assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
+		assert.NotContains(t, w.Body.String(), `"name":"foreign"`)
 		assert.NoError(t, h.dbmock.ExpectationsWereMet())
 	})
+	for _, tc := range []struct {
+		name     string
+		response string
+	}{
+		{name: "upload result belongs to different base", response: `{"data":{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"other-kb"}}`},
+		{name: "upload result belongs to different tenant", response: `{"data":{"id":"doc-1","tenant_id":90000,"knowledge_base_id":"kb-1"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge-bases/kb-1/knowledge/file":
+					_, _ = w.Write([]byte(tc.response))
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", "unverified", 502).WillReturnResult(sqlmock.NewResult(0, 1))
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			part, err := form.CreateFormFile("file", "note.txt")
+			require.NoError(t, err)
+			_, _ = part.Write([]byte("text"))
+			require.NoError(t, form.Close())
+			req := httptest.NewRequest(http.MethodPost, "/", &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			req.SetPathValue("baseID", "kb-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+			assert.Equal(t, http.StatusBadGateway, w.Code)
+			assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
+			assert.Contains(t, w.Body.String(), `"operationId":"kbop-`)
+			assert.NotContains(t, w.Body.String(), `"resourceId"`)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestManagedKnowledgeReadinessSanitizesUpstreamStatusesAndRedirects(t *testing.T) {
@@ -552,7 +587,7 @@ func TestManagedKnowledgeDocumentsForwardsWhitelistedPagination(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
 		case "/api/v1/knowledge-bases/kb-1/knowledge":
 			docsQuery = r.URL.Query().Get("page") == "2" && r.URL.Query().Get("page_size") == "20" && r.URL.Query().Get("keyword") == "a/b"
-			_, _ = w.Write([]byte(`{"data":[{"id":"doc-1","knowledge_base_id":"kb-1","name":"Note","file_name":"note.txt","parse_status":"completed","created_at":"2026-10-09T05:00:00Z","provider_secret":"must-not-return"}],"total":1,"page":2,"page_size":20}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"kb-1","name":"Note","file_name":"note.txt","parse_status":"completed","created_at":"2026-10-09T05:00:00Z","provider_secret":"must-not-return"}],"total":1,"page":2,"page_size":20}`))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}

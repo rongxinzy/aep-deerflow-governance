@@ -104,6 +104,52 @@ func TestManagedKnowledgeManualImportRejectsUnknownFieldsBeforeWrites(t *testing
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 
+func TestManagedKnowledgeManualImportMapsUpstreamConflictsAndSizeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		upstream   int
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "duplicate", upstream: http.StatusConflict, wantStatus: http.StatusConflict, wantCode: "DUPLICATE_KNOWLEDGE"},
+		{name: "too large", upstream: http.StatusRequestEntityTooLarge, wantStatus: http.StatusRequestEntityTooLarge, wantCode: "KNOWLEDGE_INPUT_TOO_LARGE"},
+		{name: "rejected", upstream: http.StatusBadRequest, wantStatus: http.StatusBadGateway, wantCode: "KNOWLEDGE_UPSTREAM_REJECTED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var importCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge-bases/kb-1/knowledge/manual":
+					importCalls++
+					w.WriteHeader(tc.upstream)
+				default:
+					t.Errorf("unexpected upstream request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "failed", tc.upstream).WillReturnResult(sqlmock.NewResult(0, 1))
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"title":"Guide","content":"safe body"}`))
+			req.SetPathValue("baseID", "kb-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeImportManual(w, req, adminIdentityForManagedTest())
+			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), tc.wantCode)
+			assert.Equal(t, 1, importCalls)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestManagedKnowledgeDocumentOwnershipRejectsUnregisteredParent(t *testing.T) {
 	stub := newServicesStubs(t)
 	h := newServicesHarness(t, stub)
@@ -228,6 +274,54 @@ func TestManagedKnowledgeDownloadStreamsOnlyAfterOwnershipAndNoRedirect(t *testi
 	}
 }
 
+func TestManagedKnowledgeFileRejectsUnknownKindAndAuditFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		kind       string
+		wantStatus int
+		failAudit  bool
+	}{
+		{name: "unknown kind", kind: "raw", wantStatus: http.StatusNotFound},
+		{name: "audit unavailable", kind: "download", wantStatus: http.StatusServiceUnavailable, failAudit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var fileCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge/doc-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"kb-1","file_name":"guide.pdf"}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge/doc-1/download":
+					fileCalls++
+					_, _ = w.Write([]byte("file"))
+				default:
+					t.Errorf("unexpected upstream request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			if tc.failAudit {
+				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnError(errors.New("audit unavailable"))
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.SetPathValue("documentID", "doc-1")
+			req.SetPathValue("fileKind", tc.kind)
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeFile(w, req, adminIdentityForManagedTest())
+			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			assert.Zero(t, fileCalls)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
 type managedKnowledgeReadErrorReader struct{ read bool }
 
 func (r *managedKnowledgeReadErrorReader) Read(p []byte) (int, error) {
@@ -312,12 +406,11 @@ func TestManagedKnowledgeDocumentMutationsUseFixedRoutesAndAudit(t *testing.T) {
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-			verb := action
-			if action == "cancel-parse" {
-				verb = "cancel_parse"
-			} else if action == "delete" {
-				verb = "delete_document"
-			}
+			verb := map[string]string{
+				"reparse":      "reparse",
+				"cancel-parse": "cancel_parse",
+				"delete":       "delete_document",
+			}[action]
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", verb, "document", "doc-1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
 			auditStatus := http.StatusOK
 			responseStatus := http.StatusAccepted
@@ -364,18 +457,16 @@ func TestManagedKnowledgeChunkAndSpanResponsesAreScopedAndProjected(t *testing.T
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-			action := "read_chunks"
-			if kind == "spans" {
-				action = "read_spans"
-			}
+			action := map[string]string{"chunks": "read_chunks", "spans": "read_spans"}[kind]
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", action, "document", "doc-1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
 			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", "succeeded", http.StatusOK).WillReturnResult(sqlmock.NewResult(0, 1))
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.SetPathValue("documentID", "doc-1")
 			w := httptest.NewRecorder()
-			if kind == "chunks" {
+			switch kind {
+			case "chunks":
 				h.handleManagedKnowledgeChunks(w, req, adminIdentityForManagedTest())
-			} else {
+			case "spans":
 				h.handleManagedKnowledgeSpans(w, req, adminIdentityForManagedTest())
 			}
 			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -383,6 +474,61 @@ func TestManagedKnowledgeChunkAndSpanResponsesAreScopedAndProjected(t *testing.T
 			assert.NotContains(t, w.Body.String(), "never-return")
 			assert.NotContains(t, w.Body.String(), "external.invalid")
 			assert.NotContains(t, w.Body.String(), "error_detail")
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestManagedKnowledgeChunksForwardOnlyValidPaginationAndTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantQuery  string
+	}{
+		{name: "ui pagination and type", query: "page=1&page_size=20&chunk_type=text", wantStatus: http.StatusOK, wantQuery: "chunk_type=text&page=1&page_size=20"},
+		{name: "pagination only", query: "page=2&page_size=10", wantStatus: http.StatusOK, wantQuery: "page=2&page_size=10"},
+		{name: "unknown parameter", query: "page=1&tenant_id=10000", wantStatus: http.StatusBadRequest},
+		{name: "duplicate pagination", query: "page=1&page=2", wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var chunkCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge/doc-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"kb-1"}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/chunks/doc-1":
+					chunkCalls++
+					assert.Equal(t, tc.wantQuery, r.URL.RawQuery)
+					_, _ = w.Write([]byte(`{"data":[],"total":0,"page":1,"page_size":20}`))
+				default:
+					t.Errorf("unexpected upstream request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			if tc.wantStatus == http.StatusOK {
+				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "read_chunks", "document", "doc-1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+				h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", "succeeded", http.StatusOK).WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+			req := httptest.NewRequest(http.MethodGet, "/?"+tc.query, nil)
+			req.SetPathValue("documentID", "doc-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeChunks(w, req, adminIdentityForManagedTest())
+			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			if tc.wantStatus == http.StatusOK {
+				assert.Equal(t, 1, chunkCalls)
+			} else {
+				assert.Zero(t, chunkCalls)
+			}
 			assert.NoError(t, h.dbmock.ExpectationsWereMet())
 		})
 	}
@@ -431,7 +577,8 @@ func TestManagedChunkImageProxyRequiresVerifiedChunkAndImageBytes(t *testing.T) 
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-			if tc.name == "success" || tc.name == "wrong MIME bytes" {
+			switch tc.name {
+			case "success", "wrong MIME bytes":
 				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "read_chunk_image", "document", "doc-1", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
 				h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 			}
@@ -444,11 +591,12 @@ func TestManagedChunkImageProxyRequiresVerifiedChunkAndImageBytes(t *testing.T) 
 			assert.Equal(t, tc.want, w.Code, w.Body.String())
 			assert.NotContains(t, w.Body.String(), "resource://")
 			assert.NotContains(t, w.Body.String(), "example.invalid")
-			if tc.name == "success" {
+			switch tc.name {
+			case "success":
 				assert.Equal(t, "image/png", w.Header().Get("Content-Type"))
 				assert.Contains(t, w.Body.String(), "synthetic image")
 				assert.Equal(t, 1, imageHits)
-			} else if tc.name == "cross tenant" || tc.name == "cross KB" || tc.name == "external URL" {
+			case "cross tenant", "cross KB", "external URL":
 				assert.Zero(t, imageHits, "unverified ownership/reference must not reach the image endpoint")
 			}
 			assert.NoError(t, h.dbmock.ExpectationsWereMet())
@@ -554,6 +702,110 @@ func TestManagedKnowledgeMalformedSpansDoNotRecordSuccessAudit(t *testing.T) {
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 
+func TestManagedKnowledgeImportRejectsForeignTenantWithoutReturningResourceDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "url", path: "/api/v1/knowledge-bases/kb-1/knowledge/url", body: `{"url":"https://` + net.IP{8, 8, 8, 8}.String() + `/private","title":"private title"}`},
+		{name: "manual", path: "/api/v1/knowledge-bases/kb-1/knowledge/manual", body: `{"title":"private title","content":"private body"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case tc.path:
+					_, _ = w.Write([]byte(`{"data":{"id":"foreign-doc-id","tenant_id":90000,"knowledge_base_id":"kb-1","name":"private title","content":"private body"}}`))
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "create_"+tc.name, "document", "", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "foreign-doc-id", "unverified", 502).WillReturnResult(sqlmock.NewResult(0, 1))
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			req.SetPathValue("baseID", "kb-1")
+			w := httptest.NewRecorder()
+			switch tc.name {
+			case "url":
+				h.handleManagedKnowledgeImportURL(w, req, adminIdentityForManagedTest())
+			case "manual":
+				h.handleManagedKnowledgeImportManual(w, req, adminIdentityForManagedTest())
+			}
+			assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
+			assert.Contains(t, w.Body.String(), `"operationId":"kbop-`)
+			assert.NotContains(t, w.Body.String(), "foreign-doc-id")
+			assert.NotContains(t, w.Body.String(), "private title")
+			assert.NotContains(t, w.Body.String(), "private body")
+			assert.NotContains(t, w.Body.String(), `"resourceId"`)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestManagedKnowledgeSpansValidateAttemptAndRequireAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantSpan   bool
+	}{
+		{name: "negative attempt", query: "attempt=-1", wantStatus: http.StatusBadRequest},
+		{name: "unknown pagination key", query: "page=1", wantStatus: http.StatusBadRequest},
+		{name: "audit unavailable", query: "attempt=2", wantStatus: http.StatusServiceUnavailable, wantSpan: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var spanCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge/doc-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"doc-1","tenant_id":10000,"knowledge_base_id":"kb-1"}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge/doc-1/spans":
+					spanCalls++
+					assert.Equal(t, "2", r.URL.Query().Get("attempt"))
+					_, _ = w.Write([]byte(`{"data":{"knowledge_id":"doc-1","attempt":2,"latest_attempt":2,"parse_status":"completed","trace":{}}}`))
+				default:
+					t.Errorf("unexpected upstream request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			if tc.wantSpan {
+				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnError(errors.New("audit unavailable"))
+			}
+			req := httptest.NewRequest(http.MethodGet, "/?"+tc.query, nil)
+			req.SetPathValue("documentID", "doc-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeSpans(w, req, adminIdentityForManagedTest())
+			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			if tc.wantSpan {
+				assert.Equal(t, 1, spanCalls)
+			} else {
+				assert.Zero(t, spanCalls)
+			}
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
 func adminIdentityForManagedTest() identity {
 	return identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}}
 }
@@ -564,6 +816,25 @@ func TestManagedFileNameHeadersAreSanitized(t *testing.T) {
 	assert.NotContains(t, got, "\n")
 	assert.NotContains(t, got, "../")
 	assert.Contains(t, got, "bad.txt")
+}
+
+func TestManagedSafeContentTypeAllowlist(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{name: "manual.PDF", want: "application/pdf"},
+		{name: "image.png", want: "image/png"},
+		{name: "image.jpeg", want: "image/jpeg"},
+		{name: "image.gif", want: "image/gif"},
+		{name: "image.webp", want: "image/webp"},
+		{name: "notes.md", want: "text/plain; charset=utf-8"},
+		{name: "payload.svg", want: "application/octet-stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, managedSafeContentType(tc.name))
+		})
+	}
 }
 
 func TestManagedKnowledgeURLRejectsPrivateDNSResults(t *testing.T) {

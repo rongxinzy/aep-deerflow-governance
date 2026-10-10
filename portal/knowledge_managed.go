@@ -791,7 +791,7 @@ func (p *portal) handleManagedKnowledgeDocuments(w http.ResponseWriter, r *http.
 	}
 	for index := range page.Data {
 		document := &page.Data[index]
-		if document.ID == "" || document.KnowledgeBaseID != id {
+		if document.ID == "" || document.TenantID.String() != tenant || document.KnowledgeBaseID != id {
 			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "文档列表包含不属于当前知识库的项目", "")
 			return
 		}
@@ -849,11 +849,12 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var result managedKnowledge
-	if decodeManagedData(resp, &result) != nil || result.ID == "" || result.KnowledgeBaseID != id {
-		_ = p.finishManagedAudit(r.Context(), op, "", "unverified", 502)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传结果无法验证，请使用操作编号核对", op)
+	if decodeManagedData(resp, &result) != nil || result.ID == "" || result.TenantID.String() != tenant || result.KnowledgeBaseID != id {
+		_ = p.finishManagedAudit(r.Context(), op, result.ID, "unverified", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "文件上传结果无法验证，请使用操作编号核对", op)
 		return
 	}
+	normalizeManagedKnowledge(&result)
 	if err := p.finishManagedAudit(r.Context(), op, result.ID, "accepted", 202); err != nil {
 		p.managedWriteErrorResource(w, 503, "AUDIT_UNAVAILABLE", "文件已提交但审计结果更新失败", op, result.ID)
 		return
@@ -970,7 +971,7 @@ func (p *portal) managedCreateDocument(w http.ResponseWriter, r *http.Request, i
 	var created managedKnowledge
 	if err := decodeManagedData(resp, &created); err != nil || created.ID == "" || created.KnowledgeBaseID != baseID || created.TenantID.String() != tenant {
 		_ = p.finishManagedAudit(r.Context(), op, created.ID, "unverified", 502)
-		p.managedWriteErrorResource(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游导入结果无法安全验证", op, created.ID)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游导入结果无法安全验证", op)
 		return
 	}
 	normalizeManagedKnowledge(&created)
@@ -1275,6 +1276,13 @@ func (p *portal) handleManagedKnowledgeSpans(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	query := url.Values{}
+	allowedQuery := map[string]bool{"attempt": true}
+	for name := range r.URL.Query() {
+		if !allowedQuery[name] {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "解析过程查询参数无效", "")
+			return
+		}
+	}
 	if values, present := r.URL.Query()["attempt"]; present {
 		if len(values) != 1 {
 			p.managedWriteError(w, 400, "INVALID_QUERY", "解析轮次参数无效", "")
@@ -1321,6 +1329,12 @@ func (p *portal) handleManagedKnowledgeChunks(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	for name := range r.URL.Query() {
+		if name != "page" && name != "page_size" && name != "chunk_type" {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "分块查询参数无效", "")
+			return
+		}
+	}
 	query := url.Values{}
 	for name, max := range map[string]int{"page": 8, "page_size": 8} {
 		values, present := r.URL.Query()[name]
@@ -1338,13 +1352,14 @@ func (p *portal) handleManagedKnowledgeChunks(w http.ResponseWriter, r *http.Req
 		}
 		query.Set(name, values[0])
 	}
-	if _, ok := r.URL.Query()["chunk_type"]; len(r.URL.Query()) > 0 {
-		if !ok || len(r.URL.Query()) != 1 {
-			p.managedWriteError(w, 400, "INVALID_QUERY", "分块查询参数无效", "")
+	if types, present := r.URL.Query()["chunk_type"]; present {
+		if len(types) == 0 || len(types) > 12 {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "分块类型无效", "")
 			return
 		}
-		for _, chunkType := range r.URL.Query()["chunk_type"] {
-			if len(chunkType) > 32 || chunkType == "" {
+		allowedTypes := map[string]bool{"text": true, "parent_text": true, "image_ocr": true, "image_caption": true, "summary": true, "entity": true, "relationship": true, "faq": true, "web_search": true, "table_summary": true, "table_column": true, "wiki_page": true}
+		for _, chunkType := range types {
+			if len(chunkType) > 32 || !allowedTypes[chunkType] {
 				p.managedWriteError(w, 400, "INVALID_QUERY", "分块类型无效", "")
 				return
 			}
