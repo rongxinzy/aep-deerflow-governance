@@ -318,6 +318,7 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			bases[base.ID] = base.Name
 		}
 		kwargs["knowledge_bases"] = bases
+		kwargs["knowledge_online_authorization"] = true
 	}
 	// IM channels: the channel-connections feature gate plus the enabled
 	// providers. Only enabled providers are listed (the runtime config

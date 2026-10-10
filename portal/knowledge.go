@@ -31,6 +31,12 @@ func refuseKnowledgeRedirect(_ *http.Request, _ []*http.Request) error {
 // server-side authentication. The browser never sees WeKnora credentials.
 // Routes: /api/v1/knowledge/{path...} → WeKnora /api/v1/{path...}
 func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, ident identity) {
+	if p.cfg.managedKnowledge.tenantID != "" {
+		writeJSON(w, http.StatusGone, map[string]string{
+			"error": "legacy knowledge proxy is disabled; use the managed knowledge API",
+		})
+		return
+	}
 	if !ident.isAdmin(p.cfg) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
 		return

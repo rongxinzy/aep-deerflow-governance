@@ -33,6 +33,11 @@ spec:
             - {name: MCP_HOST, value: 0.0.0.0}
             - {name: MCP_PORT, value: {{ .Values.weknora.mcp.port | quote }}}
             - {name: MCP_SERVER_AUTH_TOKEN, value: {{ required "weknora.mcp.serverAuthToken is required (set it in values-<env>.local.yaml)" .Values.weknora.mcp.serverAuthToken | quote }}}
+            # Employee retrievals must present the short-lived Portal handle
+            # injected into the LangGraph run context. No AEP token is shared
+            # with the bridge; missing callback configuration denies reads.
+            - {name: PORTAL_KNOWLEDGE_AUTH_URL, value: "http://de-portal.{{ .Values.global.namespaces.main }}.svc.cluster.local:8090/internal/v1/knowledge/employees"}
+            - {name: PORTAL_KNOWLEDGE_AUTH_REQUIRED, value: "true"}
           ports: [{containerPort: {{ .Values.weknora.mcp.port }}}]
           readinessProbe: {tcpSocket: {port: {{ .Values.weknora.mcp.port }}}, initialDelaySeconds: 5, periodSeconds: 10}
           livenessProbe: {tcpSocket: {port: {{ .Values.weknora.mcp.port }}}, initialDelaySeconds: 20, periodSeconds: 30}

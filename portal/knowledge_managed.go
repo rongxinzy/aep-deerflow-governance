@@ -111,6 +111,8 @@ type managedChunk struct {
 	Content         string              `json:"content"`
 	ChunkType       string              `json:"chunk_type"`
 	IsEnabled       bool                `json:"is_enabled"`
+	ContentRevision int                 `json:"content_revision"`
+	IndexStatus     string              `json:"index_status"`
 	ImageInfo       string              `json:"image_info,omitempty"`
 	Images          []managedChunkImage `json:"images,omitempty"`
 }
@@ -347,7 +349,7 @@ func (p *portal) managedFetchKB(ctx context.Context, key, tenant, deployment, id
 }
 
 func safeKnowledgeID(id string) (string, bool) {
-	if id == "" || len(id) > 128 || strings.ContainsAny(id, "/\\\x00") {
+	if id == "" || id == "." || id == ".." || len(id) > 128 || strings.ContainsAny(id, "/\\\x00") {
 		return "", false
 	}
 	return id, true
@@ -1385,7 +1387,7 @@ func (p *portal) handleManagedKnowledgeChunks(w http.ResponseWriter, r *http.Req
 	}
 	for index := range page.Data {
 		chunk := &page.Data[index]
-		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant {
+		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant || chunk.ContentRevision < 1 || !managedChunkIndexStatusValid(chunk.IndexStatus) {
 			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "分块列表包含其他资料的内容", "")
 			return
 		}

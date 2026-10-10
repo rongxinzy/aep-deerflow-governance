@@ -221,6 +221,27 @@ CREATE TABLE IF NOT EXISTS knowledge_base_registry (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
 );
+CREATE TABLE IF NOT EXISTS knowledge_base_grants (
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	knowledge_base_id TEXT NOT NULL,
+	subject_type TEXT NOT NULL CHECK (subject_type IN ('user','team')),
+	subject_id TEXT NOT NULL,
+	granted_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id, subject_type, subject_id),
+	FOREIGN KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
+		REFERENCES knowledge_base_registry(deployment_id, weknora_tenant_id, knowledge_base_id)
+		ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS knowledge_runtime_contexts (
+	handle_hash TEXT PRIMARY KEY,
+	session_token TEXT NOT NULL,
+	employee_name TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_runtime_contexts_expiry ON knowledge_runtime_contexts (expires_at);
 CREATE TABLE IF NOT EXISTS knowledge_audit_events (
 	id BIGSERIAL PRIMARY KEY,
 	operation_id TEXT NOT NULL UNIQUE,

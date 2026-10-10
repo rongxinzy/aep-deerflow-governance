@@ -18,6 +18,7 @@ agent middleware chains:
 from __future__ import annotations
 
 import json
+import copy
 import threading
 import time
 import urllib.parse
@@ -165,6 +166,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         governed_tools: list[str] | None = None,
         team_names: dict[str, str] | None = None,
         knowledge_bases: dict[str, str] | None = None,
+        knowledge_online_authorization: bool = False,
         im_bot_name: str | None = None,
         scope_cache_seconds: int = 60,
         **kwargs: Any,
@@ -179,6 +181,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         # Employee knowledge-base whitelist (kb id -> display name). None =
         # legacy unrestricted bridge credential; {} = deny every search.
         self.knowledge_bases = None if knowledge_bases is None else {str(k): str(v) for k, v in knowledge_bases.items()}
+        self.knowledge_online_authorization = bool(knowledge_online_authorization)
         print(f"[aep-governance] construct governed={sorted(self.governed)} kb={sorted(self.knowledge_bases) if self.knowledge_bases is not None else None}", flush=True)
         # Display name of this employee's bot on the IM platform: @-mentions
         # of this name address the bot itself, not a delegation target.
@@ -276,26 +279,51 @@ class AepGovernanceMiddleware(AgentMiddleware):
     # weknora__). Under an explicit whitelist policy the weknora server is
     # default-deny: only these kb-scoped read tools pass, and only with an
     # in-whitelist kb_id / knowledge_base_ids.
-    _WEKNORA_READ_TOOLS = frozenset({
-        "hybrid_search",          # retrieval (kb_id)
-        "wiki_search",            # retrieval (kb_id)
-        "wiki_read_page",         # retrieval (kb_id)
-        "wiki_index_view",        # retrieval (kb_id)
-        "list_knowledge",         # list documents in one kb (kb_id)
-        "get_knowledge_base",     # describe one kb (kb_id)
-        "knowledge_search",       # dsh bridge retrieval (knowledge_base_ids)
-    })
-
-    # Full known surface of both bridges (used to attribute bare,
-    # unprefixed tool names to the weknora server — default-deny there).
-    _WEKNORA_KNOWN_TOOLS = _WEKNORA_READ_TOOLS | frozenset({
-        "create_tenant", "list_tenants", "create_knowledge_base", "list_knowledge_bases",
-        "delete_knowledge_base", "create_knowledge_from_file", "create_knowledge_from_url",
-        "get_knowledge", "delete_knowledge", "list_chunks", "delete_chunk",
-        "create_model", "list_models", "get_model",
-        "create_session", "get_session", "list_sessions", "delete_session",
-        "chat", "agent_chat", "list_agents", "get_agent",
-    })
+    # One registry is authoritative for attribution, whitelist-read policy,
+    # and online Portal authorization. Native names below match every
+    # @mcp.tool registration in WeKnora's mcp-server/weknora_mcp_server.py.
+    # Tuple fields are (whitelist_read, portal_authorized). MCP wrappers own
+    # fixed actions; middleware must not inject schema-unknown arguments.
+    _WEKNORA_TOOL_REGISTRY = {
+        "create_tenant": (False, False),
+        "list_tenants": (False, False),
+        "create_knowledge_base": (False, False),
+        "list_knowledge_bases": (True, True),
+        "list_shared_knowledge_bases": (False, False),
+        "get_knowledge_base": (True, True),
+        "delete_knowledge_base": (False, False),
+        "hybrid_search": (True, True),
+        "create_knowledge_from_file": (False, False),
+        "create_knowledge_from_url": (False, False),
+        "create_knowledge_from_text": (False, False),
+        "update_knowledge_from_text": (False, False),
+        "list_knowledge": (True, True),
+        "get_knowledge": (True, True),
+        "delete_knowledge": (False, False),
+        "create_model": (False, False),
+        "list_models": (False, False),
+        "get_model": (False, False),
+        "create_session": (False, False),
+        "get_session": (False, False),
+        "list_sessions": (False, False),
+        "delete_session": (False, False),
+        "chat": (False, False),
+        "agent_chat": (False, False),
+        "list_agents": (False, False),
+        "get_agent": (False, False),
+        "list_chunks": (True, True),
+        "delete_chunk": (False, False),
+        "wiki_search": (True, True),
+        "wiki_read_page": (True, True),
+        "wiki_index_view": (True, True),
+        # Older bridge names are recognized for default-deny attribution.
+        "search_knowledge": (True, False),
+        "grep_chunks": (True, False),
+        "read_document": (True, False),
+        "list_documents": (True, False),
+        "knowledge_search": (True, False),
+    }
+    _WEKNORA_KNOWN_TOOLS = frozenset(_WEKNORA_TOOL_REGISTRY)
 
     @staticmethod
     def _strip_server_prefix(name: str) -> str:
@@ -304,13 +332,13 @@ class AepGovernanceMiddleware(AgentMiddleware):
         ToolNode execution name is the LangChain MCP adapter form
         ``mcp__weknora__<tool>``. Normalize every variant to the bare tool
         name (segment after the weknora token)."""
+        for prefix in ("mcp__weknora__", "weknora__", "weknora_"):
+            if name.startswith(prefix):
+                return name[len(prefix):]
         parts = name.split("__")
         for index, part in enumerate(parts):
             if part == "weknora" and index + 1 < len(parts):
-                return parts[-1]
-        for prefix in ("weknora__", "weknora_"):
-            if name.startswith(prefix):
-                return name[len(prefix):]
+                return "__".join(parts[index + 1:])
         return name
 
     @classmethod
@@ -348,13 +376,20 @@ class AepGovernanceMiddleware(AgentMiddleware):
         if not self._is_weknora_tool(name):
             return None
         tool = self._strip_server_prefix(name)
+        if self.knowledge_bases == {}:
+            return ToolMessage(content=f"DENIED {name}: 未连接任何知识库（deny-all whitelist）。",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
+        policy = self._WEKNORA_TOOL_REGISTRY.get(tool)
+        if self.knowledge_online_authorization and (policy is None or not policy[1]):
+            return ToolMessage(content=f"DENIED {name}: tool is not protected by online knowledge authorization.",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
         args = dict(_tool_field(call, "args", None) or {})
         listing = "、".join(f"{kb}（{self.knowledge_bases[kb]}）" for kb in sorted(self.knowledge_bases)) or "（未连接任何知识库）"
         deny = lambda reason: ToolMessage(  # noqa: E731 - local readability
             content=f"DENIED {name}: {reason} 可用知识库：{listing}。",
             tool_call_id=str(_tool_field(call, "id", "") or ""),
         )
-        if tool not in self._WEKNORA_READ_TOOLS:
+        if policy is None or not policy[0]:
             print(f"[aep-governance] DENY weknora tool={name} (not a whitelisted read tool)", flush=True)
             return deny("该知识服务工具不在数字员工可用范围内（仅只读检索类可用）。")
         # kb_id (single) and knowledge_base_ids (list) are the two id shapes
@@ -362,10 +397,30 @@ class AepGovernanceMiddleware(AgentMiddleware):
         ids: list[str] = []
         if isinstance(args.get("kb_id"), str):
             ids.append(args["kb_id"])
+        for key in ("knowledge_base_id",):
+            if isinstance(args.get(key), str):
+                ids.append(args[key])
         requested = args.get("knowledge_base_ids")
         if isinstance(requested, list):
             ids.extend(str(item) for item in requested if str(item))
-        if not ids:
+        if tool == "list_knowledge_bases" and not ids and not self.knowledge_online_authorization:
+            # Without the online Portal filter, the bridge's tenant-wide list
+            # call cannot be made safe by a middleware-only whitelist check.
+            return deny("explicit knowledge-base scope is required; tenant-wide catalog reads are denied")
+        if tool in {"read_document", "get_knowledge", "list_chunks"}:
+            if not self.knowledge_online_authorization:
+                return deny("opaque document handles require online Portal authorization")
+            # Document handles are opaque; the MCP server resolves their KB
+            # from trusted metadata and performs the live Portal check there.
+            ids = []
+        elif tool == "list_knowledge_bases":
+            ids = list(self.knowledge_bases)
+        elif tool in {"search_knowledge", "grep_chunks", "wiki_search"} and not ids:
+            # Omitted scope means the employee's explicitly bound set, never
+            # the whole WeKnora tenant. The MCP server will intersect it with
+            # current user/team grants before querying.
+            ids = list(self.knowledge_bases)
+        if not ids and tool not in {"read_document", "get_knowledge", "list_chunks"}:
             print(f"[aep-governance] DENY weknora tool={name} (no explicit kb id)", flush=True)
             return deny("必须显式传 kb_id（或 knowledge_base_ids）指定知识库，省略该参数会被拒绝。")
         if not all(i in self.knowledge_bases for i in ids):
@@ -373,6 +428,46 @@ class AepGovernanceMiddleware(AgentMiddleware):
             return deny("本次访问的知识库不在本数字员工可用范围内。")
         print(f"[aep-governance] ALLOW weknora tool={name} ids={ids}", flush=True)
         return None
+
+    def _knowledge_context_request(self, request: Any) -> Any | ToolMessage:
+        """Overwrite model-supplied identity fields with Portal run context."""
+        call = getattr(request, "tool_call", None) or {}
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None) if runtime is not None else None
+        if not isinstance(context, dict):
+            return ToolMessage(content="DENIED: knowledge session context unavailable; start a new Portal chat request.",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
+        handle = context.get("zhiyuan_knowledge_context")
+        employee = context.get("zhiyuan_employee_name")
+        if not isinstance(handle, str) or len(handle) != 43 or not isinstance(employee, str) or not employee:
+            return ToolMessage(content="DENIED: knowledge session context unavailable; start a new Portal chat request.",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
+        args = dict(_tool_field(call, "args", None) or {})
+        # These reserved fields are injected after parsing the model call and
+        # cannot be forged through tool arguments.
+        args["knowledge_context_handle"] = handle
+        args["knowledge_employee_name"] = employee
+        # Read actions are fixed inside the corresponding MCP wrapper. Never
+        # forward a model-selected action or inject an argument absent from
+        # the tool schema.
+        args.pop("knowledge_action", None)
+        tool_name = self._strip_server_prefix(str(_tool_field(call, "name", "") or ""))
+        if tool_name in {"list_knowledge_bases", "search_knowledge", "grep_chunks", "wiki_search"} \
+                and not args.get("knowledge_base_ids"):
+            args["knowledge_base_ids"] = list(self.knowledge_bases or {})
+        normalized = dict(call) if isinstance(call, dict) else {
+            "name": _tool_field(call, "name", ""),
+            "id": _tool_field(call, "id", ""),
+        }
+        normalized["args"] = args
+        override = getattr(request, "override", None)
+        if callable(override):
+            return override(tool_call=normalized)
+        # Compatibility for the older middleware request shape used by the
+        # unit tests and older LangChain versions.
+        cloned = copy.copy(request)
+        cloned.tool_call = normalized
+        return cloned
 
     # ------------------------------------------------------------ hooks
     def _governance_message(self, aep_user: str | None, visible: frozenset[str]) -> SystemMessage:
@@ -469,8 +564,22 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> ToolMessage:
         denied = self._check(request)
-        return denied if denied is not None else handler(request)
+        if denied is not None:
+            return denied
+        if self.knowledge_online_authorization and self._is_weknora_tool(str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))):
+            enriched = self._knowledge_context_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
+        return handler(request)
 
     async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> ToolMessage:
         denied = self._check(request)
-        return denied if denied is not None else await handler(request)
+        if denied is not None:
+            return denied
+        if self.knowledge_online_authorization and self._is_weknora_tool(str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))):
+            enriched = self._knowledge_context_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
+        return await handler(request)

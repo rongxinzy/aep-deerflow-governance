@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -48,7 +54,10 @@ func chatTestPortal(t *testing.T, objs ...runtime.Object) (*portal, *httptest.Se
 	}
 	var seen []*http.Request
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Clone(r.Context()))
+		body, _ := io.ReadAll(r.Body)
+		cloned := r.Clone(r.Context())
+		cloned.Body = io.NopCloser(bytes.NewReader(body))
+		seen = append(seen, cloned)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -100,6 +109,70 @@ func TestChatProxyStampsInternalIdentity(t *testing.T) {
 	}
 	if got := up.URL.Path; got != "/api/threads/t1/runs/wait" {
 		t.Errorf("upstream path = %q", got)
+	}
+}
+
+func TestChatProxyReplacesCallerKnowledgeContextWithSessionBoundHandle(t *testing.T) {
+	employee := readyEmployee("sales-helper", "user-1")
+	employee.Spec.Knowledge = &dev1alpha1.KnowledgeSpec{Bases: []dev1alpha1.KnowledgeBaseRef{{ID: "kb-1"}}}
+	p, _, seen := chatTestPortal(t, employee, memkeySecret("sales-helper"))
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	p.db = db
+	p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	mock.ExpectExec(`INSERT INTO knowledge_runtime_contexts \(handle_hash,session_token,employee_name,expires_at\) VALUES`).
+		WithArgs(sqlmock.AnyArg(), "portal-session", "sales-helper", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM knowledge_runtime_contexts WHERE expires_at < now\(\)`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO employee_activity`).WithArgs("sales-helper").WillReturnResult(sqlmock.NewResult(0, 1))
+	request := httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/threads/t1/runs/wait", strings.NewReader(`{"input":{"messages":[]},"context":{"zhiyuan_knowledge_context":"forged-body-context","client":"ok"}}`))
+	request.SetPathValue("name", "sales-helper")
+	request.SetPathValue("rest", "threads/t1/runs/wait")
+	request.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "portal-session"})
+	request.Header.Set(knowledgeContextHeader, "forged-client-context")
+	w := httptest.NewRecorder()
+	p.handleChat(w, request, identity{UserID: "user-1"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, sql = %v", w.Code, w.Body.String(), mock.ExpectationsWereMet())
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("upstream saw %d requests", len(*seen))
+	}
+	got := (*seen)[0].Header.Get(knowledgeContextHeader)
+	if got == "" || got == "forged-client-context" || len(got) != 43 {
+		t.Errorf("context header = %q, want a fresh opaque handle", got)
+	}
+	var payload struct {
+		Context map[string]any `json:"context"`
+	}
+	if err := json.NewDecoder((*seen)[0].Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if runHandle, _ := payload.Context["zhiyuan_knowledge_context"].(string); runHandle != got {
+		t.Errorf("run context handle = %q, want proxy-issued opaque handle", runHandle)
+	}
+	if employeeName, _ := payload.Context["zhiyuan_employee_name"].(string); employeeName != "sales-helper" {
+		t.Errorf("run employee context = %q, want server-selected employee", employeeName)
+	}
+	if payload.Context["client"] != "ok" {
+		t.Errorf("unrelated caller context was not preserved: %#v", payload.Context)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInjectKnowledgeRunContextRejectsMalformedAndLeavesNonRunAlone(t *testing.T) {
+	bad := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not-json"))
+	if err := injectKnowledgeRunContext(bad, "threads/t1/runs", "opaque", "employee-1"); err == nil {
+		t.Fatal("malformed LangGraph run body was accepted")
+	}
+	ordinary := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not-json"))
+	if err := injectKnowledgeRunContext(ordinary, "models", "opaque", "employee-1"); err != nil {
+		t.Fatalf("non-run endpoint was modified: %v", err)
 	}
 }
 
