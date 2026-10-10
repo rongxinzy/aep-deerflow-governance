@@ -381,9 +381,10 @@ func TestManagedKnowledgeChunkImageRejectsInvalidReferencesAndAuditFailures(t *t
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-			if tc.name == "audit intent unavailable" {
+			switch tc.name {
+			case "audit intent unavailable":
 				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnError(errors.New("audit unavailable"))
-			} else if tc.name == "image upstream rejected" {
+			case "image upstream rejected":
 				h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
 				h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", "failed", http.StatusBadGateway).WillReturnResult(sqlmock.NewResult(0, 1))
 			}
