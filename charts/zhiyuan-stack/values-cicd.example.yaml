@@ -87,7 +87,7 @@ images:
   portal: { repository: rongxinzy/de-portal, tag: "0.21.0" }
   # 2026-10-10 起默认不部署（chatUI.enabled=false）；条目仅回滚保留。
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.13.0" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.14.0" }
   # v25 = governance TypedDict fix (tool interception live); PORTAL_RUNTIME_IMAGE
   # (new-employee default) renders from this entry since 2026-10-06.
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v25" }
