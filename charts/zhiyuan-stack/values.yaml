@@ -183,7 +183,7 @@ adminConsole:
   weknoraNodePort: 30163
   weknoraUIURL: http://frontend.weknora.svc.cluster.local
   # Companion messenger (Pi Durable 搭档) embedded as the workbench home iframe.
-  companionBaseURL: http://pi-companion.digital-employees.svc.cluster.local:8080
+  companionBaseURL: http://pi-companion.digital-employees.svc.cluster.local
 
 # Online GLM through Higress: Anthropic passthrough for the runtime
 # (ChatAnthropic) plus the openai<->anthropic conversion route for
