@@ -113,12 +113,16 @@ func TestHandleContacts(t *testing.T) {
 	t.Run("team listing failure fails the whole directory closed", func(t *testing.T) {
 		resetAdminTokenCache(t)
 		// 静默降级会让部门分组时有时无地漂移；与 users 页失败同纪律整体拒绝。
-		// fetchTeamNames 先于 users 循环执行：admin 登录成功 + teams 503 即走完路径
+		// fetchTeamNames 先于 users 循环执行；usersHits=0 证明 502 确来自 teams 分支。
+		var usersHits int
 		stubs := &departmentStubUpstreams{
 			aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/aep/v1/auth/password/login" {
 					_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
 					return
+				}
+				if r.URL.Path == "/aep/v1/admin/users" {
+					usersHits++
 				}
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -132,6 +136,49 @@ func TestHandleContacts(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.handleContacts(w, req, identity{UserID: "u1", Username: "zhangsan", DisplayName: "张三"})
 		assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+		assert.Zero(t, usersHits, "502 must come from the teams branch, not the users loop")
+		// 员工面响应不得透传上游 body（问题原文只进日志）
+		assert.Contains(t, w.Body.String(), "listing teams")
+		assert.NotContains(t, w.Body.String(), "about:blank")
+	})
+
+	t.Run("team names follow nextCursor beyond the first page", func(t *testing.T) {
+		resetAdminTokenCache(t)
+		pages := map[string]string{
+			"":        `{"teams":[{"id":"rd","name":"研发部"}],"nextCursor":"t2"}`,
+			"t2":      `{"teams":[{"id":"sales","name":"销售部"}],"nextCursor":null}`,
+		}
+		stubs := &departmentStubUpstreams{
+			aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/aep/v1/auth/password/login":
+					_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
+				case r.URL.Path == "/aep/v1/user/me":
+					_, _ = w.Write([]byte(`{"user":{"id":"u1","displayName":"张三","kind":"human"},"roles":[]}`))
+				case r.URL.Path == "/aep/v1/admin/teams":
+					body, ok := pages[r.URL.Query().Get("cursor")]
+					if !ok {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(body))
+				case r.URL.Path == "/aep/v1/admin/users":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"items":[{"id":"u9","username":"sunqi","displayName":"孙七","kind":"human","status":"active","teamIds":["sales"]}],"nextCursor":null}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})),
+			ov:      httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+			weknora: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+		}
+		h := newDepartmentHarness(t, stubs)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", nil)
+		w := httptest.NewRecorder()
+		h.handleContacts(w, req, identity{UserID: "u1", Username: "zhangsan", DisplayName: "张三"})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Body.String(), `"name":"销售部"`, "second-page team must resolve")
 	})
 
 	t.Run("AEP problem+json error rejects the listing instead of 200-empty", func(t *testing.T) {

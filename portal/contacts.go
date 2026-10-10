@@ -30,10 +30,12 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 	if teamErr != nil {
 		// Fail closed, same as a failed users page: a silent partial org
 		// structure would surface as departments flickering in and out.
+		// The upstream detail stays in the log; employees get the same
+		// sanitized wording as the users-page failure path.
 		if p.logger != nil {
 			p.logger.Warn("contacts: team listing failed", "error", teamErr.Error())
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": teamErr.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "aep returned an error listing teams"})
 		return
 	}
 
@@ -129,40 +131,57 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 }
 
 // fetchTeamNames resolves AEP team ids to display names for the contacts org
-// structure. Mirrors handleListDepartments' single paged-at-100 listing (the
-// admin console accepts the same bound); any non-200 answer fails the whole
+// structure. Follows nextCursor with the same 10-page guard as the users loop
+// (AEP pages teams for real; stopping at page one would silently drop every
+// member past the 100th team into 未分组); any non-200 page fails the whole
 // map so the caller can fail closed instead of half-grouping the directory.
+// Upstream bodies stay in the error for the server log — the employee-facing
+// response gets the sanitized message only (same discipline as the users loop).
 func (p *portal) fetchTeamNames(ctx context.Context, adminToken string) (map[string]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		p.cfg.aepBaseURL+"/aep/v1/admin/teams?limit=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.Header.Set("X-AEP-Protocol-Version", "1.0")
-	resp, err := serviceProbeClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("teams listing returned %d: %s", resp.StatusCode, string(raw))
-	}
-	var result struct {
-		Teams []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"teams"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("bad teams listing: %w", err)
-	}
-	names := make(map[string]string, len(result.Teams))
-	for _, t := range result.Teams {
-		if t.ID != "" && t.Name != "" {
-			names[t.ID] = t.Name
+	names := make(map[string]string, 16)
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		query := url.Values{"limit": {"100"}}
+		if cursor != "" {
+			query.Set("cursor", cursor)
 		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			p.cfg.aepBaseURL+"/aep/v1/admin/teams?"+query.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-AEP-Protocol-Version", "1.0")
+		resp, err := serviceProbeClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("teams listing returned %d: %s", resp.StatusCode, string(raw))
+		}
+		var result struct {
+			Teams []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"teams"`
+			Next *string `json:"nextCursor"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("bad teams listing: %w", err)
+		}
+		_ = resp.Body.Close()
+		for _, t := range result.Teams {
+			if t.ID != "" && t.Name != "" {
+				names[t.ID] = t.Name
+			}
+		}
+		if result.Next == nil || *result.Next == "" {
+			return names, nil
+		}
+		cursor = *result.Next
 	}
 	return names, nil
 }
