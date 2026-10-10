@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -257,36 +258,48 @@ func (p *portal) weknoraAdminCreds(ctx context.Context) (string, string) {
 	return user, pass
 }
 
-// enrichTeams fetches the user's AEP team memberships via the admin API
-// and stores them on the identity. Called once at login, cached in the
-// portal session — /user/me doesn't include teamIds.
+// enrichTeams fetches the user's AEP team memberships and stores them on
+// the identity. Called once at login and on stale-cache refresh — /user/me's
+// browser contract doesn't include teamIds, but the token-authenticated call
+// does (AEP contract enhancement): real-time team data with zero admin
+// credential usage. When the user token is absent or rejected (the norm for
+// sessions restored after a rolling restart — their mint-time AEP token has
+// long expired), the admin user listing is the fallback so department scope
+// self-heals instead of staying collapsed until the next login.
 func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
 	if len(ident.Teams) > 0 && !ident.needsTeamRefresh() {
 		return // fresh enough
 	}
-	if ident.Token == "" {
-		return // no token to verify against
+	if p.enrichTeamsWithToken(ctx, ident) {
+		return
 	}
-	// Use the user's own token against /user/me — the response now
-	// includes teamIds (AEP contract enhancement). This gives real-time
-	// team data with zero admin credential usage: "authenticate once,
-	// authorize per-request".
+	p.enrichTeamsFromAdmin(ctx, ident)
+}
+
+// enrichTeamsWithToken tries the user's own token against /user/me.
+// Returns false when the token is missing or rejected (caller falls back).
+func (p *portal) enrichTeamsWithToken(ctx context.Context, ident *identity) bool {
+	if ident.Token == "" {
+		return false // no token to verify against
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		p.cfg.aepBaseURL+"/aep/v1/user/me", nil)
 	if err != nil {
-		return
+		return false
 	}
 	request.Header.Set("Authorization", "Bearer "+ident.Token)
 	request.Header.Set("X-AEP-Protocol-Version", "1.0")
 	resp, err := serviceProbeClient.Do(request)
 	if err != nil {
 		p.logger.Warn("enrichTeams: /user/me unreachable", "error", err)
-		return // keep cached teams; next request retries
+		return false // caller falls back to the admin listing
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		p.logger.Warn("enrichTeams: /user/me returned non-OK", "status", resp.StatusCode)
-		return
+		// Expired tokens are the steady state for restored sessions; keep
+		// this quiet — the fallback below is the designed path for them.
+		p.logger.Info("enrichTeams: /user/me rejected, falling back to admin listing", "status", resp.StatusCode)
+		return false
 	}
 	var result struct {
 		User struct {
@@ -294,13 +307,73 @@ func (p *portal) enrichTeams(ctx context.Context, ident *identity) {
 		} `json:"user"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
-		return
+		return false
 	}
 	ident.Teams = result.User.TeamIDs
 	if ident.Teams == nil {
 		ident.Teams = []string{}
 	}
 	ident.TeamsFetchedAt = time.Now()
+	return true
+}
+
+// enrichTeamsFromAdmin recovers team memberships through the admin user
+// listing (same paginated surface contacts uses). Only reached when the
+// user-token path is unavailable — the cost is bounded by the 5-minute
+// staleness window per session.
+func (p *portal) enrichTeamsFromAdmin(ctx context.Context, ident *identity) {
+	adminToken := p.adminToken(ctx)
+	if adminToken == "" {
+		return
+	}
+	cursor := ""
+	for page := 0; page < 10; page++ {
+		query := url.Values{"limit": {"200"}}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			p.cfg.aepBaseURL+"/aep/v1/admin/users?"+query.Encode(), nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("X-AEP-Protocol-Version", "1.0")
+		resp, err := serviceProbeClient.Do(req)
+		if err != nil {
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return
+		}
+		var body struct {
+			Items []struct {
+				ID      string   `json:"id"`
+				TeamIDs []string `json:"teamIds"`
+			} `json:"items"`
+			Next *string `json:"nextCursor"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return
+		}
+		for _, u := range body.Items {
+			if u.ID == ident.UserID {
+				ident.Teams = u.TeamIDs
+				if ident.Teams == nil {
+					ident.Teams = []string{}
+				}
+				ident.TeamsFetchedAt = time.Now()
+				return
+			}
+		}
+		if body.Next == nil || *body.Next == "" {
+			return
+		}
+		cursor = *body.Next
+	}
 }
 
 // refreshSessionTeams re-fetches team memberships from AEP and updates

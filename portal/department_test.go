@@ -257,3 +257,61 @@ func TestAdminTokenCacheTTLBelowAccessTokenLifetime(t *testing.T) {
 	assert.Equal(t, "admin-token", again)
 	assert.Equal(t, before+1, stubs.aepCalls, "second call within the TTL must not re-login")
 }
+
+func TestEnrichTeamsFallsBackToAdminListing(t *testing.T) {
+	// 滚动重启后恢复的会话：mint 时的 AEP token 已过期（/user/me 401），
+	// 部门归属必须经 admin 用户列表自愈，而不是空着直到下次登录。
+	stubs := &departmentStubUpstreams{
+		aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/aep/v1/auth/password/login":
+				_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
+			case r.URL.Path == "/aep/v1/user/me":
+				w.WriteHeader(http.StatusUnauthorized)
+			case r.URL.Path == "/aep/v1/admin/users":
+				cursor := r.URL.Query().Get("cursor")
+				if cursor != "" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"items":[{"id":"someone-else","teamIds":[]},{"id":"u9","teamIds":["rd-dept"]}],"nextCursor":null}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})),
+		ov:      httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+		weknora: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+	}
+	h := newDepartmentHarness(t, stubs)
+	ident := identity{UserID: "u9", Token: "expired-aep-token"}
+	h.enrichTeams(context.Background(), &ident)
+	assert.Equal(t, []string{"rd-dept"}, ident.Teams, "expired token must self-heal via the admin listing")
+	assert.False(t, ident.TeamsFetchedAt.IsZero())
+}
+
+func TestEnrichTeamsPrefersUserToken(t *testing.T) {
+	// 活会话的自身 token 路径优先：admin 列表不应被触碰。
+	var adminHits int
+	stubs := &departmentStubUpstreams{
+		aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/aep/v1/user/me":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"user":{"id":"u9","displayName":"张三","kind":"human","teamIds":["sales-dept"]}}`))
+			case r.URL.Path == "/aep/v1/admin/users":
+				adminHits++
+				w.WriteHeader(http.StatusForbidden)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})),
+		ov:      httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+		weknora: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+	}
+	h := newDepartmentHarness(t, stubs)
+	ident := identity{UserID: "u9", Token: "live-aep-token"}
+	h.enrichTeams(context.Background(), &ident)
+	assert.Equal(t, []string{"sales-dept"}, ident.Teams)
+	assert.Zero(t, adminHits)
+}
