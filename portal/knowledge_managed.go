@@ -8,9 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -66,12 +71,70 @@ type managedModel struct {
 }
 
 type managedKnowledge struct {
-	ID              string `json:"id"`
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	Name            string `json:"name"`
-	FileName        string `json:"file_name"`
-	ParseStatus     string `json:"parse_status"`
-	CreatedAt       string `json:"created_at"`
+	ID              string      `json:"id"`
+	KnowledgeBaseID string      `json:"knowledge_base_id"`
+	TenantID        json.Number `json:"tenant_id"`
+	Type            string      `json:"type"`
+	Name            string      `json:"name"`
+	Title           string      `json:"title"`
+	Description     string      `json:"description"`
+	Source          string      `json:"source"`
+	FileName        string      `json:"file_name"`
+	FileType        string      `json:"file_type"`
+	FileSize        int64       `json:"file_size"`
+	ParseStatus     string      `json:"parse_status"`
+	EnableStatus    string      `json:"enable_status"`
+	ManualDisabled  *bool       `json:"manual_disabled,omitempty"`
+	SummaryStatus   string      `json:"summary_status"`
+	CreatedAt       string      `json:"created_at"`
+}
+
+func normalizeManagedKnowledge(doc *managedKnowledge) {
+	if doc.Name != "" {
+		return
+	}
+	if doc.Title != "" {
+		doc.Name = doc.Title
+	} else if doc.FileName != "" {
+		doc.Name = doc.FileName
+	} else {
+		doc.Name = doc.Source
+	}
+}
+
+type managedChunk struct {
+	ID              string              `json:"id"`
+	KnowledgeID     string              `json:"knowledge_id"`
+	KnowledgeBaseID string              `json:"knowledge_base_id"`
+	TenantID        json.Number         `json:"tenant_id"`
+	SeqID           int64               `json:"seq_id"`
+	Content         string              `json:"content"`
+	ChunkType       string              `json:"chunk_type"`
+	IsEnabled       bool                `json:"is_enabled"`
+	ImageInfo       string              `json:"image_info,omitempty"`
+	Images          []managedChunkImage `json:"images,omitempty"`
+}
+
+type managedChunkImage struct {
+	Index int    `json:"index"`
+	URL   string `json:"url"`
+}
+
+var managedResourceHandle = regexp.MustCompile(`^resource://[A-Za-z0-9_-]{22}$`)
+
+type managedSpan struct {
+	KnowledgeID  string        `json:"knowledge_id"`
+	Attempt      int           `json:"attempt"`
+	SpanID       string        `json:"span_id"`
+	ParentSpanID string        `json:"parent_span_id,omitempty"`
+	Name         string        `json:"name"`
+	Kind         string        `json:"kind"`
+	Status       string        `json:"status"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+	StartedAt    *time.Time    `json:"started_at,omitempty"`
+	FinishedAt   *time.Time    `json:"finished_at,omitempty"`
+	DurationMs   int64         `json:"duration_ms,omitempty"`
+	Children     []managedSpan `json:"children,omitempty"`
 }
 
 type managedError struct {
@@ -81,6 +144,69 @@ type managedError struct {
 		OperationID string `json:"operationId,omitempty"`
 		ResourceID  string `json:"resourceId,omitempty"`
 	} `json:"error"`
+}
+
+const managedKnowledgeFileMaxBytes int64 = 256 << 20
+
+var errManagedKnowledgeFileTooLarge = errors.New("knowledge file exceeds size limit")
+
+// File responses may need a bounded disk spool because the pinned WeKnora
+// handlers use chunked streaming without Content-Length. Keep at most one
+// such transfer per portal process so temporary-disk use is bounded to 256 MiB.
+var managedKnowledgeFileSpoolSlots = make(chan struct{}, 1)
+
+type managedKnowledgeFileSpool struct {
+	file *os.File
+	size int64
+}
+
+func (s *managedKnowledgeFileSpool) close() {
+	if s == nil || s.file == nil {
+		return
+	}
+	name := s.file.Name()
+	_ = s.file.Close()
+	_ = os.Remove(name)
+}
+
+func spoolManagedKnowledgeFile(src io.Reader, declaredSize, maxBytes int64, tempDir string) (*managedKnowledgeFileSpool, error) {
+	if declaredSize > maxBytes {
+		return nil, errManagedKnowledgeFileTooLarge
+	}
+	f, err := os.CreateTemp(tempDir, "zhiyuan-managed-knowledge-*")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return nil, err
+	}
+	n, err := io.Copy(f, io.LimitReader(src, maxBytes+1))
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	if n > maxBytes {
+		cleanup()
+		return nil, errManagedKnowledgeFileTooLarge
+	}
+	if n == 0 {
+		cleanup()
+		return nil, errors.New("knowledge file is empty")
+	}
+	if declaredSize >= 0 && n != declaredSize {
+		cleanup()
+		return nil, errors.New("knowledge file length mismatch")
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return &managedKnowledgeFileSpool{file: f, size: n}, nil
 }
 
 func (p *portal) managedReadyIdentity(ident identity) bool {
@@ -663,11 +789,13 @@ func (p *portal) handleManagedKnowledgeDocuments(w http.ResponseWriter, r *http.
 		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文档列表读取失败", "")
 		return
 	}
-	for _, document := range page.Data {
+	for index := range page.Data {
+		document := &page.Data[index]
 		if document.ID == "" || document.KnowledgeBaseID != id {
 			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "文档列表包含不属于当前知识库的项目", "")
 			return
 		}
+		normalizeManagedKnowledge(document)
 	}
 	writeJSON(w, 200, map[string]any{"data": page.Data, "total": page.Total, "page": page.Page, "pageSize": page.PageSize})
 }
@@ -731,4 +859,664 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, 202, map[string]any{"data": result, "operationId": op})
+}
+
+func (p *portal) handleManagedKnowledgeImportURL(w http.ResponseWriter, r *http.Request, ident identity) {
+	var in struct {
+		URL      string `json:"url"`
+		Title    string `json:"title"`
+		FileName string `json:"file_name"`
+		FileType string `json:"file_type"`
+	}
+	if decodeStrictJSON(w, r, &in, 16<<10) != nil || len(in.URL) > 2048 || len(in.Title) > 200 || len(in.FileName) > 255 || len(in.FileType) > 32 {
+		p.managedWriteError(w, 400, "INVALID_REQUEST", "URL 导入参数无效", "")
+		return
+	}
+	if err := validateManagedKnowledgeURL(r.Context(), in.URL); err != nil {
+		p.managedWriteError(w, 400, "INVALID_SOURCE_URL", "仅允许可公开访问的 HTTP(S) 来源地址", "")
+		return
+	}
+	key, tenant, ok := p.managedContext(w, r, ident)
+	if !ok {
+		return
+	}
+	baseID := r.PathValue("baseID")
+	if _, found, err := p.managedFetchKB(r.Context(), key, tenant, ident.DeploymentID, baseID); err != nil || !found {
+		p.managedWriteError(w, 404, "KNOWLEDGE_BASE_NOT_FOUND", "未找到已登记知识库", "")
+		return
+	}
+	input := map[string]any{"url": in.URL}
+	if strings.TrimSpace(in.Title) != "" {
+		input["title"] = strings.TrimSpace(in.Title)
+	}
+	if strings.TrimSpace(in.FileName) != "" {
+		input["file_name"] = filepath.Base(strings.TrimSpace(in.FileName))
+	}
+	if strings.TrimSpace(in.FileType) != "" {
+		input["file_type"] = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(in.FileType)), ".")
+	}
+	p.managedCreateDocument(w, r, ident, key, tenant, baseID, "url", input)
+}
+
+func validateManagedKnowledgeURL(ctx context.Context, raw string) error {
+	return validateManagedKnowledgeURLWithLookup(ctx, raw, net.DefaultResolver.LookupIPAddr)
+}
+
+func validateManagedKnowledgeURLWithLookup(ctx context.Context, raw string, lookup func(context.Context, string) ([]net.IPAddr, error)) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return errors.New("invalid source URL")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return errors.New("private host")
+	}
+	ips := []net.IP{}
+	if ip := net.ParseIP(host); ip != nil {
+		ips = append(ips, ip)
+	} else {
+		dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		resolved, lookupErr := lookup(dnsCtx, host)
+		if lookupErr != nil || len(resolved) == 0 {
+			return errors.New("source host lookup failed")
+		}
+		for _, entry := range resolved {
+			ips = append(ips, entry.IP)
+		}
+	}
+	privateCGN := net.ParseIP("100.64.0.0").To4()
+	privateCGNMask := net.CIDRMask(10, 32)
+	privateCGNNet := net.IPNet{IP: privateCGN, Mask: privateCGNMask}
+	for _, ip := range ips {
+		if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return errors.New("private host")
+		}
+		if v4 := ip.To4(); v4 != nil && privateCGNNet.Contains(v4) {
+			return errors.New("private host")
+		}
+	}
+	return nil
+}
+
+func (p *portal) managedCreateDocument(w http.ResponseWriter, r *http.Request, ident identity, key, tenant, baseID, kind string, input map[string]any) {
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "create_"+kind, "document", "", baseID)
+	if err != nil {
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未导入资料", "")
+		return
+	}
+	payload, _ := json.Marshal(input)
+	resp, err := p.managedRequest(r.Context(), key, http.MethodPost, "knowledge-bases/"+url.PathEscape(baseID)+"/knowledge/"+kind, nil, bytes.NewReader(payload), "application/json")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, "", "uncertain", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "资料导入结果不确定，请使用操作编号核对", op)
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		status := resp.StatusCode
+		_ = resp.Body.Close()
+		_ = p.finishManagedAudit(r.Context(), op, "", "failed", status)
+		if status == http.StatusConflict {
+			p.managedWriteError(w, 409, "DUPLICATE_KNOWLEDGE", "来源资料已存在或与现有资料重复", op)
+			return
+		}
+		if status == http.StatusRequestEntityTooLarge {
+			p.managedWriteError(w, 413, "KNOWLEDGE_INPUT_TOO_LARGE", "导入内容超过上游限制", op)
+			return
+		}
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝导入资料", op)
+		return
+	}
+	var created managedKnowledge
+	if err := decodeManagedData(resp, &created); err != nil || created.ID == "" || created.KnowledgeBaseID != baseID || created.TenantID.String() != tenant {
+		_ = p.finishManagedAudit(r.Context(), op, created.ID, "unverified", 502)
+		p.managedWriteErrorResource(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游导入结果无法安全验证", op, created.ID)
+		return
+	}
+	normalizeManagedKnowledge(&created)
+	if err := p.finishManagedAudit(r.Context(), op, created.ID, "accepted", http.StatusAccepted); err != nil {
+		p.managedWriteErrorResource(w, 503, "AUDIT_UNAVAILABLE", "资料已导入但审计结果更新失败", op, created.ID)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"data": created, "operationId": op})
+}
+
+func (p *portal) managedFetchDocument(ctx context.Context, key, tenant, deployment, baseID, documentID string) (managedKnowledge, bool, error) {
+	if _, ok := safeKnowledgeID(documentID); !ok {
+		return managedKnowledge{}, false, nil
+	}
+	if baseID != "" {
+		if _, found, err := p.managedFetchKB(ctx, key, tenant, deployment, baseID); err != nil || !found {
+			return managedKnowledge{}, false, err
+		}
+	}
+	resp, err := p.managedRequest(ctx, key, http.MethodGet, "knowledge/"+url.PathEscape(documentID), nil, nil, "")
+	if err != nil {
+		return managedKnowledge{}, false, err
+	}
+	var doc managedKnowledge
+	if err := decodeManagedData(resp, &doc); err != nil {
+		return managedKnowledge{}, false, err
+	}
+	if _, safe := safeKnowledgeID(doc.KnowledgeBaseID); !safe || doc.ID != documentID || doc.TenantID.String() != tenant || (baseID != "" && doc.KnowledgeBaseID != baseID) {
+		return managedKnowledge{}, false, errors.New("document ownership mismatch")
+	}
+	normalizeManagedKnowledge(&doc)
+	if baseID == "" {
+		if _, found, err := p.managedFetchKB(ctx, key, tenant, deployment, doc.KnowledgeBaseID); err != nil || !found {
+			return managedKnowledge{}, false, err
+		}
+	}
+	return doc, true, nil
+}
+
+func (p *portal) managedDocumentContext(w http.ResponseWriter, r *http.Request, ident identity) (string, string, managedKnowledge, bool) {
+	key, tenant, ok := p.managedContext(w, r, ident)
+	if !ok {
+		return "", "", managedKnowledge{}, false
+	}
+	docID, ok := safeKnowledgeID(r.PathValue("documentID"))
+	if !ok {
+		p.managedWriteError(w, 404, "KNOWLEDGE_NOT_FOUND", "未找到知识条目", "")
+		return "", "", managedKnowledge{}, false
+	}
+	baseID := r.PathValue("baseID")
+	// Document routes resolve the parent knowledge base from a required, public API path value.
+	doc, found, err := p.managedFetchDocument(r.Context(), key, tenant, ident.DeploymentID, baseID, docID)
+	if err != nil {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "资料归属验证失败", "")
+		return "", "", managedKnowledge{}, false
+	}
+	if !found {
+		p.managedWriteError(w, 404, "KNOWLEDGE_NOT_FOUND", "未找到已登记资料", "")
+		return "", "", managedKnowledge{}, false
+	}
+	return key, tenant, doc, true
+}
+
+func (p *portal) handleManagedKnowledgeImportManual(w http.ResponseWriter, r *http.Request, ident identity) {
+	var in struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if decodeStrictJSON(w, r, &in, 1<<20) != nil || strings.TrimSpace(in.Title) == "" || len(in.Title) > 200 || strings.TrimSpace(in.Content) == "" || len(in.Content) > 1<<20 {
+		p.managedWriteError(w, 400, "INVALID_REQUEST", "手动资料标题或正文无效", "")
+		return
+	}
+	key, tenant, ok := p.managedContext(w, r, ident)
+	if !ok {
+		return
+	}
+	baseID := r.PathValue("baseID")
+	if _, found, err := p.managedFetchKB(r.Context(), key, tenant, ident.DeploymentID, baseID); err != nil || !found {
+		p.managedWriteError(w, 404, "KNOWLEDGE_BASE_NOT_FOUND", "未找到已登记知识库", "")
+		return
+	}
+	p.managedCreateDocument(w, r, ident, key, tenant, baseID, "manual", map[string]any{"title": strings.TrimSpace(in.Title), "content": in.Content, "status": "published"})
+}
+
+func (p *portal) handleManagedKnowledgeGetDocument(w http.ResponseWriter, r *http.Request, ident identity) {
+	_, _, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": doc})
+}
+
+func (p *portal) handleManagedKnowledgeSetDocumentEnabled(w http.ResponseWriter, r *http.Request, ident identity) {
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if decodeStrictJSON(w, r, &input, 4096) != nil || input.Enabled == nil {
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "enabled 必须为布尔值", "")
+		return
+	}
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	if *input.Enabled && doc.ParseStatus != "completed" {
+		p.managedWriteError(w, http.StatusConflict, "KNOWLEDGE_NOT_COMPLETED", "资料处理完成后才能启用", "")
+		return
+	}
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "set_enabled", "document", doc.ID, doc.KnowledgeBaseID)
+	if err != nil {
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录资料状态变更审计", "")
+		return
+	}
+	body, _ := json.Marshal(map[string]bool{"enabled": *input.Enabled})
+	resp, err := p.managedRequest(r.Context(), key, http.MethodPut, "knowledge/"+url.PathEscape(doc.ID)+"/enable-status", nil, bytes.NewReader(body), "application/json")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "uncertain", http.StatusBadGateway)
+		p.managedWriteErrorResource(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "资料状态变更结果待核实", op, doc.ID)
+		return
+	}
+	var updated managedKnowledge
+	decodeErr := decodeManagedData(resp, &updated)
+	expected := "disabled"
+	if *input.Enabled {
+		expected = "enabled"
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || decodeErr != nil || updated.ID != doc.ID || updated.TenantID.String() != tenant || updated.KnowledgeBaseID != doc.KnowledgeBaseID || updated.EnableStatus != expected {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "unverified", http.StatusBadGateway)
+		p.managedWriteErrorResource(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "资料状态响应无法安全验证", op, doc.ID)
+		return
+	}
+	if err := p.finishManagedAudit(r.Context(), op, doc.ID, "succeeded", http.StatusOK); err != nil {
+		p.managedWriteErrorResource(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "资料状态已变更但审计结果更新失败", op, doc.ID)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": updated, "operationId": op})
+}
+
+func (p *portal) handleManagedKnowledgeChunkImage(w http.ResponseWriter, r *http.Request, ident identity) {
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	chunkID, safe := safeKnowledgeID(r.PathValue("chunkID"))
+	index, indexErr := strconv.Atoi(r.PathValue("index"))
+	if !safe || indexErr != nil || index < 0 {
+		p.managedWriteError(w, http.StatusNotFound, "KNOWLEDGE_IMAGE_NOT_FOUND", "未找到资料图片", "")
+		return
+	}
+	// Verify the requested chunk's document, KB, tenant and resource handle
+	// before issuing the narrower image-byte read. No upstream URL/path is
+	// accepted from the caller or returned in this response.
+	chunkResp, err := p.managedRequest(r.Context(), key, http.MethodGet, "chunks/by-id/"+url.PathEscape(chunkID), nil, nil, "")
+	if err != nil {
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "资料图片归属验证失败", "")
+		return
+	}
+	var chunkEnvelope struct {
+		Data managedChunk `json:"data"`
+	}
+	chunkErr := json.NewDecoder(io.LimitReader(chunkResp.Body, 1<<20)).Decode(&chunkEnvelope)
+	_ = chunkResp.Body.Close()
+	if chunkResp.StatusCode < 200 || chunkResp.StatusCode >= 300 || chunkErr != nil || chunkEnvelope.Data.ID != chunkID || chunkEnvelope.Data.KnowledgeID != doc.ID || chunkEnvelope.Data.KnowledgeBaseID != doc.KnowledgeBaseID || chunkEnvelope.Data.TenantID.String() != tenant {
+		p.managedWriteError(w, http.StatusNotFound, "KNOWLEDGE_IMAGE_NOT_FOUND", "未找到资料图片", "")
+		return
+	}
+	var refs []struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal([]byte(chunkEnvelope.Data.ImageInfo), &refs) != nil || index >= len(refs) || !managedResourceHandle.MatchString(refs[index].URL) {
+		p.managedWriteError(w, http.StatusNotFound, "KNOWLEDGE_IMAGE_NOT_FOUND", "未找到资料图片", "")
+		return
+	}
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "read_chunk_image", "document", doc.ID, doc.KnowledgeBaseID)
+	if err != nil {
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录资料图片读取审计", "")
+		return
+	}
+	select {
+	case managedKnowledgeFileSpoolSlots <- struct{}{}:
+		defer func() { <-managedKnowledgeFileSpoolSlots }()
+	default:
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusServiceUnavailable)
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_FILE_BUSY", "图片读取繁忙，请稍后重试", op)
+		return
+	}
+	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "knowledge/"+url.PathEscape(doc.ID)+"/chunks/"+url.PathEscape(chunkID)+"/images/"+strconv.Itoa(index), nil, nil, "")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_UNAVAILABLE", "资料图片暂不可用", op)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	imageType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (imageType != "image/png" && imageType != "image/jpeg" && imageType != "image/gif" && imageType != "image/webp") {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_INVALID", "资料图片响应无法验证", op)
+		return
+	}
+	spool, err := spoolManagedKnowledgeFile(resp.Body, resp.ContentLength, 20<<20, "")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_INVALID", "资料图片读取失败或超过限制", op)
+		return
+	}
+	defer spool.close()
+	prefix := make([]byte, 512)
+	n, readErr := io.ReadFull(spool.file, prefix)
+	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_INVALID", "资料图片格式无法验证", op)
+		return
+	}
+	actualType := http.DetectContentType(prefix[:n])
+	if actualType != imageType || (actualType != "image/png" && actualType != "image/jpeg" && actualType != "image/gif" && actualType != "image/webp") {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_INVALID", "资料图片格式无法验证", op)
+		return
+	}
+	if _, err := spool.file.Seek(0, io.SeekStart); err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_IMAGE_INVALID", "资料图片读取失败", op)
+		return
+	}
+	w.Header().Set("Content-Type", imageType)
+	w.Header().Set("Content-Length", strconv.FormatInt(spool.size, 10))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	if _, err := io.CopyN(w, spool.file, spool.size); err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "uncertain", http.StatusBadGateway)
+		return
+	}
+	if err := p.finishManagedAudit(r.Context(), op, doc.ID, "succeeded", http.StatusOK); err != nil {
+		return
+	}
+}
+
+func (p *portal) handleManagedKnowledgeDocumentAction(w http.ResponseWriter, r *http.Request, ident identity) {
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	action := r.PathValue("action")
+	method, path, auditAction := http.MethodPost, "", ""
+	switch action {
+	case "reparse":
+		path, auditAction = "knowledge/"+url.PathEscape(doc.ID)+"/reparse", "reparse"
+	case "cancel-parse":
+		path, auditAction = "knowledge/"+url.PathEscape(doc.ID)+"/cancel-parse", "cancel_parse"
+	case "delete":
+		method, path, auditAction = http.MethodDelete, "knowledge/"+url.PathEscape(doc.ID), "delete_document"
+	default:
+		p.managedWriteError(w, 404, "NOT_FOUND", "未找到操作", "")
+		return
+	}
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, auditAction, "document", doc.ID, doc.KnowledgeBaseID)
+	if err != nil {
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未执行操作", "")
+		return
+	}
+	resp, err := p.managedRequest(r.Context(), key, method, path, nil, nil, "")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "uncertain", 502)
+		p.managedWriteErrorResource(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "操作结果不确定，请使用操作编号核对", op, doc.ID)
+		return
+	}
+	status := resp.StatusCode
+	var result managedKnowledge
+	if method != http.MethodDelete && status >= 200 && status < 300 {
+		if err := decodeManagedData(resp, &result); err != nil || result.ID != doc.ID || result.KnowledgeBaseID != doc.KnowledgeBaseID || result.TenantID.String() != tenant {
+			_ = p.finishManagedAudit(r.Context(), op, doc.ID, "unverified", 502)
+			p.managedWriteErrorResource(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "操作结果无法安全验证", op, doc.ID)
+			return
+		}
+	} else {
+		_ = resp.Body.Close()
+	}
+	if status < 200 || status >= 300 {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", status)
+		if status == http.StatusConflict {
+			p.managedWriteErrorResource(w, 409, "KNOWLEDGE_OPERATION_CONFLICT", "当前资料状态不允许此操作", op, doc.ID)
+			return
+		}
+		p.managedWriteErrorResource(w, 502, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝执行资料操作", op, doc.ID)
+		return
+	}
+	if err := p.finishManagedAudit(r.Context(), op, doc.ID, "succeeded", status); err != nil {
+		p.managedWriteErrorResource(w, 503, "AUDIT_UNAVAILABLE", "资料操作已执行但审计写入失败", op, doc.ID)
+		return
+	}
+	if action == "delete" {
+		writeJSON(w, 200, map[string]any{"deleted": true, "operationId": op, "resourceId": doc.ID})
+		return
+	}
+	writeJSON(w, 202, map[string]any{"data": result, "operationId": op})
+}
+
+func (p *portal) handleManagedKnowledgeSpans(w http.ResponseWriter, r *http.Request, ident identity) {
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	query := url.Values{}
+	if values, present := r.URL.Query()["attempt"]; present {
+		if len(values) != 1 {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "解析轮次参数无效", "")
+			return
+		}
+		attempt, err := strconv.Atoi(values[0])
+		if err != nil || attempt < 0 || attempt > 1000000 {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "解析轮次参数无效", "")
+			return
+		}
+		query.Set("attempt", values[0])
+	}
+	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "knowledge/"+url.PathEscape(doc.ID)+"/spans", query, nil, "")
+	if err != nil {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "解析过程读取失败", "")
+		return
+	}
+	var envelope struct {
+		KnowledgeID   string          `json:"knowledge_id"`
+		Attempt       int             `json:"attempt"`
+		LatestAttempt int             `json:"latest_attempt"`
+		ParseStatus   string          `json:"parse_status"`
+		CurrentStage  string          `json:"current_stage"`
+		Trace         json.RawMessage `json:"trace"`
+	}
+	if err := decodeManagedData(resp, &envelope); err != nil || envelope.KnowledgeID != doc.ID {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "解析过程响应无法验证", "")
+		return
+	}
+	var trace managedSpan
+	if len(envelope.Trace) > 0 && json.Unmarshal(envelope.Trace, &trace) != nil {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "解析过程响应无法验证", "")
+		return
+	}
+	if err := p.auditManagedRead(r.Context(), ident, tenant, doc, "read_spans"); err != nil {
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法记录解析过程读取审计", "")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": map[string]any{"knowledge_id": doc.ID, "attempt": envelope.Attempt, "latest_attempt": envelope.LatestAttempt, "parse_status": envelope.ParseStatus, "current_stage": envelope.CurrentStage, "trace": trace}})
+}
+
+func (p *portal) handleManagedKnowledgeChunks(w http.ResponseWriter, r *http.Request, ident identity) {
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	query := url.Values{}
+	for name, max := range map[string]int{"page": 8, "page_size": 8} {
+		values, present := r.URL.Query()[name]
+		if !present {
+			continue
+		}
+		if len(values) != 1 || len(values[0]) > max {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "分块分页参数无效", "")
+			return
+		}
+		n, err := strconv.Atoi(values[0])
+		if err != nil || n < 1 || (name == "page_size" && n > 100) {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "分块分页参数无效", "")
+			return
+		}
+		query.Set(name, values[0])
+	}
+	if _, ok := r.URL.Query()["chunk_type"]; len(r.URL.Query()) > 0 {
+		if !ok || len(r.URL.Query()) != 1 {
+			p.managedWriteError(w, 400, "INVALID_QUERY", "分块查询参数无效", "")
+			return
+		}
+		for _, chunkType := range r.URL.Query()["chunk_type"] {
+			if len(chunkType) > 32 || chunkType == "" {
+				p.managedWriteError(w, 400, "INVALID_QUERY", "分块类型无效", "")
+				return
+			}
+			query.Add("chunk_type", chunkType)
+		}
+	}
+	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "chunks/"+url.PathEscape(doc.ID), query, nil, "")
+	if err != nil {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "分块读取失败", "")
+		return
+	}
+	var page struct {
+		Data     []managedChunk `json:"data"`
+		Total    int            `json:"total"`
+		Page     int            `json:"page"`
+		PageSize int            `json:"page_size"`
+	}
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&page)
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || decodeErr != nil {
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "分块响应无法验证", "")
+		return
+	}
+	for index := range page.Data {
+		chunk := &page.Data[index]
+		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant {
+			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "分块列表包含其他资料的内容", "")
+			return
+		}
+		chunk.Images = nil
+		if strings.TrimSpace(chunk.ImageInfo) != "" {
+			var refs []struct {
+				URL string `json:"url"`
+			}
+			if json.Unmarshal([]byte(chunk.ImageInfo), &refs) != nil {
+				p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "chunk image metadata could not be verified", "")
+				return
+			}
+			for index, ref := range refs {
+				if !managedResourceHandle.MatchString(ref.URL) {
+					continue // legacy/external URLs are never returned to the browser.
+				}
+				chunk.Images = append(chunk.Images, managedChunkImage{Index: index, URL: "/api/v1/knowledge/managed/documents/" + url.PathEscape(doc.ID) + "/chunks/" + url.PathEscape(chunk.ID) + "/images/" + strconv.Itoa(index)})
+			}
+		}
+		chunk.ImageInfo = ""
+	}
+	if err := p.auditManagedRead(r.Context(), ident, tenant, doc, "read_chunks"); err != nil {
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法记录分块读取审计", "")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": page.Data, "total": page.Total, "page": page.Page, "pageSize": page.PageSize})
+}
+
+func (p *portal) auditManagedRead(ctx context.Context, ident identity, tenant string, doc managedKnowledge, action string) error {
+	op, err := p.beginManagedAudit(ctx, ident, tenant, action, "document", doc.ID, doc.KnowledgeBaseID)
+	if err != nil {
+		return err
+	}
+	return p.finishManagedAudit(ctx, op, doc.ID, "succeeded", http.StatusOK)
+}
+
+func managedSafeContentType(fileName string) string {
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".txt", ".md", ".csv":
+		return "text/plain; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func managedSafeFileName(raw, fallback string) string {
+	name := filepath.Base(strings.ReplaceAll(strings.TrimSpace(raw), `\`, "/"))
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	if name == "." || name == "" {
+		return fallback
+	}
+	return name
+}
+
+func (p *portal) handleManagedKnowledgeFile(w http.ResponseWriter, r *http.Request, ident identity) {
+	key, tenant, doc, ok := p.managedDocumentContext(w, r, ident)
+	if !ok {
+		return
+	}
+	kind := r.PathValue("fileKind")
+	if kind != "preview" && kind != "download" {
+		p.managedWriteError(w, 404, "NOT_FOUND", "未找到资料文件", "")
+		return
+	}
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "read_"+kind, "document", doc.ID, doc.KnowledgeBaseID)
+	if err != nil {
+		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法记录资料文件访问审计", "")
+		return
+	}
+	select {
+	case managedKnowledgeFileSpoolSlots <- struct{}{}:
+		defer func() { <-managedKnowledgeFileSpoolSlots }()
+	default:
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusServiceUnavailable)
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_FILE_BUSY", "文件读取繁忙，请稍后重试", "")
+		return
+	}
+	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "knowledge/"+url.PathEscape(doc.ID)+"/"+kind, nil, nil, "")
+	if err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", 502)
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "资料文件读取失败", "")
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", resp.StatusCode)
+		p.managedWriteError(w, 502, "KNOWLEDGE_FILE_UNAVAILABLE", "资料文件当前不可用", "")
+		return
+	}
+	name := managedSafeFileName(doc.FileName, doc.ID)
+	spool, err := spoolManagedKnowledgeFile(resp.Body, resp.ContentLength, managedKnowledgeFileMaxBytes, "")
+	if err != nil {
+		if errors.Is(err, errManagedKnowledgeFileTooLarge) {
+			_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusRequestEntityTooLarge)
+			p.managedWriteError(w, http.StatusRequestEntityTooLarge, "KNOWLEDGE_FILE_TOO_LARGE", "资料文件超过预览或下载限制", "")
+			return
+		}
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "failed", http.StatusBadGateway)
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_FILE_INVALID", "资料文件读取不完整或无法验证", "")
+		return
+	}
+	defer spool.close()
+	contentType := managedSafeContentType(name)
+	disposition := "attachment"
+	if kind == "preview" && contentType != "application/octet-stream" {
+		disposition = "inline"
+	}
+	filenameHeader := mime.FormatMediaType(disposition, map[string]string{"filename": name})
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", filenameHeader)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(spool.size, 10))
+	if _, err := io.CopyN(w, spool.file, spool.size); err != nil {
+		_ = p.finishManagedAudit(r.Context(), op, doc.ID, "uncertain", 502)
+		return
+	}
+	_ = p.finishManagedAudit(r.Context(), op, doc.ID, "succeeded", 200)
+}
+
+func (p *portal) managedDocumentAction(action string) func(http.ResponseWriter, *http.Request, identity) {
+	return func(w http.ResponseWriter, r *http.Request, ident identity) {
+		r.SetPathValue("action", action)
+		p.handleManagedKnowledgeDocumentAction(w, r, ident)
+	}
+}
+
+func (p *portal) managedDocumentFile(kind string) func(http.ResponseWriter, *http.Request, identity) {
+	return func(w http.ResponseWriter, r *http.Request, ident identity) {
+		r.SetPathValue("fileKind", kind)
+		p.handleManagedKnowledgeFile(w, r, ident)
+	}
 }
