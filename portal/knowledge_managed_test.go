@@ -1086,6 +1086,9 @@ func TestManagedKnowledgeDeleteBaseHandlesUpstreamAndRegistryFailures(t *testing
 			} else {
 				assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
 				assert.Contains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_REJECTED")
+				var result managedError
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+				assert.NotEmpty(t, result.Error.OperationID, "the protected deleting state must remain traceable")
 			}
 			assert.NoError(t, h.dbmock.ExpectationsWereMet())
 		})

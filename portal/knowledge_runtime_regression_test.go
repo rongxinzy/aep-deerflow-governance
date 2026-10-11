@@ -121,7 +121,7 @@ func TestKnowledgeRuntimeDocumentAuthorizationKeepsAuditPending(t *testing.T) {
 			expectKnowledgeGrant(mock, "dep-1", "10000", "kb-1", "user", "user-1", tc.grant)
 			if tc.grant {
 				audit := mock.ExpectExec(`INSERT INTO knowledge_audit_events`).
-					WithArgs(sqlmock.AnyArg(), "dep-1", "10000", "user-1", "runtime_read_document", "document", "doc-1", "kb-1")
+					WithArgs(sqlmock.AnyArg(), "dep-1", "10000", "user-1", "runtime_read_document", "document", "doc-1", "kb-1", "employee-1", sqlmock.AnyArg())
 				if tc.auditFailure {
 					audit.WillReturnError(errors.New("synthetic audit unavailable"))
 				} else {
@@ -196,7 +196,7 @@ func TestKnowledgeRuntimeRejectsUnknownAuditCompletion(t *testing.T) {
 	p, mock, token := runtimeRegressionFixture(t)
 	expectRuntimeActive(mock, token)
 	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome`).
-		WithArgs("unknown-operation", "dep-1", "user-1", "succeeded", 200).
+		WithArgs("unknown-operation", "dep-1", "user-1", "succeeded", 200, "10000", "employee-1", sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	w := runtimeRegressionRequest(p, `{"operation_id":"unknown-operation","outcome":"succeeded","status_code":200}`)
 	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
@@ -217,4 +217,36 @@ func TestKnowledgeRuntimeContextIssuanceDoesNotReturnAnUnstoredHandle(t *testing
 		require.Empty(t, handle)
 	}
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestKnowledgeRuntimeAuditStartRejectsUnboundOrNonRuntimeIntents(t *testing.T) {
+	p, mock, _ := runtimeRegressionFixture(t)
+	requester := identity{UserID: "user-1", DeploymentID: "dep-1"}
+	hash := strings.Repeat("a", 64)
+	for _, input := range []struct {
+		tenant, employee, hash, action string
+	}{
+		{"", "employee-1", hash, "runtime_search"},
+		{"foreign", "employee-1", hash, "runtime_search"},
+		{"10000", "", hash, "runtime_search"},
+		{"10000", "../employee-1", hash, "runtime_search"},
+		{"10000", "employee-1", "", "runtime_search"},
+		{"10000", "employee-1", hash, "delete"},
+	} {
+		op, err := p.beginKnowledgeRuntimeAudit(context.Background(), requester, input.tenant, input.employee, input.hash, input.action, "knowledge_scope", "kb-1", "")
+		require.Error(t, err)
+		require.Empty(t, op)
+	}
+	for _, badIdentity := range []identity{{DeploymentID: "dep-1"}, {UserID: "user-1", DeploymentID: "foreign"}} {
+		op, err := p.beginKnowledgeRuntimeAudit(context.Background(), badIdentity, "10000", "employee-1", hash, "runtime_search", "knowledge_scope", "kb-1", "")
+		require.Error(t, err)
+		require.Empty(t, op)
+	}
+	for _, unavailable := range []*portal{nil, {cfg: p.cfg}} {
+		op, err := unavailable.beginKnowledgeRuntimeAudit(context.Background(), requester, "10000", "employee-1", hash, "runtime_search", "knowledge_scope", "kb-1", "")
+		require.Error(t, err)
+		require.Empty(t, op)
+		require.Error(t, unavailable.completeKnowledgeRuntimeAudit(context.Background(), requester, "employee-1", hash, "operation", "succeeded", 200))
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid intents must not touch the database")
 }

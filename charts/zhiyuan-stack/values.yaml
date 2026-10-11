@@ -154,6 +154,15 @@ portal:
   # employee rides bench-qwen38-fast, which is also this default.
   defaultModel: bench-qwen38-fast
   nodePort: 30190
+  # Enable only after provisioning the tenant-scoped WeKnora API key in
+  # secrets.platformCreds. Values contain identifiers, never credentials.
+  managedKnowledge:
+    enabled: false
+    tenantID: ""
+    embeddingModelID: ""
+    apiKeySecretField: WEKNORA_KNOWLEDGE_API_KEY
+    apiURL: http://app.weknora.svc.cluster.local:8080
+    mcpURL: http://weknora-mcp.weknora.svc.cluster.local:8830/mcp
   # Model failover watcher (productized, deployment-configurable). The
   # fallback chain itself is deployment DATA, not code: it ships EMPTY
   # (AEP deployment setting modelFallbackIds, or the control plane's

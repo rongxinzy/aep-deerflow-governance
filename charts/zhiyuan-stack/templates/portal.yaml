@@ -23,6 +23,14 @@ spec:
             - {name: PORTAL_QUOTA_PER_USER, value: {{ .Values.portal.quotaPerUser | quote }}}
             - {name: PORTAL_ADMIN_USERS, value: {{ .Values.portal.adminUsers | quote }}}
             - {name: PORTAL_ADMIN_ROLES, value: {{ .Values.portal.adminRoles | quote }}}
+            - {name: PORTAL_CREDENTIALS_SECRET, value: {{ .Values.secrets.platformCreds | quote }}}
+            {{- if .Values.portal.managedKnowledge.enabled }}
+            - {name: PORTAL_KNOWLEDGE_TENANT_ID, value: {{ required "portal.managedKnowledge.tenantID is required when enabled" .Values.portal.managedKnowledge.tenantID | quote }}}
+            - {name: PORTAL_KNOWLEDGE_EMBEDDING_MODEL_ID, value: {{ required "portal.managedKnowledge.embeddingModelID is required when enabled" .Values.portal.managedKnowledge.embeddingModelID | quote }}}
+            - {name: PORTAL_KNOWLEDGE_API_KEY_SECRET_FIELD, value: {{ required "portal.managedKnowledge.apiKeySecretField is required when enabled" .Values.portal.managedKnowledge.apiKeySecretField | quote }}}
+            - {name: PORTAL_KNOWLEDGE_API_URL, value: {{ required "portal.managedKnowledge.apiURL is required when enabled" .Values.portal.managedKnowledge.apiURL | quote }}}
+            - {name: PORTAL_KNOWLEDGE_MCP_URL, value: {{ required "portal.managedKnowledge.mcpURL is required when enabled" .Values.portal.managedKnowledge.mcpURL | quote }}}
+            {{- end }}
             # Default runtime image for newly applied employees. Rendered
             # here so the chart — not an ad-hoc `kubectl set env` — is the
             # record of what new employees run.

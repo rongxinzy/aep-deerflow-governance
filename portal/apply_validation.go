@@ -168,9 +168,13 @@ type weknoraBase struct {
 	Name string `json:"name"`
 }
 
-// listWeKnoraBases lists knowledge bases through the WeKnora tenant API
-// key (the same retrieve-scoped key the services status page uses).
+// listWeKnoraBases keeps the legacy catalog only when managed knowledge is
+// disabled. Managed employee references use the same credential selector,
+// verified tenant and active deployment registry as the management APIs.
 func (p *portal) listWeKnoraBases(ctx context.Context) ([]weknoraBase, error) {
+	if p.cfg.managedKnowledge.tenantID != "" {
+		return p.listManagedEmployeeBases(ctx)
+	}
 	key, err := p.platformSecretKey(ctx, "WEKNORA_API_KEY")
 	if err != nil || key == "" {
 		return nil, fmt.Errorf("weknora api key not configured")
@@ -195,6 +199,51 @@ func (p *portal) listWeKnoraBases(ctx context.Context) ([]weknoraBase, error) {
 		return nil, err
 	}
 	return payload.Data, nil
+}
+
+func (p *portal) listManagedEmployeeBases(ctx context.Context) ([]weknoraBase, error) {
+	if p.db == nil || p.cfg.aepDeploymentID == "" || p.cfg.managedKnowledge.apiKeySecretField == "" {
+		return nil, fmt.Errorf("managed knowledge catalog not configured")
+	}
+	key, err := p.platformSecretKey(ctx, p.cfg.managedKnowledge.apiKeySecretField)
+	if err != nil || strings.TrimSpace(key) == "" {
+		return nil, fmt.Errorf("managed knowledge credential unavailable")
+	}
+	tenant, err := p.managedTenant(ctx, key)
+	if err != nil || tenant != p.cfg.managedKnowledge.tenantID {
+		return nil, fmt.Errorf("managed knowledge tenant verification failed")
+	}
+	rows, err := p.db.QueryContext(ctx, `SELECT knowledge_base_id FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND lifecycle_state='active' ORDER BY knowledge_base_id`, p.cfg.aepDeploymentID, tenant)
+	if err != nil {
+		return nil, fmt.Errorf("managed knowledge registry unavailable")
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("managed knowledge registry unavailable")
+		}
+		ids = append(ids, id)
+	}
+	rowErr := rows.Err()
+	_ = rows.Close()
+	if rowErr != nil {
+		return nil, fmt.Errorf("managed knowledge registry unavailable")
+	}
+	result := make([]weknoraBase, 0, len(ids))
+	for _, id := range ids {
+		// Recheck active membership before the upstream read. The lifecycle
+		// row lock at binding time closes the remaining deletion race.
+		base, found, err := p.managedFetchKB(ctx, key, tenant, p.cfg.aepDeploymentID, id)
+		if err != nil {
+			return nil, fmt.Errorf("managed knowledge catalog validation failed")
+		}
+		if found {
+			result = append(result, weknoraBase{ID: base.ID, Name: base.Name})
+		}
+	}
+	return result, nil
 }
 
 // listAEPSkills lists all skills, following cursor pagination.

@@ -695,7 +695,7 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 		status := resp.StatusCode
 		_ = resp.Body.Close()
 		_ = p.finishManagedAudit(r.Context(), op, id, "failed", status)
-		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝删除知识库", "")
+		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝删除知识库；目录仍处于删除保护状态，请使用操作编号核对后处理", op)
 		return
 	}
 	_ = resp.Body.Close()
@@ -1077,7 +1077,7 @@ func (p *portal) handleManagedKnowledgeImportManual(w http.ResponseWriter, r *ht
 		p.managedWriteError(w, 404, "KNOWLEDGE_BASE_NOT_FOUND", "未找到已登记知识库", "")
 		return
 	}
-	p.managedCreateDocument(w, r, ident, key, tenant, baseID, "manual", map[string]any{"title": strings.TrimSpace(in.Title), "content": in.Content, "status": "published"})
+	p.managedCreateDocument(w, r, ident, key, tenant, baseID, "manual", map[string]any{"title": strings.TrimSpace(in.Title), "content": in.Content, "status": "publish"})
 }
 
 func (p *portal) handleManagedKnowledgeGetDocument(w http.ResponseWriter, r *http.Request, ident identity) {

@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestEmployeeKnowledgeSearchReturnsVerifiedNativeHitAndSource(t *testing.T) {
+func TestEmployeeKnowledgeBearerSearchReturnsVerifiedNativeHitAndSource(t *testing.T) {
 	var aepCalls int
 	aep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		aepCalls++
@@ -60,7 +60,6 @@ func TestEmployeeKnowledgeSearchReturnsVerifiedNativeHitAndSource(t *testing.T) 
 	defer upstream.Close()
 	p.cfg.knowledgeAPIURL = upstream.URL
 
-	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).WithArgs("stored-aep-token").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	expectKnowledgeGrant(mock, "dep-1", "10000", "kb-1", "user", "user-1", true)
 	mock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("dep-1", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Allowed"))
 	// managedFetchDocument verifies its KB registration before fetching source metadata.
@@ -70,15 +69,37 @@ func TestEmployeeKnowledgeSearchReturnsVerifiedNativeHitAndSource(t *testing.T) 
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/employees/employee-1/search", strings.NewReader(`{"query":"question","knowledge_base_ids":["kb-1"],"mode":"hybrid","limit":5}`))
 	r.SetPathValue("name", "employee-1")
-	r.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "stored-aep-token"})
+	r.Header.Set("Authorization", "Bearer stored-aep-token")
 	w := httptest.NewRecorder()
-	p.handleEmployeeKnowledgeSearch(w, r, identity{Token: "stored-aep-token", UserID: "user-1", DeploymentID: "dep-1"})
+	p.routes().ServeHTTP(w, r)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Contains(t, w.Body.String(), `"score":0.91`)
 	require.Contains(t, w.Body.String(), `"knowledge_base_id":"kb-1","document_id":"doc-1","chunk_id":"chunk-1","title":"Verified title"`)
 	require.NotContains(t, w.Body.String(), "untrusted title")
-	require.Equal(t, 2, aepCalls, "requester identity is revalidated before context creation and access resolution")
+	require.Equal(t, 3, aepCalls, "bearer authentication and both knowledge authorization stages verify the current AEP identity")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEmployeeKnowledgeRejectedBearerCannotBorrowValidPortalCookie(t *testing.T) {
+	p, mock := newKnowledgeAccessPortalFixture(t,
+		knowledgeAccessEmployee([]dev1alpha1.KnowledgeBaseRef{{ID: "kb-1"}}, &dev1alpha1.VisibilitySpec{Mode: "all"}),
+		knowledgeAEPResponse(nil))
+	aep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer expired-token", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer aep.Close()
+	p.aep = &aepAuthenticator{baseURL: aep.URL, http: aep.Client()}
+	p.sessions = newSessionStore(time.Hour)
+	cookie, csrf := p.sessions.issue(identity{Token: "valid-cookie-token", UserID: "user-1", DeploymentID: "dep-1", TeamsFetchedAt: time.Now()})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/employees/employee-1/search", strings.NewReader(`{"query":"question","knowledge_base_ids":["kb-1"]}`))
+	r.Header.Set("Authorization", "Bearer expired-token")
+	r.Header.Set("X-CSRF-Token", csrf)
+	r.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: cookie})
+	w := httptest.NewRecorder()
+	p.routes().ServeHTTP(w, r)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet(), "rejected Bearer must not reach knowledge data or cookie persistence")
 }
 
 func TestEmployeeKnowledgeSearchDoesNotReturnCrossBaseHitContent(t *testing.T) {
@@ -222,7 +243,7 @@ func TestEmployeeKnowledgeDocumentAlwaysSerializesOptionalMetadata(t *testing.T)
 		wantStatus int
 	}{
 		{name: "URL source", docType: "url", chunkPage: `{"data":[],"total":0,"page":1,"page_size":20}`, wantStatus: http.StatusOK},
-		{name: "FAQ source", docType: "faq", chunkPage: `{"data":[],"total":0,"page":1,"page_size":20}`, wantStatus: http.StatusOK},
+		{name: "FAQ source", docType: "faq", chunkPage: `{"data":[{"id":"faq-chunk","knowledge_id":"doc-1","knowledge_base_id":"kb-1","tenant_id":10000,"chunk_type":"faq","content":"Synthetic FAQ answer"}],"total":1,"page":1,"page_size":20}`, wantStatus: http.StatusOK},
 		{name: "upstream pagination mismatch", docType: "url", chunkPage: `{"data":[],"total":0,"page":2,"page_size":20}`, wantStatus: http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,6 +259,11 @@ func TestEmployeeKnowledgeDocumentAlwaysSerializesOptionalMetadata(t *testing.T)
 				case "/api/v1/chunks/doc-1":
 					assert.Equal(t, "1", r.URL.Query().Get("page"))
 					assert.Equal(t, "20", r.URL.Query().Get("page_size"))
+					if tc.docType == "faq" {
+						assert.Equal(t, "faq", r.URL.Query().Get("chunk_type"))
+					} else {
+						assert.Equal(t, "text", r.URL.Query().Get("chunk_type"))
+					}
 					_, _ = w.Write([]byte(tc.chunkPage))
 				default:
 					t.Errorf("unexpected upstream request %s", r.URL.Path)
@@ -281,6 +307,9 @@ func TestEmployeeKnowledgeDocumentAlwaysSerializesOptionalMetadata(t *testing.T)
 				assert.Contains(t, response.Body.String(), `"file_name":""`)
 				assert.Contains(t, response.Body.String(), `"file_type":""`)
 				assert.Contains(t, response.Body.String(), `"source":""`)
+				if tc.docType == "faq" {
+					assert.Contains(t, response.Body.String(), `"content":"Synthetic FAQ answer"`)
+				}
 			}
 			assert.NoError(t, mock.ExpectationsWereMet())
 		})

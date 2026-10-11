@@ -202,11 +202,11 @@ func TestRuntimeAuditCompletionCannotSpoofOutcomeOrCompleteAnotherActor(t *testi
 	for _, tc := range []struct {
 		operation, outcome string
 		status             int
-	}{{"", "succeeded", 200}, {"operation", "pending", 200}, {"operation", "failed", 199}, {"operation", "failed", 600}} {
-		require.Error(t, h.completeKnowledgeRuntimeAudit(context.Background(), ident, tc.operation, tc.outcome, tc.status))
+	}{{"", "succeeded", 200}, {"operation", "pending", 200}, {"operation", "failed", 199}, {"operation", "failed", 600}, {"operation", "succeeded", 500}, {"operation", "failed", 200}} {
+		require.Error(t, h.completeKnowledgeRuntimeAudit(context.Background(), ident, "employee-1", strings.Repeat("a", 64), tc.operation, tc.outcome, tc.status))
 	}
 	for _, failure := range []string{"query", "rows", "missing"} {
-		exec := h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET outcome`).WithArgs("operation", "demo", "admin-user", "succeeded", 200)
+		exec := h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET outcome`).WithArgs("operation", "demo", "admin-user", "succeeded", 200, "tenant-1", "employee-1", strings.Repeat("a", 64))
 		switch failure {
 		case "query":
 			exec.WillReturnError(errors.New("audit unavailable"))
@@ -215,7 +215,7 @@ func TestRuntimeAuditCompletionCannotSpoofOutcomeOrCompleteAnotherActor(t *testi
 		case "missing":
 			exec.WillReturnResult(sqlmock.NewResult(0, 0))
 		}
-		require.Error(t, h.completeKnowledgeRuntimeAudit(context.Background(), ident, "operation", "succeeded", 200))
+		require.Error(t, h.completeKnowledgeRuntimeAudit(context.Background(), ident, "employee-1", strings.Repeat("a", 64), "operation", "succeeded", 200))
 	}
 	require.NoError(t, h.dbmock.ExpectationsWereMet())
 }

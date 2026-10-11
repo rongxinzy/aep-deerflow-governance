@@ -17,6 +17,17 @@ selected by `PORTAL_KNOWLEDGE_API_KEY_SECRET_FIELD` (default
 to `WEKNORA_API_KEY`. Existing upstream bases are not backfilled into the registry.
 
 `PORTAL_KNOWLEDGE_EMBEDDING_MODEL_ID` must identify an upstream Embedding model.
+
+The stack chart exposes these identifiers under `portal.managedKnowledge`.
+Enable it explicitly and configure `tenantID`, `embeddingModelID`, and the
+API-key field in the out-of-band `secrets.platformCreds` Secret. Missing tenant
+or model identifiers fail rendering. The chart passes the Secret name to
+`PORTAL_CREDENTIALS_SECRET`; it never places the managed API key in values or
+the Portal environment. Local native acceptance may instead set the same
+environment identifiers and use an isolated Kubernetes API server.
+Employee apply/update references use this same managed credential selector and
+verified tenant, and list only active registered bases in the configured
+deployment. They do not require an additional legacy `WEKNORA_API_KEY` field.
 Readiness reports `configured`, with inference availability, storage, and parser
 still `unverified`: successful API authentication does not prove those systems
 are ready. Missing configuration, mismatched tenants, and unavailable
@@ -66,6 +77,25 @@ Pages are ordered by descending audit ID with `id < cursor`; results include
 `parentResourceId`, `outcome`, `statusCode`, and `createdAt`. No content bodies,
 credentials, upstream response bodies, or raw database errors are exposed.
 
+### Runtime audit completion
+
+`POST /internal/v1/knowledge/employees/{name}/authorize` accepts the short-lived
+opaque Portal handle in `X-DeerFlow-Knowledge-Context`. Authorization starts a
+`pending` runtime audit; it is not yet a successful WeKnora read. The MCP bridge
+completes it only after the upstream operation finishes, using the existing
+`operation_id`, `outcome`, and `status_code` fields. `succeeded` requires a 2xx
+status; `failed` requires a 4xx or 5xx status. Conflicting pairs are rejected.
+
+Every runtime intent stores its verified deployment, configured tenant, real
+actor, fixed runtime action, employee name, and SHA-256 of this exact run
+context. Completion must match all these bindings and an existing `pending`
+row. A handle for another employee or another run cannot complete that row,
+even for the same actor. Administrative intents and legacy runtime intents
+without these bindings are unavailable to this endpoint; replay is rejected.
+The additive startup columns default to empty strings for old rows, deliberately
+without backfilling authorization. Context hashes are internal metadata and are
+not added to the public audit DTO; plaintext handles are not stored in audits.
+
 ## Deletion and binding serialization
 
 Startup adds `knowledge_base_registry.lifecycle_state`, initially `active`.
@@ -91,7 +121,7 @@ Use a disposable database, never a customer database:
 
 ```sh
 PORTAL_TEST_POSTGRES_URL='<disposable PostgreSQL DSN>' \
-  go test -race -run TestKnowledgeLifecyclePostgres -v ./...
+  go test -race -run 'TestKnowledge(Lifecycle|RuntimeAudit)Postgres' -v ./...
 ```
 
 The test owns a unique schema, observes the second transaction waiting in
@@ -99,6 +129,9 @@ The test owns a unique schema, observes the second transaction waiting in
 pool. CI runs it with an isolated PostgreSQL service. Unit tests also cover
 reference failures, state/commit failures, upstream disconnects, audit failures,
 tenant scoping, bounded pagination and malformed requests.
+The runtime-audit regression upgrades an isolated legacy schema with the actual
+startup DDL, rejects unbound/admin/foreign operations and completion replay,
+and verifies both successful and failed completion outcomes.
 
 The current checked-in local updater only replaces Portal. Complete release
 requires matching Admin, Portal, WeKnora app, Python MCP, governed employee

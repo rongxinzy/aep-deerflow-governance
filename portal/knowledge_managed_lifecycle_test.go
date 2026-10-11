@@ -111,6 +111,7 @@ func TestManagedKnowledgeManualImportMapsUpstreamConflictsAndSizeErrors(t *testi
 		wantStatus int
 		wantCode   string
 	}{
+		{name: "published for indexing", upstream: http.StatusOK, wantStatus: http.StatusAccepted},
 		{name: "duplicate", upstream: http.StatusConflict, wantStatus: http.StatusConflict, wantCode: "DUPLICATE_KNOWLEDGE"},
 		{name: "too large", upstream: http.StatusRequestEntityTooLarge, wantStatus: http.StatusRequestEntityTooLarge, wantCode: "KNOWLEDGE_INPUT_TOO_LARGE"},
 		{name: "rejected", upstream: http.StatusBadRequest, wantStatus: http.StatusBadGateway, wantCode: "KNOWLEDGE_UPSTREAM_REJECTED"},
@@ -128,7 +129,15 @@ func TestManagedKnowledgeManualImportMapsUpstreamConflictsAndSizeErrors(t *testi
 					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
 				case "/api/v1/knowledge-bases/kb-1/knowledge/manual":
 					importCalls++
+					var payload map[string]string
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+					assert.Equal(t, "publish", payload["status"], "the actual upstream contract accepts draft or publish")
+					assert.Equal(t, "Guide", payload["title"])
+					assert.Equal(t, "safe body", payload["content"])
 					w.WriteHeader(tc.upstream)
+					if tc.upstream == http.StatusOK {
+						_, _ = w.Write([]byte(`{"data":{"id":"doc-1","knowledge_base_id":"kb-1","tenant_id":10000,"type":"manual","parse_status":"pending"}}`))
+					}
 				default:
 					t.Errorf("unexpected upstream request %s", r.URL.Path)
 				}
@@ -137,13 +146,21 @@ func TestManagedKnowledgeManualImportMapsUpstreamConflictsAndSizeErrors(t *testi
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
-			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "failed", tc.upstream).WillReturnResult(sqlmock.NewResult(0, 1))
+			if tc.upstream == http.StatusOK {
+				h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-1", "accepted", http.StatusAccepted).WillReturnResult(sqlmock.NewResult(0, 1))
+			} else {
+				h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "failed", tc.upstream).WillReturnResult(sqlmock.NewResult(0, 1))
+			}
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"title":"Guide","content":"safe body"}`))
 			req.SetPathValue("baseID", "kb-1")
 			w := httptest.NewRecorder()
 			h.handleManagedKnowledgeImportManual(w, req, adminIdentityForManagedTest())
 			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
 			assert.Contains(t, w.Body.String(), tc.wantCode)
+			if tc.upstream == http.StatusOK {
+				assert.Contains(t, w.Body.String(), `"operationId":"kbop-`)
+				assert.Contains(t, w.Body.String(), `"id":"doc-1"`)
+			}
 			assert.Equal(t, 1, importCalls)
 			assert.NoError(t, h.dbmock.ExpectationsWereMet())
 		})

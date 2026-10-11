@@ -48,10 +48,15 @@ type employeeKnowledgeSourceChunk struct {
 }
 
 func (p *portal) employeeKnowledgeReadContext(w http.ResponseWriter, r *http.Request, ident identity) (identity, string, string, bool) {
-	cookie, err := r.Cookie(portalSessionCookie)
-	if err != nil || !p.knowledgeSessionActive(r.Context(), cookie.Value, ident.UserID) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge session unavailable"})
-		return identity{}, "", "", false
+	// The native Admin Console authenticates with an AEP bearer token and
+	// does not need a separate chat/Portal cookie. Cookie-authenticated reads
+	// still check durable Portal revocation; both paths reverify AEP below.
+	if bearer(r) == "" {
+		cookie, err := r.Cookie(portalSessionCookie)
+		if err != nil || !p.knowledgeSessionActive(r.Context(), cookie.Value, ident.UserID) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge session unavailable"})
+			return identity{}, "", "", false
+		}
 	}
 	current, err := p.verifyKnowledgeRequester(r.Context(), ident)
 	if err != nil {
@@ -226,6 +231,13 @@ func (p *portal) handleEmployeeKnowledgeDocument(w http.ResponseWriter, r *http.
 		return
 	}
 	query := url.Values{"page": {strconv.Itoa(page)}, "page_size": {strconv.Itoa(pageSize)}}
+	// The upstream defaults to text chunks. FAQ sources contain faq chunks;
+	// choose the fixed type from verified document metadata, never client input.
+	if doc.Type == "faq" {
+		query.Set("chunk_type", "faq")
+	} else {
+		query.Set("chunk_type", "text")
+	}
 	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "chunks/"+url.PathEscape(documentID), query, nil, "")
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "knowledge source unavailable"})

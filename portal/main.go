@@ -258,6 +258,8 @@ CREATE TABLE IF NOT EXISTS knowledge_audit_events (
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS parent_resource_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_employee_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_context_hash TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS knowledge_audit_events_deployment_created ON knowledge_audit_events (deployment_id, created_at DESC)`)
 	return err
 }

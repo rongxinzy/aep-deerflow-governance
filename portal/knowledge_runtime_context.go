@@ -37,11 +37,31 @@ func (p *portal) auditKnowledgeRuntime(ctx context.Context, requester identity, 
 	return p.finishManagedAudit(ctx, op, resourceID, "succeeded", http.StatusOK)
 }
 
-func (p *portal) completeKnowledgeRuntimeAudit(ctx context.Context, requester identity, operationID, outcome string, statusCode int) error {
-	if operationID == "" || (outcome != "succeeded" && outcome != "failed") || statusCode < 200 || statusCode > 599 {
+// Runtime callbacks may finish only the operation started by this employee and
+// this exact opaque run context. Legacy/admin audit rows have empty bindings
+// and deliberately remain unavailable to the runtime completion endpoint.
+func (p *portal) beginKnowledgeRuntimeAudit(ctx context.Context, requester identity, tenant, employee, contextHash, action, resourceType, resourceID, parentResourceID string) (string, error) {
+	validAction := false
+	for _, input := range []string{"search", "list_bases", "read_base", "list_documents", "read_document", "read_chunks", "wiki_search", "wiki_read_page", "wiki_index", "runtime_read"} {
+		if action == knowledgeRuntimeAction(input) {
+			validAction = true
+			break
+		}
+	}
+	if p == nil || p.db == nil || tenant == "" || tenant != p.cfg.managedKnowledge.tenantID || !namePattern.MatchString(employee) || len(contextHash) != sha256.Size*2 || !validAction || requester.UserID == "" || !p.managedReadyIdentity(requester) {
+		return "", errors.New("invalid knowledge runtime audit context")
+	}
+	op := "kbrtop-" + randomSessionToken()
+	_, err := p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',0)`, op, requester.DeploymentID, tenant, requester.UserID, action, resourceType, resourceID, parentResourceID, employee, contextHash)
+	return op, err
+}
+
+func (p *portal) completeKnowledgeRuntimeAudit(ctx context.Context, requester identity, employee, contextHash, operationID, outcome string, statusCode int) error {
+	validResult := (outcome == "succeeded" && statusCode >= 200 && statusCode < 300) || (outcome == "failed" && statusCode >= 400 && statusCode <= 599)
+	if p == nil || p.db == nil || p.cfg.managedKnowledge.tenantID == "" || requester.UserID == "" || !p.managedReadyIdentity(requester) || !namePattern.MatchString(employee) || len(contextHash) != sha256.Size*2 || operationID == "" || !validResult {
 		return errors.New("invalid knowledge runtime audit completion")
 	}
-	result, err := p.db.ExecContext(ctx, `UPDATE knowledge_audit_events SET outcome=$4,status_code=$5 WHERE operation_id=$1 AND deployment_id=$2 AND actor_user_id=$3 AND outcome='pending'`, operationID, requester.DeploymentID, requester.UserID, outcome, statusCode)
+	result, err := p.db.ExecContext(ctx, `UPDATE knowledge_audit_events SET outcome=$4,status_code=$5 WHERE operation_id=$1 AND deployment_id=$2 AND actor_user_id=$3 AND outcome='pending' AND weknora_tenant_id=$6 AND runtime_employee_name=$7 AND runtime_context_hash=$8 AND action IN ('runtime_search','runtime_list_bases','runtime_read_base','runtime_list_documents','runtime_read_document','runtime_read_chunks','runtime_wiki_search','runtime_wiki_read_page','runtime_wiki_index','runtime_read')`, operationID, requester.DeploymentID, requester.UserID, outcome, statusCode, p.cfg.managedKnowledge.tenantID, employee, contextHash)
 	if err != nil {
 		return err
 	}
@@ -91,8 +111,9 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 		return
 	}
 	digest := sha256.Sum256([]byte(handle))
+	contextHash := hex.EncodeToString(digest[:])
 	var sessionToken string
-	err := p.db.QueryRowContext(r.Context(), `SELECT session_token FROM knowledge_runtime_contexts WHERE handle_hash=$1 AND employee_name=$2 AND expires_at > now()`, hex.EncodeToString(digest[:]), employeeName).Scan(&sessionToken)
+	err := p.db.QueryRowContext(r.Context(), `SELECT session_token FROM knowledge_runtime_contexts WHERE handle_hash=$1 AND employee_name=$2 AND expires_at > now()`, contextHash, employeeName).Scan(&sessionToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge runtime context unavailable"})
 		return
@@ -124,7 +145,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid audit completion request"})
 			return
 		}
-		if err := p.completeKnowledgeRuntimeAudit(r.Context(), requester, input.OperationID, input.Outcome, input.StatusCode); err != nil {
+		if err := p.completeKnowledgeRuntimeAudit(r.Context(), requester, employeeName, contextHash, input.OperationID, input.Outcome, input.StatusCode); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "knowledge audit operation unavailable"})
 			return
 		}
@@ -168,7 +189,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 			}
 			return
 		}
-		op, err := p.beginManagedAudit(r.Context(), requester, tenant, action, "document", doc.ID, doc.KnowledgeBaseID)
+		op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, tenant, employeeName, contextHash, action, "document", doc.ID, doc.KnowledgeBaseID)
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge audit unavailable"})
 			return
@@ -203,7 +224,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 		return
 	}
 	resourceID := strings.Join(allowed, ",")
-	op, err := p.beginManagedAudit(r.Context(), requester, p.cfg.managedKnowledge.tenantID, action, "knowledge_scope", resourceID, "")
+	op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, p.cfg.managedKnowledge.tenantID, employeeName, contextHash, action, "knowledge_scope", resourceID, "")
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge audit unavailable"})
 		return

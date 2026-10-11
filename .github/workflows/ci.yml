@@ -45,7 +45,7 @@ jobs:
         working-directory: portal
         env:
           PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
-        run: go test -race -run TestKnowledgeLifecyclePostgres -v ./...
+        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)' -v ./...
       - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:
@@ -68,10 +68,13 @@ jobs:
         run: |
           python -m pip install --quiet pytest pytest-asyncio pytest-cov fastapi uvicorn asyncpg pydantic httpx
           python -m pytest tests/ --cov=gateway_app --cov-fail-under=80 --cov-report=term
+      - name: Isolated stack update safety tests (no containers)
+        run: python -m unittest scripts/test_update_knowledge_stack.py scripts/test_update_local_portal.py
       - name: Helm chart lint
         run: |
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null 2>&1 || true
           helm lint charts/zhiyuan-stack
+          python -m unittest scripts/test_managed_knowledge_chart.py
 
   # Coverage ratchet: a PR may not lower coverage relative to main.
   coverage-ratchet:

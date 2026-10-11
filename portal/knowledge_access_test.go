@@ -193,7 +193,7 @@ func newKnowledgeAccessPortalFixture(t *testing.T, employee *dev1alpha1.DigitalE
 	server := httptest.NewServer(responder)
 	t.Cleanup(server.Close)
 	return &portal{
-		cfg: config{namespace: "knowledge-test", managedKnowledge: managedKnowledgeConfig{tenantID: "tenant-1"}},
+		cfg: config{namespace: "knowledge-test", aepDeploymentID: "dep-1", managedKnowledge: managedKnowledgeConfig{tenantID: "tenant-1"}},
 		db:  db,
 		k8s: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
 		aep: &aepAuthenticator{baseURL: server.URL, http: server.Client()},
@@ -319,8 +319,8 @@ func TestKnowledgeRuntimeAuthorizeUsesOpaqueSessionAndRechecksRevocation(t *test
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	expectKnowledgeGrant(mock, "dep-1", "tenant-1", "kb-1", "user", "user-1", false)
 	expectKnowledgeGrant(mock, "dep-1", "tenant-1", "kb-1", "team", "team-1", true)
-	mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,outcome,status_code\) VALUES`).
-		WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "").
+	mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code\) VALUES`).
+		WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	first := request()
 	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
@@ -335,8 +335,8 @@ func TestKnowledgeRuntimeAuthorizeUsesOpaqueSessionAndRechecksRevocation(t *test
 		WithArgs(sqlmock.AnyArg(), "employee-1").WillReturnRows(sqlmock.NewRows([]string{"session_token"}).AddRow(sessionToken))
 	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending'`).
-		WithArgs(authorized.OperationID, "dep-1", "user-1", "succeeded", http.StatusOK).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending' AND weknora_tenant_id=\$6 AND runtime_employee_name=\$7 AND runtime_context_hash=\$8 AND action IN`).
+		WithArgs(authorized.OperationID, "dep-1", "user-1", "succeeded", http.StatusOK, "tenant-1", "employee-1", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	complete := httptest.NewRequest(http.MethodPost, "/internal/v1/knowledge/employees/employee-1/authorize", strings.NewReader(`{"operation_id":"`+authorized.OperationID+`","outcome":"succeeded","status_code":200}`))
 	complete.SetPathValue("name", "employee-1")
 	complete.Header.Set(knowledgeContextHeader, contextHandle)
@@ -408,8 +408,6 @@ func TestPortalRuntimeAuthorizationWithPythonWeKnoraBridge(t *testing.T) {
 	p.sessions = newSessionStore(time.Hour)
 	sessionToken, _ := p.sessions.issue(identity{Token: "stored-aep-token", UserID: "user-1", DeploymentID: "dep-1"})
 	contextHandle := strings.Repeat("A", 43)
-	server := httptest.NewServer(p.routes())
-	defer server.Close()
 
 	expectAuthorization := func(knowledgeBaseID string, teamGrant bool) {
 		t.Helper()
@@ -424,8 +422,8 @@ func TestPortalRuntimeAuthorizationWithPythonWeKnoraBridge(t *testing.T) {
 	}
 	expectOperationStart := func() {
 		t.Helper()
-		mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,outcome,status_code\) VALUES`).
-			WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "").
+		mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code\) VALUES`).
+			WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	expectAuthorization("kb-1", true)
@@ -434,16 +432,16 @@ func TestPortalRuntimeAuthorizationWithPythonWeKnoraBridge(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), "employee-1").WillReturnRows(sqlmock.NewRows([]string{"session_token"}).AddRow(sessionToken))
 	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending'`).
-		WithArgs(sqlmock.AnyArg(), "dep-1", "user-1", "succeeded", http.StatusOK).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending' AND weknora_tenant_id=\$6 AND runtime_employee_name=\$7 AND runtime_context_hash=\$8 AND action IN`).
+		WithArgs(sqlmock.AnyArg(), "dep-1", "user-1", "succeeded", http.StatusOK, "tenant-1", "employee-1", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	expectAuthorization("kb-1", true)
 	expectOperationStart()
 	mock.ExpectQuery(`SELECT session_token FROM knowledge_runtime_contexts WHERE handle_hash=\$1 AND employee_name=\$2 AND expires_at > now\(\)`).
 		WithArgs(sqlmock.AnyArg(), "employee-1").WillReturnRows(sqlmock.NewRows([]string{"session_token"}).AddRow(sessionToken))
 	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending'`).
-		WithArgs(sqlmock.AnyArg(), "dep-1", "user-1", "failed", http.StatusBadGateway).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE knowledge_audit_events SET outcome=\$4,status_code=\$5 WHERE operation_id=\$1 AND deployment_id=\$2 AND actor_user_id=\$3 AND outcome='pending' AND weknora_tenant_id=\$6 AND runtime_employee_name=\$7 AND runtime_context_hash=\$8 AND action IN`).
+		WithArgs(sqlmock.AnyArg(), "dep-1", "user-1", "failed", http.StatusBadGateway, "tenant-1", "employee-1", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	// Current team membership is checked on every MCP call. Once it is
 	// revoked, neither the previously allowed KB nor a caller-selected foreign
 	// KB reaches the mocked WeKnora read.
@@ -459,6 +457,11 @@ func TestPortalRuntimeAuthorizationWithPythonWeKnoraBridge(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), "employee-1").WillReturnRows(sqlmock.NewRows([]string{"session_token"}).AddRow(sessionToken))
 	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	// Configure every SQL expectation before accepting requests: sqlmock's
+	// expectation slice must not be mutated while HTTP handlers consume it.
+	server := httptest.NewServer(p.routes())
+	defer server.Close()
 
 	pythonScript := `import json, sys
 import weknora_mcp_server as bridge
