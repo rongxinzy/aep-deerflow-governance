@@ -263,12 +263,12 @@ func TestEnrichTeamsFallsBackToAdminListing(t *testing.T) {
 	// 部门归属必须经 admin 用户列表自愈，而不是空着直到下次登录。
 	stubs := &departmentStubUpstreams{
 		aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/aep/v1/auth/password/login":
+			switch r.URL.Path {
+			case "/aep/v1/auth/password/login":
 				_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
-			case r.URL.Path == "/aep/v1/user/me":
+			case "/aep/v1/user/me":
 				w.WriteHeader(http.StatusUnauthorized)
-			case r.URL.Path == "/aep/v1/admin/users/u9":
+			case "/aep/v1/admin/users/u9":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"id":"u9","teamIds":["rd-dept"]}`))
 			default:
@@ -290,11 +290,11 @@ func TestEnrichTeamsPrefersUserToken(t *testing.T) {
 	var adminHits int
 	stubs := &departmentStubUpstreams{
 		aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/aep/v1/user/me":
+			switch r.URL.Path {
+			case "/aep/v1/user/me":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"user":{"id":"u9","displayName":"张三","kind":"human","teamIds":["sales-dept"]}}`))
-			case r.URL.Path == "/aep/v1/admin/users":
+			case "/aep/v1/admin/users":
 				adminHits++
 				w.WriteHeader(http.StatusForbidden)
 			default:

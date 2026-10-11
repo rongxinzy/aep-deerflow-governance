@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,7 +133,7 @@ func TestKnowledgeDeletePersistsBarrierBeforeUpstreamAndFailsClosed(t *testing.T
 		t.Run(failure, func(t *testing.T) {
 			h := newServicesHarness(t, newServicesStubs(t))
 			configureManagedTest(t, h, "10000")
-			deleteCalls := 0
+			var deleteCalls atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/v1/auth/me" {
 					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
@@ -142,7 +143,7 @@ func TestKnowledgeDeletePersistsBarrierBeforeUpstreamAndFailsClosed(t *testing.T
 					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
 					return
 				}
-				deleteCalls++
+				deleteCalls.Add(1)
 				if failure == "network" {
 					conn, _, err := w.(http.Hijacker).Hijack()
 					if err == nil {
@@ -199,9 +200,9 @@ func TestKnowledgeDeletePersistsBarrierBeforeUpstreamAndFailsClosed(t *testing.T
 				require.Equal(t, 503, w.Code, w.Body.String())
 			}
 			if failure == "network" || failure == "audit-result" {
-				require.Equal(t, 1, deleteCalls)
+				require.Equal(t, int64(1), deleteCalls.Load())
 			} else {
-				require.Zero(t, deleteCalls)
+				require.Zero(t, deleteCalls.Load())
 			}
 			require.NoError(t, h.dbmock.ExpectationsWereMet())
 		})

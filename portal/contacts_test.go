@@ -150,12 +150,12 @@ func TestHandleContacts(t *testing.T) {
 		}
 		stubs := &departmentStubUpstreams{
 			aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.URL.Path == "/aep/v1/auth/password/login":
+				switch r.URL.Path {
+				case "/aep/v1/auth/password/login":
 					_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
-				case r.URL.Path == "/aep/v1/user/me":
+				case "/aep/v1/user/me":
 					_, _ = w.Write([]byte(`{"user":{"id":"u1","displayName":"张三","kind":"human"},"roles":[]}`))
-				case r.URL.Path == "/aep/v1/admin/teams":
+				case "/aep/v1/admin/teams":
 					body, ok := pages[r.URL.Query().Get("cursor")]
 					if !ok {
 						w.WriteHeader(http.StatusNotFound)
@@ -163,7 +163,7 @@ func TestHandleContacts(t *testing.T) {
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(body))
-				case r.URL.Path == "/aep/v1/admin/users":
+				case "/aep/v1/admin/users":
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(`{"items":[{"id":"u9","username":"sunqi","displayName":"孙七","kind":"human","status":"active","teamIds":["sales"]}],"nextCursor":null}`))
 				default:
