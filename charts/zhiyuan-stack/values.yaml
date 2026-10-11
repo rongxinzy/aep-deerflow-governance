@@ -170,7 +170,11 @@ portal:
     minUnhealthySeconds: 300
     minHealthySeconds: 1200
 
+# 2026-10-10 起停用：员工对话由独立前端 zhiyuanBotUI（30202）承载，
+# chat-ui（30195）与 portal /chat 入口页不再是产品入口。保留模板与镜像
+# 条目以便回滚，默认不部署。
 chatUI:
+  enabled: false
   gatewayBaseURL: http://de-portal.digital-employees.svc.cluster.local:8090
   nodePort: 30195
 

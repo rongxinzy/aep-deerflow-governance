@@ -351,6 +351,7 @@ func TestMarshalIdentityRoundTripKeepsToken(t *testing.T) {
 		DisplayName: "Saber",
 		Kind:        "user",
 		Roles:       []string{"admin", "gov-service"},
+		Teams:       []string{"rd-dept", "sales-dept"},
 	}
 	raw, err := marshalIdentity(ident)
 	if err != nil {
@@ -361,6 +362,12 @@ func TestMarshalIdentityRoundTripKeepsToken(t *testing.T) {
 	if !strings.Contains(string(raw), "aep-access-token") {
 		t.Fatalf("token missing from persisted identity: %s", raw)
 	}
+	// Teams must survive too: they were once silently dropped here, which
+	// collapsed every restored session's department scope after a rolling
+	// restart (digital-employee roster emptied while contacts stayed fine).
+	if !strings.Contains(string(raw), "rd-dept") {
+		t.Fatalf("teams missing from persisted identity: %s", raw)
+	}
 	back, err := unmarshalIdentity(raw)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -369,5 +376,8 @@ func TestMarshalIdentityRoundTripKeepsToken(t *testing.T) {
 		back.Username != ident.Username || back.DisplayName != ident.DisplayName ||
 		back.Kind != ident.Kind || len(back.Roles) != len(ident.Roles) {
 		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+	if len(back.Teams) != 2 || back.Teams[0] != "rd-dept" {
+		t.Fatalf("teams round-trip mismatch: %+v", back.Teams)
 	}
 }

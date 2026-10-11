@@ -134,7 +134,7 @@ DEER_FLOW_CONFIG_PATH=<cfg> DEER_FLOW_AUTH_DISABLED=1 PYTHONPATH=<治理包目�
 | 18086/18087 | mockfeishu http/ws（宿主） |
 | 18080 | AEP compose 栈的宿主转发（socat，供旧脚本） |
 | 8101-8107 | 本地调试 DeerFlow 实例（退役中） |
-| 30195 | k3s NodePort → deerflow-chat-ui（网页对话 UI） |
+| 30195（已停用） | k3s NodePort → deerflow-chat-ui（网页对话 UI） |
 
 ## 6.5 网页对话与身份对齐（portal 0.3.1+）
 
