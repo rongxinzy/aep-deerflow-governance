@@ -38,12 +38,12 @@ func contactsStubAEP(t *testing.T) *httptest.Server {
 		],"nextCursor":null}`,
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/aep/v1/auth/password/login":
+		switch r.URL.Path {
+		case "/aep/v1/auth/password/login":
 			_, _ = w.Write([]byte(`{"accessToken":"aep-token-user1"}`))
-		case r.URL.Path == "/aep/v1/user/me":
+		case "/aep/v1/user/me":
 			_, _ = w.Write([]byte(`{"user":{"id":"u1","displayName":"张三","kind":"human"},"roles":[]}`))
-		case r.URL.Path == "/aep/v1/admin/users":
+		case "/aep/v1/admin/users":
 			cursor := r.URL.Query().Get("cursor")
 			body, ok := pages[cursor]
 			if !ok {
@@ -127,10 +127,10 @@ func TestHandleContacts(t *testing.T) {
 		var calls int
 		var mu sync.Mutex
 		partial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/aep/v1/auth/password/login":
+			switch r.URL.Path {
+			case "/aep/v1/auth/password/login":
 				_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
-			case r.URL.Path == "/aep/v1/admin/users":
+			case "/aep/v1/admin/users":
 				mu.Lock()
 				calls++
 				first := calls == 1

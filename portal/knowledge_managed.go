@@ -316,7 +316,7 @@ func decodeManagedData(resp *http.Response, out any) error {
 
 func (p *portal) managedRegistered(ctx context.Context, deployment, tenant, id string) (managedKB, bool, error) {
 	var kb managedKB
-	err := p.db.QueryRowContext(ctx, `SELECT name_snapshot FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, deployment, tenant, id).Scan(&kb.Name)
+	err := p.db.QueryRowContext(ctx, `SELECT name_snapshot FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3 AND lifecycle_state='active'`, deployment, tenant, id).Scan(&kb.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return managedKB{}, false, nil
 	}
@@ -449,7 +449,7 @@ func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	rows, err := p.db.QueryContext(r.Context(), `SELECT knowledge_base_id,name_snapshot,created_by,created_at,updated_at FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 ORDER BY created_at DESC`, ident.DeploymentID, tenant)
+	rows, err := p.db.QueryContext(r.Context(), `SELECT knowledge_base_id,name_snapshot,created_by,created_at,updated_at FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND lifecycle_state='active' ORDER BY created_at DESC`, ident.DeploymentID, tenant)
 	if err != nil {
 		p.managedWriteError(w, 500, "REGISTRY_UNAVAILABLE", "知识库目录暂不可用", "")
 		return
@@ -512,9 +512,17 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 	var in struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Type        string `json:"type"`
 	}
 	if err := decodeStrictJSON(w, r, &in, 16<<10); err != nil || strings.TrimSpace(in.Name) == "" || len(in.Name) > 200 || len(in.Description) > 2000 {
 		p.managedWriteError(w, 400, "INVALID_REQUEST", "知识库名称或描述无效", "")
+		return
+	}
+	if in.Type == "" {
+		in.Type = "document"
+	}
+	if in.Type != "document" && in.Type != "faq" {
+		p.managedWriteError(w, 400, "INVALID_REQUEST", "知识库类型必须是 document 或 faq", "")
 		return
 	}
 	key, tenant, ok := p.managedContext(w, r, ident)
@@ -551,7 +559,7 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未创建知识库", "")
 		return
 	}
-	input := map[string]any{"name": strings.TrimSpace(in.Name), "description": strings.TrimSpace(in.Description), "type": "document", "embedding_model_id": p.cfg.managedKnowledge.embeddingModelID, "chunking_config": map[string]any{"chunk_size": 512, "chunk_overlap": 0, "separators": []string{"\n"}, "enable_multimodal": false}, "question_generation_config": map[string]any{"enabled": false}}
+	input := map[string]any{"name": strings.TrimSpace(in.Name), "description": strings.TrimSpace(in.Description), "type": in.Type, "embedding_model_id": p.cfg.managedKnowledge.embeddingModelID, "chunking_config": map[string]any{"chunk_size": 512, "chunk_overlap": 0, "separators": []string{"\n"}, "enable_multimodal": false}, "question_generation_config": map[string]any{"enabled": false}}
 	payload, _ := json.Marshal(input)
 	resp, err := p.managedRequest(r.Context(), key, http.MethodPost, "knowledge-bases", nil, bytes.NewReader(payload), "application/json")
 	if err != nil {
@@ -560,7 +568,7 @@ func (p *portal) handleManagedKnowledgeCreateBase(w http.ResponseWriter, r *http
 		return
 	}
 	var created managedKB
-	if decodeManagedData(resp, &created) != nil || created.ID == "" || created.TenantID != tenant || created.Name != strings.TrimSpace(in.Name) {
+	if decodeManagedData(resp, &created) != nil || created.ID == "" || created.TenantID != tenant || created.Name != strings.TrimSpace(in.Name) || (created.Type != "" && created.Type != in.Type) || (in.Type == "faq" && created.Type != "faq") {
 		_ = p.finishManagedAudit(r.Context(), op, created.ID, "unverified", 502)
 		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "上游创建结果无法安全验证，请使用操作编号核对", op)
 		return
@@ -649,6 +657,12 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 		p.managedWriteError(w, 404, "KNOWLEDGE_BASE_NOT_FOUND", "未找到已登记知识库", "")
 		return
 	}
+	lock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, []string{id})
+	if err != nil || lock == nil {
+		p.managedWriteError(w, 409, "KNOWLEDGE_BASE_INACTIVE", "知识库正在删除或无法安全删除", "")
+		return
+	}
+	defer func() { _ = lock.Rollback() }()
 	used, err := p.managedKnowledgeReferenced(r.Context(), id)
 	if err != nil {
 		p.managedWriteError(w, 503, "REFERENCE_CHECK_FAILED", "无法确认知识库是否仍被关联，已拒绝删除", "")
@@ -661,6 +675,14 @@ func (p *portal) handleManagedKnowledgeDeleteBase(w http.ResponseWriter, r *http
 	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "delete", "knowledge-base", id, "")
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法持久化操作审计，未删除知识库", "")
+		return
+	}
+	if _, err := lock.ExecContext(r.Context(), `UPDATE knowledge_base_registry SET lifecycle_state='deleting',updated_at=now() WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, id); err != nil {
+		p.managedWriteError(w, 503, "REGISTRY_WRITE_FAILED", "未能持久化删除状态，未请求上游删除", op)
+		return
+	}
+	if err := lock.Commit(); err != nil {
+		p.managedWriteError(w, 503, "REGISTRY_WRITE_FAILED", "删除状态提交未确认，未请求上游删除", op)
 		return
 	}
 	resp, err := p.managedRequest(r.Context(), key, http.MethodDelete, "knowledge-bases/"+url.PathEscape(id), nil, nil, "")

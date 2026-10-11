@@ -11,6 +11,18 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aep_test
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: portal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aep_test -d portal_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -29,6 +41,11 @@ jobs:
           fi
       - name: go vet
         run: (cd operator && go vet ./...) && (cd portal && go vet ./...)
+      - name: PostgreSQL knowledge deletion and binding concurrency
+        working-directory: portal
+        env:
+          PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
+        run: go test -race -run TestKnowledgeLifecyclePostgres -v ./...
       - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:

@@ -221,6 +221,7 @@ CREATE TABLE IF NOT EXISTS knowledge_base_registry (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
 );
+ALTER TABLE knowledge_base_registry ADD COLUMN IF NOT EXISTS lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_state IN ('active','deleting'));
 CREATE TABLE IF NOT EXISTS knowledge_base_grants (
 	deployment_id TEXT NOT NULL,
 	weknora_tenant_id TEXT NOT NULL,

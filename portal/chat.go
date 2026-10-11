@@ -45,7 +45,7 @@ func injectKnowledgeRunContext(r *http.Request, rest, handle, employee string) e
 		return errors.New("invalid knowledge run body")
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
 		return errors.New("invalid knowledge run json")
 	}
 	contextValue, ok := payload["context"]

@@ -52,7 +52,7 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 	}
 	tenant := p.cfg.managedKnowledge.tenantID
 	var registered string
-	err := p.db.QueryRowContext(r.Context(), `SELECT knowledge_base_id FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, baseID).Scan(&registered)
+	err := p.db.QueryRowContext(r.Context(), `SELECT knowledge_base_id FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3 AND lifecycle_state='active'`, ident.DeploymentID, tenant, baseID).Scan(&registered)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "knowledge base is not registered for this deployment"})
 		return

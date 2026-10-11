@@ -66,6 +66,7 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("/api/v1/knowledge/proxy/{rest...}", p.auth(p.handleKnowledgeProxy))
 	mux.HandleFunc("GET /api/v1/knowledge/bases", p.auth(p.adminOnly(p.handleKnowledgeListBases)))
 	mux.HandleFunc("GET /api/v1/knowledge/managed/readiness", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeReadiness)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/audit", p.auth(p.freshAdminOnly(p.handleKnowledgeAudit)))
 	mux.HandleFunc("GET /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeBases)))
 	mux.HandleFunc("POST /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeCreateBase)))
 	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeGetBase)))
@@ -316,6 +317,14 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 	}
 	resolved.DeploymentName = deploymentName
 	spec := p.renderSpec(body, resolved, runtimeModels)
+	knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(spec))
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+		return
+	}
+	if knowledgeLock != nil {
+		defer func() { _ = knowledgeLock.Rollback() }()
+	}
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
 		if err != nil {
@@ -680,6 +689,16 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 	if body.Visibility != nil {
 		item.Spec.Visibility = resolved.Visibility
 	}
+	if body.KnowledgeBases != nil {
+		knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(item))
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+			return
+		}
+		if knowledgeLock != nil {
+			defer func() { _ = knowledgeLock.Rollback() }()
+		}
+	}
 	if err := p.k8s.Update(r.Context(), &item); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -798,6 +817,14 @@ func (p *portal) decideRequest(finalState string) func(http.ResponseWriter, *htt
 				return
 			}
 			spec.ResourceVersion = ""
+			knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(spec))
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+				return
+			}
+			if knowledgeLock != nil {
+				defer func() { _ = knowledgeLock.Rollback() }()
+			}
 			if _, err := p.createEmployee(r.Context(), spec); err != nil && !apierrors.IsAlreadyExists(err) {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return

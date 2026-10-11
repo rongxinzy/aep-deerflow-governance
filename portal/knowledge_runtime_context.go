@@ -176,7 +176,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusOK, map[string]string{"knowledge_base_id": doc.KnowledgeBaseID, "operation_id": op})
 		return
 	}
-	if input.KnowledgeBaseIDs == nil || len(input.KnowledgeBaseIDs) == 0 || len(input.KnowledgeBaseIDs) > 100 {
+	if len(input.KnowledgeBaseIDs) == 0 || len(input.KnowledgeBaseIDs) > 100 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "knowledge_base_ids must be an explicit list"})
 		return
 	}

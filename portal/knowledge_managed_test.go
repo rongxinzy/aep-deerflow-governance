@@ -857,9 +857,13 @@ func TestManagedKnowledgeMutationAuditIntentFailureBlocksUpdateDeleteAndUpload(t
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
 			if action == "delete" {
+				expectKnowledgeBindingLock(h.dbmock, "kb-1", "active")
 				h.dbmock.ExpectQuery(`SELECT spec_json FROM requests WHERE state='pending'`).WillReturnRows(sqlmock.NewRows([]string{"spec_json"}))
 			}
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnError(errors.New("audit unavailable"))
+			if action == "delete" {
+				h.dbmock.ExpectRollback()
+			}
 			var req *http.Request
 			switch action {
 			case "update":
@@ -1020,8 +1024,11 @@ func TestManagedKnowledgeDeleteBaseSuccessDeletesUpstreamAndRegistry(t *testing.
 	defer server.Close()
 	h.cfg.knowledgeAPIURL = server.URL
 	h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+	expectKnowledgeBindingLock(h.dbmock, "kb-1", "active")
 	h.dbmock.ExpectQuery(`SELECT spec_json FROM requests WHERE state='pending'`).WillReturnRows(sqlmock.NewRows([]string{"spec_json"}))
 	h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "delete", "knowledge-base", "kb-1", "").WillReturnResult(sqlmock.NewResult(0, 1))
+	h.dbmock.ExpectExec(`UPDATE knowledge_base_registry SET lifecycle_state='deleting'`).WithArgs("demo", "10000", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	h.dbmock.ExpectCommit()
 	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "kb-1", "succeeded", 200).WillReturnResult(sqlmock.NewResult(0, 1))
 	h.dbmock.ExpectExec(`DELETE FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
 	req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -1060,8 +1067,11 @@ func TestManagedKnowledgeDeleteBaseHandlesUpstreamAndRegistryFailures(t *testing
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			expectKnowledgeBindingLock(h.dbmock, "kb-1", "active")
 			h.dbmock.ExpectQuery(`SELECT spec_json FROM requests WHERE state='pending'`).WillReturnRows(sqlmock.NewRows([]string{"spec_json"}))
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectExec(`UPDATE knowledge_base_registry SET lifecycle_state='deleting'`).WithArgs("demo", "10000", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectCommit()
 			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "kb-1", outcome, auditStatus).WillReturnResult(sqlmock.NewResult(0, 1))
 			if failRegistry {
 				h.dbmock.ExpectExec(`DELETE FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnError(errors.New("registry unavailable"))

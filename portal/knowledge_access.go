@@ -57,6 +57,7 @@ func (s sqlKnowledgeGrantLookup) hasKnowledgeGrant(ctx context.Context, deployme
 		 AND g.knowledge_base_id=r.knowledge_base_id
 		WHERE r.deployment_id=$1 AND r.weknora_tenant_id=$2 AND r.knowledge_base_id=$3
 		  AND g.subject_type=$4 AND g.subject_id=$5
+		  AND r.lifecycle_state='active'
 	)`
 	for _, subject := range subjects {
 		if (subject.Type != "user" && subject.Type != "team") || subject.ID == "" {
