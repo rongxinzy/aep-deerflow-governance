@@ -270,6 +270,10 @@ func TestApplyWithModelSelection(t *testing.T) {
 		assert.Equal(t, "openai", second.Provider)
 		assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/v1", second.BaseURL, "openai models route through the gateway /v1 (header-routed), never the raw endpoint")
 		assert.Equal(t, "Qwen3.6-35B-A3B", second.NativeModel)
+		require.NotNil(t, second.Reasoning, "declared thinkingFormat must project onto the runtime reasoning block")
+		assert.Equal(t, "optional", second.Reasoning.Thinking)
+		assert.Equal(t, "preserve", second.Reasoning.History)
+		assert.Nil(t, first.Reasoning, "anthropic fixture declares no reasoning")
 		assert.Empty(t, item.Spec.Runtime.Model, "legacy singular fields stay empty when models are explicit")
 	})
 
@@ -366,7 +370,7 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 			_, _ = w.Write([]byte(`{"models":[
 				{"id":"bench-glm","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
-				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
+				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true,"reasoningCompatibility":{"thinkingFormat":"zai","supportsReasoningEffort":true,"requiresReasoningContentOnAssistantMessages":true}},
 				{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}]}`))
 		default:
 			http.NotFound(w, r)

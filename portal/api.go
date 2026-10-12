@@ -354,6 +354,31 @@ type catalogModel struct {
 	Endpoint      string `json:"endpoint"`
 	UpstreamModel string `json:"upstreamModel"`
 	Enabled       bool   `json:"enabled"`
+	// ReasoningCompatibility is the AEP reasoning contract (thinkingFormat
+	// deepseek/zai + reasoning-content history requirement); a declared
+	// format maps onto the runtime's declarative reasoning block.
+	ReasoningCompatibility *catalogReasoning `json:"reasoningCompatibility,omitempty"`
+}
+
+// runtimeReasoning projects the AEP reasoning contract onto the runtime's
+// declarative block: a declared thinkingFormat (deepseek or zai) means
+// thinking can be toggled (optional); an upstream that requires
+// reasoning_content on assistant messages maps to history preservation.
+// Effort vocabulary is not expressed by the AEP contract and stays unset.
+func runtimeReasoning(compatibility *catalogReasoning) *dev1alpha1.RuntimeReasoning {
+	if compatibility == nil || compatibility.ThinkingFormat == "" {
+		return nil
+	}
+	return &dev1alpha1.RuntimeReasoning{
+		Thinking: "optional",
+		History:  map[bool]string{true: "preserve", false: ""}[compatibility.RequiresReasoningContentOnAssistantMessages],
+	}
+}
+
+type catalogReasoning struct {
+	ThinkingFormat                            string `json:"thinkingFormat"`
+	SupportsReasoningEffort                   bool   `json:"supportsReasoningEffort"`
+	RequiresReasoningContentOnAssistantMessages bool `json:"requiresReasoningContentOnAssistantMessages"`
 }
 
 // resolveRuntimeModels maps requested AEP model ids onto runtime routes by
@@ -440,6 +465,9 @@ func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, model
 		}
 		if route.BaseURL == "" {
 			return nil, fmt.Errorf("model %q has no endpoint", id)
+		}
+		if reasoning := runtimeReasoning(model.ReasoningCompatibility); reasoning != nil {
+			route.Reasoning = reasoning
 		}
 		routes = append(routes, route)
 	}
