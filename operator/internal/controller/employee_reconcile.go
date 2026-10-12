@@ -210,6 +210,20 @@ func renderModelEntry(route v1alpha1.RuntimeModel) map[string]any {
 		entry["request_timeout"] = 300.0
 	}
 	entry["max_retries"] = 2
+	// A declared reasoning block keeps DeerFlow from downgrading thinking
+	// models to non-thinking (it infers support only from config).
+	if route.Reasoning != nil {
+		reasoning := map[string]any{}
+		if route.Reasoning.Thinking != "" {
+			reasoning["thinking"] = route.Reasoning.Thinking
+		}
+		if route.Reasoning.History != "" {
+			reasoning["history"] = route.Reasoning.History
+		}
+		if len(reasoning) > 0 {
+			entry["reasoning"] = reasoning
+		}
+	}
 	return entry
 }
 

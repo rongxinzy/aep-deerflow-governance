@@ -469,7 +469,7 @@ var _ = Describe("DigitalEmployee runtime model list", func() {
 		employee := fx.employeeFixture("multi-model-helper")
 		employee.Spec.Runtime.Models = []v1alpha1.RuntimeModel{
 			{Name: "bench-anthropic", Provider: "anthropic", NativeModel: "glm-5.3-flash", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic", ApiKeyEnv: "BIGMODEL_API_KEY"},
-			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-qwen", ApiKeyEnv: "DEER_BENCH_API_KEY"},
+			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/v1", ApiKeyEnv: "DEER_BENCH_API_KEY", Reasoning: &v1alpha1.RuntimeReasoning{Thinking: "optional", History: "preserve"}},
 		}
 		employee.Spec.Runtime.Model = ""
 
@@ -490,6 +490,11 @@ var _ = Describe("DigitalEmployee runtime model list", func() {
 			HaveKeyWithValue("base_url", "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic"),
 		))
 		Expect(parsed.Models[0]).NotTo(HaveKey("request_timeout"))
+		Expect(parsed.Models[0]).NotTo(HaveKey("reasoning"), "undeclared models stay thinking-off (runtime default)")
+		Expect(parsed.Models[1]["reasoning"]).To(SatisfyAll(
+			HaveKeyWithValue("thinking", "optional"),
+			HaveKeyWithValue("history", "preserve"),
+		))
 		Expect(parsed.Models[1]).To(SatisfyAll(
 			HaveKeyWithValue("name", "bench-qwen"),
 			HaveKeyWithValue("model", "Qwen3.6-35B-A3B"),

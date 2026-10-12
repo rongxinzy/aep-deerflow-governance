@@ -354,12 +354,39 @@ type catalogModel struct {
 	Endpoint      string `json:"endpoint"`
 	UpstreamModel string `json:"upstreamModel"`
 	Enabled       bool   `json:"enabled"`
+	// ReasoningCompatibility is the AEP reasoning contract (thinkingFormat
+	// deepseek/zai + reasoning-content history requirement); a declared
+	// format maps onto the runtime's declarative reasoning block.
+	ReasoningCompatibility *catalogReasoning `json:"reasoningCompatibility,omitempty"`
+}
+
+// runtimeReasoning projects the AEP reasoning contract onto the runtime's
+// declarative block: a declared thinkingFormat (deepseek or zai) means
+// thinking can be toggled (optional); an upstream that requires
+// reasoning_content on assistant messages maps to history preservation.
+// Effort vocabulary is not expressed by the AEP contract and stays unset.
+func runtimeReasoning(compatibility *catalogReasoning) *dev1alpha1.RuntimeReasoning {
+	if compatibility == nil || compatibility.ThinkingFormat == "" {
+		return nil
+	}
+	return &dev1alpha1.RuntimeReasoning{
+		Thinking: "optional",
+		History:  map[bool]string{true: "preserve", false: ""}[compatibility.RequiresReasoningContentOnAssistantMessages],
+	}
+}
+
+type catalogReasoning struct {
+	ThinkingFormat                            string `json:"thinkingFormat"`
+	SupportsReasoningEffort                   bool   `json:"supportsReasoningEffort"`
+	RequiresReasoningContentOnAssistantMessages bool `json:"requiresReasoningContentOnAssistantMessages"`
 }
 
 // resolveRuntimeModels maps requested AEP model ids onto runtime routes by
 // consulting the model catalog with the requester's own token (the console
-// admin already holds models.read). anthropic models ride the per-model
-// gateway prefix; openai-compatible models use their registered endpoint.
+// admin already holds models.read). Both protocols ride the gateway:
+// anthropic models under their per-model path prefix, openai-compatible
+// models under the shared /v1 path (the authorizer stamps X-AEP-Model-ID
+// from the request body and the data plane routes on that header).
 func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, modelIDs []string) ([]dev1alpha1.RuntimeModel, error) {
 	if len(modelIDs) == 0 {
 		return nil, nil
@@ -424,13 +451,23 @@ func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, model
 			route.Provider = "anthropic"
 			route.BaseURL = p.cfg.gatewayBaseURL + "/" + model.ID
 		case "openai-compatible":
+			// Gateway-routed, never the upstream endpoint: the data plane
+			// routes openai models by the x-aep-model-id header under the
+			// shared /v1 path (ai-proxy rehomes it onto the provider base
+			// and injects the credential). Handing runtimes the raw
+			// endpoint made employees dial the provider directly with the
+			// platform key — unauthorizer, unaccounted, and 401 for
+			// key-authenticating providers.
 			route.Provider = "openai"
-			route.BaseURL = model.Endpoint
+			route.BaseURL = p.cfg.gatewayBaseURL + "/v1"
 		default:
 			return nil, fmt.Errorf("model %q uses unsupported protocol %q", id, model.Protocol)
 		}
 		if route.BaseURL == "" {
 			return nil, fmt.Errorf("model %q has no endpoint", id)
+		}
+		if reasoning := runtimeReasoning(model.ReasoningCompatibility); reasoning != nil {
+			route.Reasoning = reasoning
 		}
 		routes = append(routes, route)
 	}
