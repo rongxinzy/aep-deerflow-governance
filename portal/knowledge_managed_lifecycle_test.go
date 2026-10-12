@@ -466,7 +466,7 @@ func TestManagedKnowledgeChunkAndSpanResponsesAreScopedAndProjected(t *testing.T
 				case "/api/v1/knowledge/doc-1/spans":
 					_, _ = w.Write([]byte(`{"data":{"knowledge_id":"doc-1","attempt":1,"latest_attempt":1,"parse_status":"completed","current_stage":"postprocess","trace":{"knowledge_id":"doc-1","span_id":"root","name":"root","kind":"root","status":"done","input":{"token":"never-return"},"children":[{"knowledge_id":"doc-1","span_id":"stage-1","name":"chunking","kind":"stage","status":"done","error_detail":"secret"}]}}}`))
 				case "/api/v1/chunks/doc-1":
-					_, _ = w.Write([]byte(`{"data":[{"id":"chunk-1","tenant_id":10000,"knowledge_base_id":"kb-1","knowledge_id":"doc-1","seq_id":1,"content":"safe text","chunk_type":"text","is_enabled":true,"content_revision":2,"index_status":"ready","image_info":"[{\"url\":\"https://external.invalid/private-image\"}]"}],"total":1,"page":1,"page_size":10}`))
+					_, _ = w.Write([]byte(`{"data":[{"id":"chunk-1","tenant_id":10000,"knowledge_base_id":"kb-1","knowledge_id":"doc-1","seq_id":1,"content":"safe text","chunk_type":"text","is_enabled":true,"content_revision":0,"index_status":"ready","image_info":"[{\"url\":\"https://external.invalid/private-image\"}]"}],"total":1,"page":1,"page_size":10}`))
 				default:
 					t.Errorf("unexpected upstream request %s", r.URL.Path)
 				}
@@ -490,6 +490,9 @@ func TestManagedKnowledgeChunkAndSpanResponsesAreScopedAndProjected(t *testing.T
 			assert.Contains(t, w.Body.String(), `"knowledge_id":"doc-1"`)
 			assert.NotContains(t, w.Body.String(), "never-return")
 			assert.NotContains(t, w.Body.String(), "external.invalid")
+			if kind == "chunks" {
+				assert.Contains(t, w.Body.String(), `"content_revision":0`, "new unedited chunks start at upstream revision zero")
+			}
 			assert.NotContains(t, w.Body.String(), "error_detail")
 			assert.NoError(t, h.dbmock.ExpectationsWereMet())
 		})

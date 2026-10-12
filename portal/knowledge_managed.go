@@ -1409,7 +1409,7 @@ func (p *portal) handleManagedKnowledgeChunks(w http.ResponseWriter, r *http.Req
 	}
 	for index := range page.Data {
 		chunk := &page.Data[index]
-		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant || chunk.ContentRevision < 1 || !managedChunkIndexStatusValid(chunk.IndexStatus) {
+		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant || chunk.ContentRevision < 0 || !managedChunkIndexStatusValid(chunk.IndexStatus) {
 			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_INVALID", "分块列表包含其他资料的内容", "")
 			return
 		}
