@@ -36,6 +36,9 @@ spec:
             - {name: MCP_PORT, value: "8830"}
             # bearer gate DeerFlow authenticates with (X-MCP-Auth-Token)
             - {name: MCP_SERVER_AUTH_TOKEN, value: "__MCP_SERVER_AUTH_TOKEN__"}
+            # Historical manifest must also fail closed if applied by mistake.
+            - {name: PORTAL_KNOWLEDGE_AUTH_REQUIRED, value: "true"}
+            - {name: PORTAL_KNOWLEDGE_AUTH_URL, value: "http://de-portal.digital-employees.svc.cluster.local:8090/internal/v1/knowledge/employees"}
           ports:
             - containerPort: 8830
           # MCP endpoint returns 401 to unauthenticated probes by design;

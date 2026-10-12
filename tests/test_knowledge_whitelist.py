@@ -18,11 +18,23 @@ fakes.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from langchain_core.messages import ToolMessage
 
 from aep_deerflow_governance import AepGovernanceMiddleware
+
+NATIVE_MCP_TOOL_NAMES = {
+    "create_tenant", "list_tenants", "create_knowledge_base", "list_knowledge_bases",
+    "list_shared_knowledge_bases", "get_knowledge_base", "delete_knowledge_base",
+    "hybrid_search", "create_knowledge_from_file", "create_knowledge_from_url",
+    "create_knowledge_from_text", "update_knowledge_from_text", "list_knowledge",
+    "get_knowledge", "delete_knowledge", "create_model", "list_models", "get_model",
+    "create_session", "get_session", "list_sessions", "delete_session", "chat",
+    "agent_chat", "list_agents", "get_agent", "list_chunks", "delete_chunk",
+    "wiki_search", "wiki_read_page", "wiki_index_view",
+}
 
 WHITELIST = {"kb-1": "销售知识库", "kb-2": "产品知识库"}
 
@@ -34,9 +46,21 @@ class FakeCall:
         self.id = call_id
 
 
+class FakeRuntime:
+    def __init__(self, context: dict[str, Any] | None = None):
+        self.context = context
+
+
 class FakeRequest:
-    def __init__(self, call: FakeCall):
+    def __init__(self, call: FakeCall, context: dict[str, Any] | None = None):
         self.tool_call = call
+        self.runtime = FakeRuntime(context)
+
+    def override(self, **kwargs):
+        cloned = copy.copy(self)
+        for key, value in kwargs.items():
+            setattr(cloned, key, value)
+        return cloned
 
 
 class FakeRequestDict:
@@ -82,6 +106,26 @@ def test_kb_id_read_tools_pass_with_in_whitelist_id() -> None:
         assert outcome(mw, FakeCall(name, {"kb_id": "kb-2", "query": "q"})) == "OK", name
 
 
+def test_registry_covers_every_native_mcp_tool_and_denies_bare_writes() -> None:
+    assert NATIVE_MCP_TOOL_NAMES <= set(AepGovernanceMiddleware._WEKNORA_TOOL_REGISTRY)
+    mw = middleware(WHITELIST)
+    for name in ("list_shared_knowledge_bases", "create_knowledge_from_text", "update_knowledge_from_text"):
+        assert denied(outcome(mw, FakeCall(name, {"kb_id": "kb-1", "content": "x"}))), name
+
+
+def test_standard_server_aliases_of_unclassified_or_write_tools_are_denied() -> None:
+    mw = middleware(WHITELIST)
+    for name in (
+        "weknora__list_shared_knowledge_bases",
+        "mcp__weknora__list_shared_knowledge_bases",
+        "weknora_create_knowledge_from_text",
+        "mcp__weknora__create_knowledge_from_text",
+        "weknora__update_knowledge_from_text",
+        "mcp__weknora__update_knowledge_from_text",
+    ):
+        assert denied(outcome(mw, FakeCall(name, {"kb_id": "kb-1", "content": "x"}))), name
+
+
 def test_kb_id_missing_or_out_of_whitelist_is_denied() -> None:
     mw = middleware(WHITELIST)
     assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"query": "q"})))
@@ -89,11 +133,39 @@ def test_kb_id_missing_or_out_of_whitelist_is_denied() -> None:
     assert denied(outcome(mw, FakeCall("hybrid_search", {"kb_id": ""})))
 
 
+def test_wiki_read_page_keeps_and_checks_kb_scope() -> None:
+    mw = middleware(WHITELIST)
+    assert outcome(mw, FakeCall("mcp__weknora__wiki_read_page", {"kb_id": "kb-1", "slug": "entity/a"})) == "OK"
+    assert denied(outcome(mw, FakeCall("mcp__weknora__wiki_read_page", {"kb_id": "kb-x", "slug": "entity/a"})))
+    assert denied(outcome(mw, FakeCall("mcp__weknora__wiki_read_page", {"slug": "entity/a"})))
+
+
 def test_empty_whitelist_denies_every_read() -> None:
     mw = middleware({})
     result = outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"}))
     assert denied(result)
     assert "未连接任何知识库" in result.content
+
+
+def test_empty_whitelist_denies_opaque_reads_even_with_online_context() -> None:
+    mw = middleware({})
+    mw.knowledge_online_authorization = True
+    for name in ("get_knowledge", "list_chunks"):
+        result = outcome(mw, FakeCall(name, {"knowledge_id": "doc-1"}))
+        assert denied(result), name
+        assert "deny-all whitelist" in result.content
+
+
+def test_opaque_document_reads_require_online_portal_attribution() -> None:
+    mw = middleware(WHITELIST)
+    for name, args in (
+        ("get_knowledge", {"knowledge_id": "doc-1"}),
+        ("list_chunks", {"knowledge_id": "doc-1"}),
+        ("read_document", {"document_id": "doc-1"}),
+    ):
+        result = outcome(mw, FakeCall(name, args))
+        assert denied(result), name
+        assert "opaque document handles require online Portal authorization" in result.content
 
 
 # ----------------------------------------------- knowledge_base_ids (dsh)
@@ -122,6 +194,12 @@ def test_admin_and_session_tools_are_denied_under_policy() -> None:
     ]:
         result = outcome(mw, FakeCall(name, args))
         assert denied(result), name
+        if "list_knowledge_bases" in name:
+            assert "tenant-wide catalog reads are denied" in result.content
+            continue
+        if "get_knowledge" in name:
+            assert result.content.startswith(f"DENIED {name}:")
+            continue
         assert "只读检索类" in result.content or "不在本数字员工可用范围" in result.content, name
 
 
@@ -146,6 +224,23 @@ def test_langgraph_dict_shaped_tool_calls_are_enforced() -> None:
     denied_call = dict_outcome("weknora_hybrid_search", {"kb_id": "kb-x", "query": "q"})
     assert denied(denied_call)
     assert denied(dict_outcome("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}))
+
+
+def test_context_injection_drops_model_selected_knowledge_action() -> None:
+    mw = middleware(WHITELIST)
+    mw.knowledge_online_authorization = True
+    seen: dict[str, Any] = {}
+    request = FakeRequest(
+        FakeCall("mcp__weknora__hybrid_search", {
+            "kb_id": "kb-1", "query": "q", "knowledge_action": "delete_knowledge_base",
+        }),
+        {"zhiyuan_knowledge_context": "A" * 42 + "_", "zhiyuan_employee_name": "employee-1"},
+    )
+    result = mw.wrap_tool_call(request, handler=lambda enriched: seen.update(enriched.tool_call["args"]) or "OK")
+    assert result == "OK"
+    assert seen["knowledge_employee_name"] == "employee-1"
+    assert seen["knowledge_context_handle"] == "A" * 42 + "_"
+    assert "knowledge_action" not in seen
 
 
 def test_governance_message_lists_bases_iff_configured() -> None:

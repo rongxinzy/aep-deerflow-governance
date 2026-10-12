@@ -13,6 +13,23 @@ import (
 	dev1alpha1 "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 )
 
+func TestDeploymentNameSendsRequiredProtocolVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-AEP-Protocol-Version") != "1.0" {
+			w.WriteHeader(http.StatusUpgradeRequired)
+			return
+		}
+		assert.Equal(t, "/aep/v1/auth/methods", r.URL.Path)
+		assert.Equal(t, "enterprise-a", r.URL.Query().Get("deploymentHint"))
+		_, _ = w.Write([]byte(`{"deployment":{"id":"enterprise-a","name":"Native enterprise"}}`))
+	}))
+	defer server.Close()
+	p := &portal{cfg: config{aepBaseURL: server.URL, aepDeploymentID: "enterprise-a"}}
+	name, err := p.deploymentName(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "Native enterprise", name)
+}
+
 func TestDeploymentNameRejectsAnotherEnterprise(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"deployment":{"id":"enterprise-b","name":"Other enterprise"}}`))

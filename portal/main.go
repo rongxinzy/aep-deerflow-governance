@@ -41,6 +41,8 @@ type config struct {
 	credentialsSecret string
 	a2aImage          string
 
+	managedKnowledge managedKnowledgeConfig
+
 	// Web-chat entry: session cookie TTL, the AEP deployment id used by the
 	// /chat login form, and where the reused DeerFlow frontend is served.
 	sessionTTL      time.Duration
@@ -61,6 +63,12 @@ type config struct {
 	failoverInterval     time.Duration
 	failoverMinUnhealthy time.Duration
 	failoverMinHealthy   time.Duration
+}
+
+type managedKnowledgeConfig struct {
+	tenantID          string
+	apiKeySecretField string
+	embeddingModelID  string
 }
 
 func loadConfig() config {
@@ -86,6 +94,12 @@ func loadConfig() config {
 		knowledgeUIURL:    env("PORTAL_KNOWLEDGE_UI_URL", ""),
 		credentialsSecret: env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
 		a2aImage:          env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
+
+		managedKnowledge: managedKnowledgeConfig{
+			tenantID:          env("PORTAL_KNOWLEDGE_TENANT_ID", ""),
+			apiKeySecretField: env("PORTAL_KNOWLEDGE_API_KEY_SECRET_FIELD", "WEKNORA_KNOWLEDGE_API_KEY"),
+			embeddingModelID:  env("PORTAL_KNOWLEDGE_EMBEDDING_MODEL_ID", ""),
+		},
 
 		sessionTTL:      time.Duration(envInt("PORTAL_SESSION_TTL_MINUTES", 720)) * time.Minute,
 		aepDeploymentID: env("PORTAL_AEP_DEPLOYMENT_ID", "demo"),
@@ -196,7 +210,57 @@ CREATE INDEX IF NOT EXISTS channel_wake_pending ON channel_wake (employee) WHERE
 CREATE TABLE IF NOT EXISTS employee_activity (
 	employee    TEXT PRIMARY KEY,
 	last_active TIMESTAMPTZ NOT NULL DEFAULT now()
-)`)
+);
+CREATE TABLE IF NOT EXISTS knowledge_base_registry (
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	knowledge_base_id TEXT NOT NULL,
+	name_snapshot TEXT NOT NULL,
+	created_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
+);
+ALTER TABLE knowledge_base_registry ADD COLUMN IF NOT EXISTS lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_state IN ('active','deleting'));
+CREATE TABLE IF NOT EXISTS knowledge_base_grants (
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	knowledge_base_id TEXT NOT NULL,
+	subject_type TEXT NOT NULL CHECK (subject_type IN ('user','team')),
+	subject_id TEXT NOT NULL,
+	granted_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (deployment_id, weknora_tenant_id, knowledge_base_id, subject_type, subject_id),
+	FOREIGN KEY (deployment_id, weknora_tenant_id, knowledge_base_id)
+		REFERENCES knowledge_base_registry(deployment_id, weknora_tenant_id, knowledge_base_id)
+		ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS knowledge_runtime_contexts (
+	handle_hash TEXT PRIMARY KEY,
+	session_token TEXT NOT NULL,
+	employee_name TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_runtime_contexts_expiry ON knowledge_runtime_contexts (expires_at);
+CREATE TABLE IF NOT EXISTS knowledge_audit_events (
+	id BIGSERIAL PRIMARY KEY,
+	operation_id TEXT NOT NULL UNIQUE,
+	deployment_id TEXT NOT NULL,
+	weknora_tenant_id TEXT NOT NULL,
+	actor_user_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	resource_type TEXT NOT NULL,
+	resource_id TEXT NOT NULL DEFAULT '',
+	parent_resource_id TEXT NOT NULL DEFAULT '',
+	outcome TEXT NOT NULL,
+	status_code INTEGER NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS parent_resource_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_employee_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_context_hash TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS knowledge_audit_events_deployment_created ON knowledge_audit_events (deployment_id, created_at DESC)`)
 	return err
 }
 

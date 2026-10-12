@@ -19,6 +19,7 @@ func (p *portal) deploymentName(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set("X-AEP-Protocol-Version", "1.0")
 	resp, err := serviceProbeClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("AEP metadata: %w", err)

@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -23,6 +26,99 @@ import (
 // so browser chat runs under the human's data scope, not the employee default.
 
 const ownerHeaderName = "X-DeerFlow-Owner-User-Id"
+
+const maxKnowledgeRunBodyBytes = 8 << 20
+
+// injectKnowledgeRunContext uses LangGraph's supported run `context` field.
+// Custom HTTP headers are not part of the tool runtime context, so merely
+// stamping one on the reverse proxy would not bind the actual MCP call.
+func injectKnowledgeRunContext(r *http.Request, rest, handle, employee string) error {
+	if handle == "" || r.Method != http.MethodPost || !isLangGraphRunPath(rest) {
+		return nil
+	}
+	if r.Body == nil {
+		return errors.New("knowledge run body is required")
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxKnowledgeRunBodyBytes+1))
+	_ = r.Body.Close()
+	if err != nil || len(body) == 0 || len(body) > maxKnowledgeRunBodyBytes {
+		return errors.New("invalid knowledge run body")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return errors.New("invalid knowledge run json")
+	}
+	contextValue, ok := payload["context"]
+	var runContext map[string]any
+	if ok {
+		runContext, ok = contextValue.(map[string]any)
+		if !ok {
+			return errors.New("invalid knowledge run context")
+		}
+	} else {
+		runContext = map[string]any{}
+	}
+	// Never trust a client-supplied handle with the same key.
+	runContext["zhiyuan_knowledge_context"] = handle
+	runContext["zhiyuan_employee_name"] = employee
+	payload["context"] = runContext
+	// Gateway's top-level body.context is intentionally allowlisted and drops
+	// these application-specific fields. Its build_run_config path preserves
+	// body.config.context for ToolRuntime.context, so bind the same server-owned
+	// values there as well. Remove caller copies from configurable: it is not an
+	// authorization channel and may be persisted in checkpoints.
+	configValue, exists := payload["config"]
+	var runConfig map[string]any
+	if !exists || configValue == nil {
+		runConfig = map[string]any{}
+	} else {
+		var ok bool
+		runConfig, ok = configValue.(map[string]any)
+		if !ok {
+			return errors.New("invalid knowledge run config")
+		}
+	}
+	configContext, exists := runConfig["context"]
+	var runtimeContext map[string]any
+	if !exists || configContext == nil {
+		runtimeContext = map[string]any{}
+	} else {
+		var ok bool
+		runtimeContext, ok = configContext.(map[string]any)
+		if !ok {
+			return errors.New("invalid knowledge run config context")
+		}
+	}
+	runtimeContext["zhiyuan_knowledge_context"] = handle
+	runtimeContext["zhiyuan_employee_name"] = employee
+	runConfig["context"] = runtimeContext
+	if configurable, ok := runConfig["configurable"].(map[string]any); ok {
+		delete(configurable, "zhiyuan_knowledge_context")
+		delete(configurable, "zhiyuan_employee_name")
+	}
+	payload["config"] = runConfig
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return errors.New("invalid knowledge run json")
+	}
+	r.Body = io.NopCloser(strings.NewReader(string(encoded)))
+	r.ContentLength = int64(len(encoded))
+	return nil
+}
+
+func isLangGraphRunPath(rest string) bool {
+	clean := strings.Trim(rest, "/")
+	clean = strings.TrimPrefix(clean, "api/")
+	parts := strings.Split(clean, "/")
+	if len(parts) == 2 && parts[0] == "runs" && (parts[1] == "wait" || parts[1] == "stream") {
+		return true
+	}
+	if len(parts) < 3 || parts[0] != "threads" || parts[1] == "" {
+		return false
+	}
+	return (len(parts) == 3 && parts[2] == "runs") ||
+		(len(parts) == 4 && parts[2] == "runs" && (parts[3] == "wait" || parts[3] == "stream"))
+}
 
 // chatBaseOverride, when set (tests), replaces the in-cluster Service URL.
 // It lives on the portal struct so real deployments never configure it.
@@ -89,6 +185,32 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 		writeJSON(w, code, map[string]string{"error": errMsg})
 		return
 	}
+	// Bind knowledge-capable runtime requests to this authenticated cookie
+	// session. Never forward a caller-supplied context handle. The MCP boundary
+	// can exchange this short-lived handle with the Portal for a fresh grant
+	// decision without receiving the user's AEP token.
+	knowledgeContext := ""
+	var employee dev1alpha1.DigitalEmployee
+	if err := p.k8s.Get(r.Context(), client.ObjectKey{Namespace: p.cfg.namespace, Name: name}, &employee); err != nil {
+		writeJSON(w, statusOf(err), map[string]string{"error": "digital employee is unavailable"})
+		return
+	}
+	if employee.Spec.Knowledge != nil {
+		cookie, err := r.Cookie(portalSessionCookie)
+		if err != nil || cookie.Value == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "portal session required for knowledge access"})
+			return
+		}
+		knowledgeContext, err = p.issueKnowledgeRuntimeContext(r.Context(), cookie.Value, name)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge context unavailable"})
+			return
+		}
+		if err := injectKnowledgeRunContext(r, rest, knowledgeContext, name); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "knowledge run context unavailable"})
+			return
+		}
+	}
 	// Hibernation: mark the conversation active (KEDA's idle signal) and, if
 	// the runtime is scaled to zero, wake it and wait out the cold start.
 	p.markActivity(name)
@@ -113,6 +235,10 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 			pr.Out.URL.Path = "/api/" + stripped
 			pr.Out.Header.Set("X-DeerFlow-Internal-Token", token)
 			pr.Out.Header.Set(ownerHeaderName, ident.UserID)
+			pr.Out.Header.Del(knowledgeContextHeader)
+			if knowledgeContext != "" {
+				pr.Out.Header.Set(knowledgeContextHeader, knowledgeContext)
+			}
 			pr.Out.Header.Del("Authorization")
 			// The runtime needs neither the portal session nor its CSRF proof.
 			pr.Out.Header.Del("Cookie")
