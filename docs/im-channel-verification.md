@@ -77,7 +77,7 @@ DeerFlow 的 wecom 通道默认连官方 `openws.work.weixin.qq.com`；本次通
 ## 4. 结论
 
 - 飞书通道的**通道层**（WS 入站、卡片协议、反应、失败兜底、断线自愈）在本 dev 形态下**验证通过**。
-- 企微通道的**通道层**（aibot WS 建连/认证、入站接收、`aibot_respond_msg` 流式回复）**验证通过**（W1–W3）；前提是补齐 `ws_url` 透传。
+- 企微通道的**通道层**（aibot WS 建连/认证、入站接收、`aibot_respond_msg` 流式回复）**验证通过**（W1–W3），但复现**依赖两处覆盖**：`wecom.py` 透传 `ws_url`（DeerFlow#7）**加上** `aibot/ws.py` 允许明文 `ws://`（或把 mock 架在 TLS 后）。**只合 DeerFlow#7 复现不了 W1–W3**。
 - **lark 重连缺陷已精确复现（V1b）**，分两条路径：
   - 平台**不可达→可达**（V1）：走外层重试循环，**自愈** ✅。
   - 连接**已建立后平台重启**（V1b）：SDK 的 `_receive_message_loop` 断开后调 `_reconnect()`，在 `lark_oapi/ws/client.py:285 if self._reconnect_nonce > 0` 抛
@@ -90,7 +90,7 @@ DeerFlow 的 wecom 通道默认连官方 `openws.work.weixin.qq.com`；本次通
 
 | 项 | 原因 |
 |---|---|
-| 企微通道（aibot 收发） | **通道层已验**（W1–W3，见第 3 节）：经 ConfigMap 覆盖 `ws_url` 指向 mockwecom 实测通过。真实凭证联调未做。上游长期修法是让 `wecom.py` 透传 `ws_url`（DeerFlow#7）。 |
+| 企微通道（aibot 收发） | **通道层已验**（W1–W3，见第 3 节），复现依赖两处覆盖（`wecom.py` 透传 `ws_url` + `aibot/ws.py` 放宽明文 `ws`）。真实凭证联调未做。上游长期修法是让 `wecom.py` 透传 `ws_url`（DeerFlow#7）；明文 mock 另需 SDK 支持或 TLS 包装。 |
 | `de-channel-gateway` inbox/ack/send + 休眠唤醒 | 镜像本体已取得（OCI 布局，`Downloads/`），但尚未导入集群；其内嵌代码来自 `deerflow-gov:v18`，本地现役运行时为 `v3`，且该 leg 复用同一 `WeComChannel`，同样受上面一行缺口影响。 |
 | 真实飞书/企微凭证 | 仅有 mock；真实 app_id/secret 未提供 |
 | 现役运行时源码 | `rongxinzy/deer-flow` main 带平台模式补丁，但**无 channel-gateway 模式**（`DEERFLOW_EMPLOYEE_NAME`/`channel_inbox`/`/inbox/` 零命中），而 governance `channel-gateway`/operator 依赖该模式。说明现役 `deerflow-gov` 镜像由 fork main 之外的源码树构建 → 直接按 fork main 重建运行时有**特性回退风险**，需先确认 v3 的源码来源。 |
@@ -112,10 +112,10 @@ MOCK_FEISHU_BIN=/tmp/mockfeishu bash scripts/im-mock-smoke.sh
 企微（W1–W3）：
 
 ```bash
-# 1) 构建 mockwecom
-GOOS=linux GOARCH=amd64 go build -o /tmp/mockwecom ./tests/aep-e2e/mockwecom
-# 2) 在 k3s 宿主起 mockwecom
-cp /tmp/mockwecom /tmp/mockwecom && chmod +x /tmp/mockwecom
+# 1) 构建 mockwecom（Windows 侧产出 linux 二进制）
+GOOS=linux GOARCH=amd64 go build -o D:/tmp/mockwecom ./tests/aep-e2e/mockwecom
+# 2) 在 k3s 宿主执行：WSL 的 /mnt 是 noexec，必须把二进制拷进本地盘再跑
+cp /mnt/d/tmp/mockwecom /tmp/mockwecom && chmod +x /tmp/mockwecom
 nohup /tmp/mockwecom -addr 0.0.0.0:18088 -bot-id mockbot -secret mock-secret >/tmp/mockwecom.log 2>&1 &
 
 # 3) 两处 ConfigMap 覆盖（wecom.py 透传 ws_url；aibot/ws.py 允许明文 ws）+ 挂载到 Deployment
