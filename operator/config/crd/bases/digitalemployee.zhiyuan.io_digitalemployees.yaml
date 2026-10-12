@@ -245,11 +245,31 @@ spec:
                     maximum: 100000
                     minimum: 256
                     type: integer
+                  memoryScope:
+                    default: instance
+                    description: |-
+                      MemoryScope selects how OpenViking memory is partitioned inside this
+                      employee. "instance" (default) keeps the shipped behavior: memory
+                      belongs to the employee instance, so every requester shares one space.
+                      "requester" partitions memory per requesting user (DeerFlow's
+                      memory_scope knob), so several humans on one instance stop sharing one
+                      memory space. Instance-to-instance isolation is unchanged either way.
+                    enum:
+                    - instance
+                    - requester
+                    type: string
                   scoreThreshold:
                     maximum: 1
                     type: number
                   serverURL:
                     description: ServerURL of the OpenViking service.
+                    type: string
+                  sharedPeerID:
+                    description: |-
+                      SharedPeerID is an optional curated shared memory bucket, read in
+                      addition to the requester's own memory when MemoryScope is "requester".
+                      It must use the backend-reserved "df-shared-" prefix. Empty means
+                      personal memory only. Ignored when MemoryScope is "instance".
                     type: string
                   singleTenantInstance:
                     default: false

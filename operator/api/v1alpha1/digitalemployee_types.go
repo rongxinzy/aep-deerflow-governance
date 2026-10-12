@@ -133,6 +133,24 @@ type MemorySpec struct {
 	// +kubebuilder:default=false
 	SingleTenantInstance bool `json:"singleTenantInstance,omitempty"`
 
+	// MemoryScope selects how OpenViking memory is partitioned inside this
+	// employee. "instance" (default) keeps the shipped behavior: memory
+	// belongs to the employee instance, so every requester shares one space.
+	// "requester" partitions memory per requesting user (DeerFlow's
+	// memory_scope knob), so several humans on one instance stop sharing one
+	// memory space. Instance-to-instance isolation is unchanged either way.
+	// +optional
+	// +kubebuilder:validation:Enum=instance;requester
+	// +kubebuilder:default=instance
+	MemoryScope string `json:"memoryScope,omitempty"`
+
+	// SharedPeerID is an optional curated shared memory bucket, read in
+	// addition to the requester's own memory when MemoryScope is "requester".
+	// It must use the backend-reserved "df-shared-" prefix. Empty means
+	// personal memory only. Ignored when MemoryScope is "instance".
+	// +optional
+	SharedPeerID string `json:"sharedPeerID,omitempty"`
+
 	// Retrieval tuning; zero values fall back to the backend defaults.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
