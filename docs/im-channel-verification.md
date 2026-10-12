@@ -64,6 +64,7 @@ V6/V8 细节：
 | 企微通道（aibot 收发） | 本可通过 mock 验证，**但缺一行**：aibot SDK 支持 `WSClientOptions.ws_url`（`aibot/types.py`，`client.py:48` 透传，`ws.py:73` 兜底 `wss://openws.work.weixin.qq.com`），而 DeerFlow `wecom.py:184` 只传 `bot_id/secret/logger`、未传 `ws_url`。补上后可指向 `mockwecom`。代价：`wecom.py` 在**运行时镜像内**，改代码须重建 `deerflow-gov` 镜像（gateway 镜像 `FROM deerflow-gov:v18`，同样内嵌该代码）。 |
 | `de-channel-gateway` inbox/ack/send + 休眠唤醒 | 镜像本体已取得（OCI 布局，`Downloads/`），但尚未导入集群；其内嵌代码来自 `deerflow-gov:v18`，本地现役运行时为 `v3`，且该 leg 复用同一 `WeComChannel`，同样受上面一行缺口影响。 |
 | 真实飞书/企微凭证 | 仅有 mock；真实 app_id/secret 未提供 |
+| 现役运行时源码 | `rongxinzy/deer-flow` main 带平台模式补丁，但**无 channel-gateway 模式**（`DEERFLOW_EMPLOYEE_NAME`/`channel_inbox`/`/inbox/` 零命中），而 governance `channel-gateway`/operator 依赖该模式。说明现役 `deerflow-gov` 镜像由 fork main 之外的源码树构建 → 直接按 fork main 重建运行时有**特性回退风险**，需先确认 v3 的源码来源。 |
 | AEP 身份 fixture（`gov-*`、`gov-feishu` 映射） | dev AEP 管理员口令已轮换，无法确认/重建 fixture |
 | P1/P2/P3 业务用例（范围内放行 / 跨部门拒绝 / 未映射拒答） | 依赖 fixture + 可用模型 + 受管工具 MCP |
 
