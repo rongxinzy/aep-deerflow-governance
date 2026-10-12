@@ -376,9 +376,9 @@ func runtimeReasoning(compatibility *catalogReasoning) *dev1alpha1.RuntimeReason
 }
 
 type catalogReasoning struct {
-	ThinkingFormat                            string `json:"thinkingFormat"`
-	SupportsReasoningEffort                   bool   `json:"supportsReasoningEffort"`
-	RequiresReasoningContentOnAssistantMessages bool `json:"requiresReasoningContentOnAssistantMessages"`
+	ThinkingFormat                              string `json:"thinkingFormat"`
+	SupportsReasoningEffort                     bool   `json:"supportsReasoningEffort"`
+	RequiresReasoningContentOnAssistantMessages bool   `json:"requiresReasoningContentOnAssistantMessages"`
 }
 
 // resolveRuntimeModels maps requested AEP model ids onto runtime routes by
