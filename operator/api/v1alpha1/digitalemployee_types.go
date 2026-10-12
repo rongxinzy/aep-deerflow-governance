@@ -85,6 +85,33 @@ type RuntimeModel struct {
 	// API key.
 	// +optional
 	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
+
+	// Reasoning declares the model's thinking behavior so the runtime does
+	// not have to infer it (DeerFlow turns thinking off for undeclared
+	// models even when the upstream emits reasoning_content). Derived from
+	// the AEP catalog's reasoningCompatibility.
+	// +optional
+	Reasoning *RuntimeReasoning `json:"reasoning,omitempty"`
+}
+
+// RuntimeReasoning is the declarative reasoning contract for one model,
+// mirroring DeerFlow's config-level reasoning block (thinking/history subset
+// the AEP catalog can express today).
+type RuntimeReasoning struct {
+	// Thinking policy: unsupported (never), optional (caller toggles,
+	// default on), required (always on). Mapped from a declared
+	// thinkingFormat.
+	// +kubebuilder:validation:Enum=unsupported;optional;required
+	// +optional
+	Thinking string `json:"thinking,omitempty"`
+
+	// History policy for reasoning across turns: preserve keeps
+	// reasoning_content on assistant messages (required by
+	// requiresReasoningContentOnAssistantMessages upstreams), clear drops
+	// it. Empty leaves the runtime default.
+	// +kubebuilder:validation:Enum=preserve;clear
+	// +optional
+	History string `json:"history,omitempty"`
 }
 
 // MemorySpec configures long-term memory persistence.
