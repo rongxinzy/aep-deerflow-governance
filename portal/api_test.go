@@ -268,7 +268,7 @@ func TestApplyWithModelSelection(t *testing.T) {
 		assert.Equal(t, "BIGMODEL_API_KEY", first.ApiKeyEnv)
 		second := item.Spec.Runtime.Models[1]
 		assert.Equal(t, "openai", second.Provider)
-		assert.Equal(t, "http://172.18.5.123:8000/v1", second.BaseURL)
+		assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/v1", second.BaseURL, "openai models route through the gateway /v1 (header-routed), never the raw endpoint")
 		assert.Equal(t, "Qwen3.6-35B-A3B", second.NativeModel)
 		assert.Empty(t, item.Spec.Runtime.Model, "legacy singular fields stay empty when models are explicit")
 	})
