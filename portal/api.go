@@ -358,8 +358,10 @@ type catalogModel struct {
 
 // resolveRuntimeModels maps requested AEP model ids onto runtime routes by
 // consulting the model catalog with the requester's own token (the console
-// admin already holds models.read). anthropic models ride the per-model
-// gateway prefix; openai-compatible models use their registered endpoint.
+// admin already holds models.read). Both protocols ride the gateway:
+// anthropic models under their per-model path prefix, openai-compatible
+// models under the shared /v1 path (the authorizer stamps X-AEP-Model-ID
+// from the request body and the data plane routes on that header).
 func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, modelIDs []string) ([]dev1alpha1.RuntimeModel, error) {
 	if len(modelIDs) == 0 {
 		return nil, nil

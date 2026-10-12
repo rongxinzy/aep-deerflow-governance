@@ -70,7 +70,7 @@ func TestUpdateEmployeeModelSwitch(t *testing.T) {
 	item := getCR(t, h, "switch-helper")
 	require.Len(t, item.Spec.Runtime.Models, 2)
 	assert.Equal(t, "bench-qwen", item.Spec.Runtime.Models[0].Name)
-	assert.Equal(t, "http://172.18.5.123:8000/v1", item.Spec.Runtime.Models[0].BaseURL)
+	assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/v1", item.Spec.Runtime.Models[0].BaseURL)
 	assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic", item.Spec.Runtime.Models[1].BaseURL)
 	assert.Empty(t, item.Spec.Runtime.Model, "the singular default must not survive a model switch")
 	// Untouched configuration is preserved verbatim.
