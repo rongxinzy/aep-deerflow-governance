@@ -424,8 +424,15 @@ func (p *portal) resolveRuntimeModels(ctx context.Context, ident identity, model
 			route.Provider = "anthropic"
 			route.BaseURL = p.cfg.gatewayBaseURL + "/" + model.ID
 		case "openai-compatible":
+			// Gateway-routed, never the upstream endpoint: the data plane
+			// routes openai models by the x-aep-model-id header under the
+			// shared /v1 path (ai-proxy rehomes it onto the provider base
+			// and injects the credential). Handing runtimes the raw
+			// endpoint made employees dial the provider directly with the
+			// platform key — unauthorizer, unaccounted, and 401 for
+			// key-authenticating providers.
 			route.Provider = "openai"
-			route.BaseURL = model.Endpoint
+			route.BaseURL = p.cfg.gatewayBaseURL + "/v1"
 		default:
 			return nil, fmt.Errorf("model %q uses unsupported protocol %q", id, model.Protocol)
 		}
