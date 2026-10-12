@@ -277,6 +277,16 @@ func TestApplyWithModelSelection(t *testing.T) {
 		assert.Empty(t, item.Spec.Runtime.Model, "legacy singular fields stay empty when models are explicit")
 	})
 
+	t.Run("reasoning without history requirement maps to thinking-only", func(t *testing.T) {
+		_, item := apply(t, `["reason-no-history"]`)
+		require.NotNil(t, item)
+		require.Len(t, item.Spec.Runtime.Models, 1)
+		reasoning := item.Spec.Runtime.Models[0].Reasoning
+		require.NotNil(t, reasoning)
+		assert.Equal(t, "optional", reasoning.Thinking)
+		assert.Empty(t, reasoning.History, "no history requirement must not project preserve")
+	})
+
 	t.Run("rejects unknown or disabled models", func(t *testing.T) {
 		w, _ := apply(t, `["missing-model"]`)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -371,6 +381,7 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 				{"id":"bench-glm","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true,"reasoningCompatibility":{"thinkingFormat":"zai","supportsReasoningEffort":true,"requiresReasoningContentOnAssistantMessages":true}},
+				{"id":"reason-no-history","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true,"reasoningCompatibility":{"thinkingFormat":"deepseek","supportsReasoningEffort":false,"requiresReasoningContentOnAssistantMessages":false}},
 				{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}]}`))
 		default:
 			http.NotFound(w, r)
