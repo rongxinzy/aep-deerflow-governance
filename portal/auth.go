@@ -21,6 +21,7 @@ type identity struct {
 	Roles          []string  `json:"roles"`
 	Teams          []string  `json:"-"` // AEP team ids; used for department scoping
 	TeamsFetchedAt time.Time `json:"-"` // when Teams was last refreshed
+	DeploymentID   string    `json:"deploymentId,omitempty"`
 }
 
 // teamsStaleAt is how long cached team memberships remain trusted before
@@ -176,7 +177,8 @@ func (a *aepAuthenticator) verify(ctx context.Context, token string) (identity, 
 			Kind        string   `json:"kind"`
 			TeamIDs     []string `json:"teamIds"`
 		} `json:"user"`
-		Roles []string `json:"roles"`
+		Roles        []string `json:"roles"`
+		DeploymentID string   `json:"deploymentId"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		return identity{}, err
@@ -185,12 +187,13 @@ func (a *aepAuthenticator) verify(ctx context.Context, token string) (identity, 
 		return identity{}, fmt.Errorf("aep verify returned no user")
 	}
 	ident := identity{
-		Token:       token,
-		UserID:      body.User.ID,
-		DisplayName: body.User.DisplayName,
-		Kind:        body.User.Kind,
-		Roles:       body.Roles,
-		Teams:       body.User.TeamIDs,
+		Token:        token,
+		UserID:       body.User.ID,
+		DisplayName:  body.User.DisplayName,
+		Kind:         body.User.Kind,
+		Roles:        body.Roles,
+		DeploymentID: body.DeploymentID,
+		Teams:        body.User.TeamIDs,
 	}
 	if ident.Teams == nil {
 		ident.Teams = []string{}

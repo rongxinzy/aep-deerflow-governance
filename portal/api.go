@@ -65,6 +65,53 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.adminOnly(p.handleKnowledgeStatus)))
 	mux.HandleFunc("/api/v1/knowledge/proxy/{rest...}", p.auth(p.handleKnowledgeProxy))
 	mux.HandleFunc("GET /api/v1/knowledge/bases", p.auth(p.adminOnly(p.handleKnowledgeListBases)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/readiness", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeReadiness)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/audit", p.auth(p.freshAdminOnly(p.handleKnowledgeAudit)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeBases)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeCreateBase)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeGetBase)))
+	mux.HandleFunc("PATCH /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeUpdateBase)))
+	mux.HandleFunc("DELETE /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeDeleteBase)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/documents", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeDocuments)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/documents/file", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeUpload)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/documents/url", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeImportURL)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/documents/manual", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeImportManual)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeGetDocument)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}/spans", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeSpans)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}/chunks", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeChunks)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/documents/{documentID}/enable-status", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeSetDocumentEnabled)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}/chunks/{chunkID}/images/{index}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeChunkImage)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}/preview", p.auth(p.freshAdminOnly(p.managedDocumentFile("preview"))))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/documents/{documentID}/download", p.auth(p.freshAdminOnly(p.managedDocumentFile("download"))))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/documents/{documentID}/reparse", p.auth(p.freshAdminOnly(p.managedDocumentAction("reparse"))))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/documents/{documentID}/cancel-parse", p.auth(p.freshAdminOnly(p.managedDocumentAction("cancel-parse"))))
+	mux.HandleFunc("DELETE /api/v1/knowledge/managed/documents/{documentID}", p.auth(p.freshAdminOnly(p.managedDocumentAction("delete"))))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/tags", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeTags)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/tags", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeTags)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/tags/{tagID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeTag)))
+	mux.HandleFunc("DELETE /api/v1/knowledge/managed/bases/{baseID}/tags/{tagID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeTag)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/folders", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFolders)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/folders", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFolders)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/folders/move", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFolders)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/document-tags", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeTagsForDocuments)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/documents/{documentID}/tags", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeDocumentTags)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/faq/entries", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFAQ)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/faq/entries", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFAQEntry)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/faq/entries/{entryID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFAQEntry)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/faq/batch/{batchAction}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFAQBatch)))
+	mux.HandleFunc("DELETE /api/v1/knowledge/managed/bases/{baseID}/faq/batch/{batchAction}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeFAQBatch)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/documents/{documentID}/chunks/{chunkID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeChunkUpdate)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/grants", p.auth(p.freshAdminOnly(p.handleKnowledgeBaseGrants)))
+	mux.HandleFunc("PUT /api/v1/knowledge/managed/bases/{baseID}/grants", p.auth(p.freshAdminOnly(p.handleKnowledgeBaseGrants)))
+	// Employee knowledge reads are authenticated by the portal session, then
+	// scoped again by each handler to the selected employee and granted bases.
+	mux.HandleFunc("POST /api/v1/knowledge/employees/{name}/search", p.auth(p.handleEmployeeKnowledgeSearch))
+	mux.HandleFunc("GET /api/v1/knowledge/employees/{name}/documents/{documentID}", p.auth(p.handleEmployeeKnowledgeDocument))
+	mux.HandleFunc("GET /api/v1/knowledge/employees/{name}/documents/{documentID}/chunks/{chunkID}/images/{index}", p.auth(p.handleEmployeeKnowledgeChunkImage))
+	mux.HandleFunc("GET /api/v1/knowledge/employees/{name}/documents/{documentID}/download", p.auth(p.handleEmployeeKnowledgeDocumentDownload))
+	// Internal runtime authorization is authenticated by the employee Secret
+	// token in the handler; it deliberately bypasses browser cookie auth.
+	mux.HandleFunc("POST /internal/v1/knowledge/employees/{name}/authorize", p.handleKnowledgeRuntimeAuthorize)
 	mux.HandleFunc("GET /api/v1/employees/{name}", p.auth(p.getEmployee))
 	mux.HandleFunc("DELETE /api/v1/employees/{name}", p.auth(p.deleteEmployee))
 	// Workbench (employee-facing) reads: profile + quota, own requests
@@ -270,6 +317,14 @@ func (p *portal) applyForEmployee(w http.ResponseWriter, r *http.Request, ident 
 	}
 	resolved.DeploymentName = deploymentName
 	spec := p.renderSpec(body, resolved, runtimeModels)
+	knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(spec))
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+		return
+	}
+	if knowledgeLock != nil {
+		defer func() { _ = knowledgeLock.Rollback() }()
+	}
 	if decisionResult.Create {
 		created, err := p.createEmployee(r.Context(), spec)
 		if err != nil {
@@ -376,9 +431,9 @@ func runtimeReasoning(compatibility *catalogReasoning) *dev1alpha1.RuntimeReason
 }
 
 type catalogReasoning struct {
-	ThinkingFormat                            string `json:"thinkingFormat"`
-	SupportsReasoningEffort                   bool   `json:"supportsReasoningEffort"`
-	RequiresReasoningContentOnAssistantMessages bool `json:"requiresReasoningContentOnAssistantMessages"`
+	ThinkingFormat                              string `json:"thinkingFormat"`
+	SupportsReasoningEffort                     bool   `json:"supportsReasoningEffort"`
+	RequiresReasoningContentOnAssistantMessages bool   `json:"requiresReasoningContentOnAssistantMessages"`
 }
 
 // resolveRuntimeModels maps requested AEP model ids onto runtime routes by
@@ -671,6 +726,16 @@ func (p *portal) updateEmployee(w http.ResponseWriter, r *http.Request, ident id
 	if body.Visibility != nil {
 		item.Spec.Visibility = resolved.Visibility
 	}
+	if body.KnowledgeBases != nil {
+		knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(item))
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+			return
+		}
+		if knowledgeLock != nil {
+			defer func() { _ = knowledgeLock.Rollback() }()
+		}
+	}
 	if err := p.k8s.Update(r.Context(), &item); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -789,6 +854,14 @@ func (p *portal) decideRequest(finalState string) func(http.ResponseWriter, *htt
 				return
 			}
 			spec.ResourceVersion = ""
+			knowledgeLock, err := p.lockKnowledgeBindings(r.Context(), ident.DeploymentID, employeeKnowledgeIDs(spec))
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "知识库正在删除或无法安全绑定"})
+				return
+			}
+			if knowledgeLock != nil {
+				defer func() { _ = knowledgeLock.Rollback() }()
+			}
 			if _, err := p.createEmployee(r.Context(), spec); err != nil && !apierrors.IsAlreadyExists(err) {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
