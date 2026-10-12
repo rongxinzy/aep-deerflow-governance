@@ -62,6 +62,41 @@ func injectKnowledgeRunContext(r *http.Request, rest, handle, employee string) e
 	runContext["zhiyuan_knowledge_context"] = handle
 	runContext["zhiyuan_employee_name"] = employee
 	payload["context"] = runContext
+	// Gateway's top-level body.context is intentionally allowlisted and drops
+	// these application-specific fields. Its build_run_config path preserves
+	// body.config.context for ToolRuntime.context, so bind the same server-owned
+	// values there as well. Remove caller copies from configurable: it is not an
+	// authorization channel and may be persisted in checkpoints.
+	configValue, exists := payload["config"]
+	var runConfig map[string]any
+	if !exists || configValue == nil {
+		runConfig = map[string]any{}
+	} else {
+		var ok bool
+		runConfig, ok = configValue.(map[string]any)
+		if !ok {
+			return errors.New("invalid knowledge run config")
+		}
+	}
+	configContext, exists := runConfig["context"]
+	var runtimeContext map[string]any
+	if !exists || configContext == nil {
+		runtimeContext = map[string]any{}
+	} else {
+		var ok bool
+		runtimeContext, ok = configContext.(map[string]any)
+		if !ok {
+			return errors.New("invalid knowledge run config context")
+		}
+	}
+	runtimeContext["zhiyuan_knowledge_context"] = handle
+	runtimeContext["zhiyuan_employee_name"] = employee
+	runConfig["context"] = runtimeContext
+	if configurable, ok := runConfig["configurable"].(map[string]any); ok {
+		delete(configurable, "zhiyuan_knowledge_context")
+		delete(configurable, "zhiyuan_employee_name")
+	}
+	payload["config"] = runConfig
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return errors.New("invalid knowledge run json")
@@ -72,7 +107,12 @@ func injectKnowledgeRunContext(r *http.Request, rest, handle, employee string) e
 }
 
 func isLangGraphRunPath(rest string) bool {
-	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	clean := strings.Trim(rest, "/")
+	clean = strings.TrimPrefix(clean, "api/")
+	parts := strings.Split(clean, "/")
+	if len(parts) == 2 && parts[0] == "runs" && (parts[1] == "wait" || parts[1] == "stream") {
+		return true
+	}
 	if len(parts) < 3 || parts[0] != "threads" || parts[1] == "" {
 		return false
 	}

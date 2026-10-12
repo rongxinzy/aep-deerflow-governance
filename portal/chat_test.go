@@ -128,9 +128,9 @@ func TestChatProxyReplacesCallerKnowledgeContextWithSessionBoundHandle(t *testin
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`DELETE FROM knowledge_runtime_contexts WHERE expires_at < now\(\)`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`INSERT INTO employee_activity`).WithArgs("sales-helper").WillReturnResult(sqlmock.NewResult(0, 1))
-	request := httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/threads/t1/runs/wait", strings.NewReader(`{"input":{"messages":[]},"context":{"zhiyuan_knowledge_context":"forged-body-context","client":"ok"}}`))
+	request := httptest.NewRequest("POST", "/api/v1/employees/sales-helper/chat/api/threads/t1/runs/wait", strings.NewReader(`{"input":{"messages":[]},"context":{"zhiyuan_knowledge_context":"forged-body-context","client":"ok"},"config":{"context":{"zhiyuan_knowledge_context":"forged-config-context","zhiyuan_employee_name":"forged-employee","request_id":"keep"},"configurable":{"zhiyuan_knowledge_context":"forged-configurable-context","zhiyuan_employee_name":"forged-employee","thread_id":"t1"}}}`))
 	request.SetPathValue("name", "sales-helper")
-	request.SetPathValue("rest", "threads/t1/runs/wait")
+	request.SetPathValue("rest", "api/threads/t1/runs/wait")
 	request.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "portal-session"})
 	request.Header.Set(knowledgeContextHeader, "forged-client-context")
 	w := httptest.NewRecorder()
@@ -147,6 +147,10 @@ func TestChatProxyReplacesCallerKnowledgeContextWithSessionBoundHandle(t *testin
 	}
 	var payload struct {
 		Context map[string]any `json:"context"`
+		Config  struct {
+			Context      map[string]any `json:"context"`
+			Configurable map[string]any `json:"configurable"`
+		} `json:"config"`
 	}
 	if err := json.NewDecoder((*seen)[0].Body).Decode(&payload); err != nil {
 		t.Fatal(err)
@@ -159,6 +163,21 @@ func TestChatProxyReplacesCallerKnowledgeContextWithSessionBoundHandle(t *testin
 	}
 	if payload.Context["client"] != "ok" {
 		t.Errorf("unrelated caller context was not preserved: %#v", payload.Context)
+	}
+	if payload.Config.Context["zhiyuan_knowledge_context"] != got || payload.Config.Context["zhiyuan_employee_name"] != "sales-helper" {
+		t.Errorf("runtime config context was not server-bound: %#v", payload.Config.Context)
+	}
+	if payload.Config.Context["request_id"] != "keep" {
+		t.Errorf("unrelated runtime config context was not preserved: %#v", payload.Config.Context)
+	}
+	if _, ok := payload.Config.Configurable["zhiyuan_knowledge_context"]; ok {
+		t.Errorf("forged configurable handle survived: %#v", payload.Config.Configurable)
+	}
+	if _, ok := payload.Config.Configurable["zhiyuan_employee_name"]; ok {
+		t.Errorf("forged configurable employee survived: %#v", payload.Config.Configurable)
+	}
+	if payload.Config.Configurable["thread_id"] != "t1" {
+		t.Errorf("unrelated configurable field was not preserved: %#v", payload.Config.Configurable)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -173,6 +192,98 @@ func TestInjectKnowledgeRunContextRejectsMalformedAndLeavesNonRunAlone(t *testin
 	ordinary := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not-json"))
 	if err := injectKnowledgeRunContext(ordinary, "models", "opaque", "employee-1"); err != nil {
 		t.Fatalf("non-run endpoint was modified: %v", err)
+	}
+	for _, path := range []string{
+		"threads/t1/runs/wait",
+		"threads/t1/runs/stream",
+		"api/threads/t1/runs/wait",
+		"api/threads/t1/runs/stream",
+		"runs/wait",
+		"runs/stream",
+		"api/runs/wait",
+		"api/runs/stream",
+	} {
+		t.Run(path, func(t *testing.T) {
+			run := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"context":{"client":"ok"}}`))
+			if err := injectKnowledgeRunContext(run, path, "opaque", "employee-1"); err != nil {
+				t.Fatalf("LangGraph run path was not recognized: %v", err)
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(run.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			contextValue, _ := payload["context"].(map[string]any)
+			if contextValue["zhiyuan_knowledge_context"] != "opaque" || contextValue["zhiyuan_employee_name"] != "employee-1" {
+				t.Fatalf("LangGraph run context was not injected: %#v", contextValue)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "non-object config", body: `{"config":[]}`},
+		{name: "non-object config context", body: `{"config":{"context":"bad"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			if err := injectKnowledgeRunContext(req, "threads/t1/runs", "opaque", "employee-1"); err == nil {
+				t.Fatal("malformed runtime config was accepted")
+			}
+		})
+	}
+
+	for _, body := range []string{
+		`{"config":null}`,
+		`{"config":{"context":null,"configurable":null}}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		if err := injectKnowledgeRunContext(req, "threads/t1/runs", "opaque", "employee-1"); err != nil {
+			t.Fatalf("null runtime config fields should be initialized: %v", err)
+		}
+		var decoded map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&decoded); err != nil {
+			t.Fatal(err)
+		}
+		config, _ := decoded["config"].(map[string]any)
+		contextValue, _ := config["context"].(map[string]any)
+		if contextValue["zhiyuan_knowledge_context"] != "opaque" || contextValue["zhiyuan_employee_name"] != "employee-1" {
+			t.Fatalf("server context missing after null normalization: %#v", contextValue)
+		}
+	}
+
+	nonRunBody := `{"raw":"unchanged"}`
+	nonRun := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(nonRunBody))
+	if err := injectKnowledgeRunContext(nonRun, "models", "opaque", "employee-1"); err != nil {
+		t.Fatalf("non-run endpoint was modified: %v", err)
+	}
+	gotBody, err := io.ReadAll(nonRun.Body)
+	if err != nil || string(gotBody) != nonRunBody {
+		t.Fatalf("non-run body changed: got %q, err=%v", gotBody, err)
+	}
+	for _, path := range []string{"models", "threads/t1/read", "runs/get", "threads/t1/runs/get"} {
+		raw := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(nonRunBody))
+		if err := injectKnowledgeRunContext(raw, path, "opaque", "employee-1"); err != nil {
+			t.Fatalf("non-run path %q was rejected: %v", path, err)
+		}
+		body, err := io.ReadAll(raw.Body)
+		if err != nil || string(body) != nonRunBody {
+			t.Fatalf("non-run path %q body changed: %q, err=%v", path, body, err)
+		}
+	}
+	getRun := httptest.NewRequest(http.MethodGet, "/", strings.NewReader(nonRunBody))
+	if err := injectKnowledgeRunContext(getRun, "runs/wait", "opaque", "employee-1"); err != nil {
+		t.Fatalf("GET run path was rejected: %v", err)
+	}
+	getBody, err := io.ReadAll(getRun.Body)
+	if err != nil || string(getBody) != nonRunBody {
+		t.Fatalf("GET run body changed: %q, err=%v", getBody, err)
+	}
+
+	oversized := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", maxKnowledgeRunBodyBytes+1)))
+	if err := injectKnowledgeRunContext(oversized, "threads/t1/runs", "opaque", "employee-1"); err == nil {
+		t.Fatal("oversized knowledge run body was accepted")
 	}
 }
 
