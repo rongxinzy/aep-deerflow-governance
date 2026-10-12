@@ -145,8 +145,8 @@ func TestHandleContacts(t *testing.T) {
 	t.Run("team names follow nextCursor beyond the first page", func(t *testing.T) {
 		resetAdminTokenCache(t)
 		pages := map[string]string{
-			"":        `{"teams":[{"id":"rd","name":"研发部"}],"nextCursor":"t2"}`,
-			"t2":      `{"teams":[{"id":"sales","name":"销售部"}],"nextCursor":null}`,
+			"":   `{"teams":[{"id":"rd","name":"研发部"}],"nextCursor":"t2"}`,
+			"t2": `{"teams":[{"id":"sales","name":"销售部"}],"nextCursor":null}`,
 		}
 		stubs := &departmentStubUpstreams{
 			aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

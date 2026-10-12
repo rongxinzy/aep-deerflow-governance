@@ -91,7 +91,7 @@ func marshalIdentity(ident identity) ([]byte, error) {
 		// 2026-10-11 修复：此字段曾漏写——滚动重启后从库恢复的会话全部丢失
 		// 部门归属（数字员工可见性塌缩、me.teams 空），且恢复会话的 AEP
 		// token 已过期无法自愈。Teams 是部门可见性的根。
-		Teams:       ident.Teams,
+		Teams: ident.Teams,
 	})
 }
 
