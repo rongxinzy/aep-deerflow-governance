@@ -41,6 +41,12 @@ type config struct {
 	credentialsSecret string
 	a2aImage          string
 
+	// Personal workspaces (个人搭档): default companion model route, optional
+	// image override (empty = operator default), and the per-user quota.
+	workspaceModel        string
+	workspaceImage        string
+	workspaceQuotaPerUser int
+
 	managedKnowledge managedKnowledgeConfig
 
 	// Web-chat entry: session cookie TTL, the AEP deployment id used by the
@@ -94,6 +100,10 @@ func loadConfig() config {
 		knowledgeUIURL:    env("PORTAL_KNOWLEDGE_UI_URL", ""),
 		credentialsSecret: env("PORTAL_CREDENTIALS_SECRET", "de-platform-creds"),
 		a2aImage:          env("PORTAL_A2A_IMAGE", "172.18.5.251:8081/zhiyuan/a2a-adapter:0.1.0"),
+
+		workspaceModel:        env("PORTAL_WORKSPACE_MODEL", "glm-4.6"),
+		workspaceImage:        env("PORTAL_WORKSPACE_IMAGE", ""),
+		workspaceQuotaPerUser: envIntNonNegative("PORTAL_WORKSPACE_QUOTA_PER_USER", 1),
 
 		managedKnowledge: managedKnowledgeConfig{
 			tenantID:          env("PORTAL_KNOWLEDGE_TENANT_ID", ""),
