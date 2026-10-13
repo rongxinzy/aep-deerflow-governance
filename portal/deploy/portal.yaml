@@ -16,7 +16,11 @@ metadata:
 rules:
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Personal workspaces (个人搭档): portal is the only CR writer.
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
   # Web-chat proxy: read the per-employee runtime credentials Secret
   # (DEER_FLOW_INTERNAL_AUTH_TOKEN). Secret values never leave the portal
   # process — only stamped onto the proxied request server-side. RBAC

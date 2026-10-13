@@ -17,6 +17,17 @@ rules:
     resources: ["digitalemployees"]
     # update backs the PATCH /api/v1/employees/{name} config-edit path.
     verbs: ["create", "get", "list", "watch", "update", "delete"]
+  - apiGroups:
+    - digitalemployee.zhiyuan.io
+    resources:
+    - personalworkspaces
+    verbs:
+    - create
+    - get
+    - list
+    - watch
+    - update
+    - delete
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]

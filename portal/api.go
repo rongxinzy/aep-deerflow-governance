@@ -29,6 +29,8 @@ type portal struct {
 	sessions *sessionStore
 	// chatBaseOverride is test-only: replaces the in-cluster runtime URL.
 	chatBaseOverride string
+	// workspaceChatOverride is test-only: replaces the workspace gateway URL.
+	workspaceChatOverride string
 }
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
@@ -44,6 +46,15 @@ func (p *portal) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /api/v1/employees", p.auth(p.applyForEmployee))
+	// Personal workspaces (个人搭档): self-service, one per user, owner/admin
+	// scoped. Chat rides the workspace gateway's per-companion prefix route.
+	mux.HandleFunc("POST /api/v1/workspaces", p.auth(p.createWorkspace))
+	mux.HandleFunc("GET /api/v1/workspaces", p.auth(p.listWorkspaces))
+	mux.HandleFunc("GET /api/v1/workspaces/{name}", p.auth(p.getWorkspace))
+	mux.HandleFunc("PATCH /api/v1/workspaces/{name}", p.auth(p.updateWorkspace))
+	mux.HandleFunc("DELETE /api/v1/workspaces/{name}", p.auth(p.deleteWorkspace))
+	mux.HandleFunc("/api/v1/workspaces/{name}/{companion}/chat/{rest...}", p.auth(p.handleWorkspaceChat))
+	mux.HandleFunc("/api/v1/workspaces/{name}/{companion}/chat", p.auth(p.handleWorkspaceChat))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
