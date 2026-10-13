@@ -362,6 +362,24 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			}
 		}
 	}
+	// Feishu group gate: the channel answers a fresh group message only when
+	// the bot is @-mentioned, and it matches that mention by display name, so
+	// the runtime needs the name itself. Only bot_name is rendered here —
+	// `enabled` and the credentials still come from the runtime store, so a CR
+	// without injected credentials does not make the channel try to start.
+	if spec.Channels != nil && spec.Channels.Feishu && spec.Channels.FeishuName != "" {
+		channels, ok := config["channels"].(map[string]any)
+		if !ok {
+			channels = map[string]any{}
+			config["channels"] = channels
+		}
+		feishu, ok := channels["feishu"].(map[string]any)
+		if !ok {
+			feishu = map[string]any{}
+			channels["feishu"] = feishu
+		}
+		feishu["bot_name"] = spec.Channels.FeishuName
+	}
 	if spec.Memory != nil {
 		retrieval := map[string]any{}
 		if spec.Memory.TopK > 0 {

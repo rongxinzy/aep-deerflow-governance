@@ -176,6 +176,30 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"channel_connections"`))
 		})
 
+		It("renders the feishu bot name for the group mention gate", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Feishu: true, FeishuName: "数字员工"}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			rendered := config.Data["config.yaml"]
+			Expect(rendered).To(ContainSubstring(`"bot_name": "数字员工"`))
+			// Only the display name is rendered here; `enabled` and the
+			// credentials still come from the runtime store.
+			Expect(rendered).To(ContainSubstring(`"channels"`))
+		})
+
+		It("omits the feishu bot name when the CR does not set one", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Feishu: true}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring("bot_name"))
+		})
+
 		It("keeps the spec.owner field intact across reconciles", func(ctx context.Context) {
 			reconcile(ctx)
 			markDeploymentReady(ctx)
