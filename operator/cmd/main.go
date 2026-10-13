@@ -88,6 +88,20 @@ func main() {
 		logger.Error(err, "controller setup failed")
 		os.Exit(1)
 	}
+
+	workspaceReconciler := &controller.PersonalWorkspaceReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		OVRootFn: func(ctx context.Context, c client.Client, namespace, secretName string) (string, error) {
+			return readSecretKey(ctx, c, namespace, secretName, "OPENVIKING_ROOT_API_KEY")
+		},
+		WorkspaceImage: envOrDefault("PERSONAL_WORKSPACE_IMAGE", "harbor.zhiyuan.local:30443/zhiyuan/pi-companion:0.2.1"),
+		ModelBaseURL:   envOrDefault("WORKSPACE_MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"),
+	}
+	if err := workspaceReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error(err, "workspace controller setup failed")
+		os.Exit(1)
+	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error(err, "health check setup failed")
 		os.Exit(1)

@@ -22,6 +22,15 @@ rules:
   - apiGroups: ["digitalemployee.zhiyuan.io"]
     resources: ["digitalemployees/finalizers"]
     verbs: ["update"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces"]
+    verbs: ["*"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["*"]
@@ -77,7 +86,6 @@ spec:
           readinessProbe:
             httpGet: {path: /readyz, port: 8081}
             initialDelaySeconds: 3
-            periodSeconds: 10
           livenessProbe:
             httpGet: {path: /healthz, port: 8081}
             initialDelaySeconds: 10

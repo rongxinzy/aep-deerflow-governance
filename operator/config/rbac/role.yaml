@@ -25,18 +25,21 @@ rules:
   - digitalemployee.zhiyuan.io
   resources:
   - digitalemployees
+  - personalworkspaces
   verbs:
   - '*'
 - apiGroups:
   - digitalemployee.zhiyuan.io
   resources:
   - digitalemployees/finalizers
+  - personalworkspaces/finalizers
   verbs:
   - update
 - apiGroups:
   - digitalemployee.zhiyuan.io
   resources:
   - digitalemployees/status
+  - personalworkspaces/status
   verbs:
   - get
   - patch
