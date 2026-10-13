@@ -293,7 +293,9 @@ func newFixture(ctx context.Context, objects ...client.Object) *fixture {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha1.AddToScheme(scheme)
 	AddKedaTypesToScheme(scheme)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.DigitalEmployee{}).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+		WithStatusSubresource(&v1alpha1.DigitalEmployee{}).
+		WithStatusSubresource(&v1alpha1.PersonalWorkspace{}).Build()
 	stub := newOVStub()
 	server := httptest.NewServer(stub.handler())
 	rt := newRuntimeStub()

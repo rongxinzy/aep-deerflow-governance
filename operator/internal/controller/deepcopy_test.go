@@ -433,3 +433,85 @@ func TestDeepCopyNilReceiversAndRefTypes(t *testing.T) {
 	assert.Equal(t, subject, subjectInto)
 	assert.Equal(t, subject, *subject.DeepCopy())
 }
+
+// fullWorkspace returns a PersonalWorkspace with every spec field populated;
+// the workspace deepcopy tests mutate clones to prove no aliasing leaks back
+// into the original (same discipline as fullEmployee).
+func fullWorkspace() *v1alpha1.PersonalWorkspace {
+	return &v1alpha1.PersonalWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "zhangsan", Namespace: "ns"},
+		Spec: v1alpha1.PersonalWorkspaceSpec{
+			Owner:     "owner-1",
+			Runtime:   "pod",
+			Image:     "reg/pi-companion:0.2.1",
+			Resources: v1alpha1.WorkspaceResources{Memory: "1Gi", Disk: "5Gi", VCPUs: 2},
+			Companions: []v1alpha1.CompanionSpec{
+				{
+					Name: "assistant", DisplayName: "工作助手", Model: "glm-4.6",
+					Tools:     []string{"files", "browser"},
+					Resources: v1alpha1.CompanionResources{Memory: "512Mi", CPU: "500m"},
+					Memory:    &v1alpha1.CompanionMemory{UserKeySecret: "external", Scopes: []string{"private", "person"}},
+				},
+			},
+			Memory:      &v1alpha1.MemorySpec{Type: "openviking", ServerURL: "http://ov:1933", AccountID: "zhiyuan"},
+			Browser:     v1alpha1.WorkspaceBrowser{SharedProfile: true, MaxTabs: 8},
+			Security:    v1alpha1.WorkspaceSecurity{EgressAllow: []string{"model-gateway", "memory"}},
+			Credentials: v1alpha1.CredentialsRef{Name: "creds"},
+		},
+		Status: v1alpha1.PersonalWorkspaceStatus{
+			Phase: v1alpha1.WorkspacePhaseRunning, GatewayEndpoint: "pw.default.svc",
+			MemoryUsers: []string{"pw-zhangsan-assistant"}, ObservedGeneration: 2,
+		},
+	}
+}
+
+func TestWorkspaceDeepCopyIsolation(t *testing.T) {
+	workspace := fullWorkspace()
+	clone := workspace.DeepCopy()
+
+	clone.Spec.Companions[0].Tools[0] = "mutated"
+	clone.Spec.Companions[0].Memory.Scopes[0] = "mutated"
+	clone.Spec.Memory.AccountID = "mutated"
+	clone.Spec.Security.EgressAllow[0] = "mutated"
+	clone.Status.MemoryUsers[0] = "mutated"
+
+	assert.Equal(t, "files", workspace.Spec.Companions[0].Tools[0])
+	assert.Equal(t, "private", workspace.Spec.Companions[0].Memory.Scopes[0])
+	assert.Equal(t, "zhiyuan", workspace.Spec.Memory.AccountID)
+	assert.Equal(t, "model-gateway", workspace.Spec.Security.EgressAllow[0])
+	assert.Equal(t, "pw-zhangsan-assistant", workspace.Status.MemoryUsers[0])
+
+	spec := workspace.Spec
+	for _, tc := range []struct {
+		name string
+		call func() any
+	}{
+		{"WorkspaceResources", func() any { c := spec.Resources.DeepCopy(); c.VCPUs = 8; return c }},
+		{"CompanionSpec", func() any { c := spec.Companions[0].DeepCopy(); c.Name = "x"; return c }},
+		{"CompanionResources", func() any { c := spec.Companions[0].Resources.DeepCopy(); c.CPU = "x"; return c }},
+		{"CompanionMemory", func() any { c := spec.Companions[0].Memory.DeepCopy(); c.UserKeySecret = "x"; return c }},
+		{"WorkspaceBrowser", func() any { c := spec.Browser.DeepCopy(); c.MaxTabs = 1; return c }},
+		{"WorkspaceSecurity", func() any { c := spec.Security.DeepCopy(); c.EgressAllow = nil; return c }},
+		{"PersonalWorkspaceSpec", func() any { c := spec.DeepCopy(); c.Owner = "x"; return c }},
+		{"PersonalWorkspaceStatus", func() any { c := workspace.Status.DeepCopy(); c.GatewayEndpoint = "x"; return c }},
+		{"MemorySpecPtr", func() any { c := spec.Memory.DeepCopy(); c.ServerURL = "x"; return c }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotNil(t, tc.call())
+		})
+	}
+	assert.Equal(t, "zhiyuan", spec.Memory.AccountID, "spec clone mutations must not alias")
+}
+
+func TestWorkspaceSetupWithManager(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, k8sscheme.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:1"}, ctrl.Options{
+		Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	require.NoError(t, err)
+	r := &PersonalWorkspaceReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+	require.NoError(t, r.SetupWithManager(mgr))
+}
