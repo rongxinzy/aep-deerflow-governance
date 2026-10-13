@@ -3,9 +3,10 @@
 Run:  python3 scripts/test_identity_chain.py
 
 Stubs langchain + deerflow, then exercises resolve_aep_user:
-  default fallback -> valid-AEP-id passthrough (web chat path) ->
-  positive cache -> invalid id falls back -> user_map priority ->
-  IM fail-closed without identity source.
+  no requester -> fail closed (no default fallback) -> valid-AEP-id passthrough
+  (web chat path) -> positive cache -> unknown id fails closed -> user_map
+  priority -> IM fail closed without identity source -> resolved requester is
+  published on the run context for downstream (memory) consumers.
 """
 
 import os
@@ -59,7 +60,8 @@ class User:
 
 
 class RuntimeCtx:
-    context = {"channel_user_id": "wx_123"}
+    def __init__(self, **context):
+        self.context = dict(context)
 
 
 def make_mw() -> AepGovernanceMiddleware:
@@ -96,7 +98,19 @@ def main() -> None:
     assert mw.resolve_aep_user(None) == "aep-real", "user_map priority"
     assert mw.client.calls.count("aep-real") == 1, "user_map needs no api call"
 
-    assert mw.resolve_aep_user(RuntimeCtx()) is None, "IM fail closed without identity source"
+    assert mw.resolve_aep_user(RuntimeCtx(channel_user_id="wx_123")) is None, "IM fail closed without identity source"
+
+    # The resolved requester is published on the run context for downstream
+    # consumers (memory); "unresolved" is published too, not silently dropped.
+    _holder["user"] = User("aep-real")
+    rt = RuntimeCtx()
+    assert mw.resolve_aep_user(rt) == "aep-real"
+    assert rt.context.get("requester_id") == "aep-real", "resolved requester published"
+
+    _holder["user"] = None
+    rt2 = RuntimeCtx()
+    assert mw.resolve_aep_user(rt2) is None
+    assert rt2.context.get("requester_id") is None, "unresolved requester published as None"
 
     print("ALL-IDENTITY-CHAIN-TESTS-PASS")
 

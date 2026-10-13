@@ -214,21 +214,36 @@ class AepGovernanceMiddleware(AgentMiddleware):
         context = getattr(runtime, "context", None) if runtime is not None else None
         if isinstance(context, dict) and context.get("channel_user_id"):
             if self.identities is None:
-                return None  # IM traffic without a configured identity source: closed
-            mapped = self.identities.resolve(str(context["channel_user_id"]))
-            return mapped  # None -> unmapped -> fail closed
+                resolved = None  # IM traffic without a configured identity source: closed
+            else:
+                resolved = self.identities.resolve(str(context["channel_user_id"]))
+            self._publish_requester(context, resolved)
+            return resolved  # None -> unmapped -> fail closed
         try:
             from deerflow.runtime.user_context import get_current_user
             user = get_current_user()
             user_id = str(getattr(user, "id", "") or "") if user is not None else ""
         except Exception:
             user_id = ""
+        resolved = None
         if user_id:
             if user_id in self.user_map:
-                return self.user_map[user_id]
-            if self._is_aep_user(user_id):
-                return user_id
-        return None
+                resolved = self.user_map[user_id]
+            elif self._is_aep_user(user_id):
+                resolved = user_id
+        self._publish_requester(context, resolved)
+        return resolved
+
+    @staticmethod
+    def _publish_requester(context: Any, requester_id: str | None) -> None:
+        """Publish the trusted requester for downstream consumers (memory).
+
+        The run context is shared by the middlewares in this run; memory reads
+        ``requester_id`` from it. ``None`` means "not resolved" and must stay
+        distinguishable from "resolved to this id".
+        """
+        if isinstance(context, dict):
+            context["requester_id"] = requester_id
 
     def _is_aep_user(self, user_id: str) -> bool:
         """Positive-cache check that *user_id* resolves in AEP (data-scope API)."""
