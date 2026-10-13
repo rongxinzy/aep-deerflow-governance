@@ -296,6 +296,13 @@ type ChannelsSpec struct {
 	// Feishu enables the Feishu channel.
 	// +optional
 	Feishu bool `json:"feishu,omitempty"`
+	// FeishuName is the bot's display name in Feishu groups. The channel
+	// resolves its own bot open_id at startup and matches @-mentions by that
+	// id; this name is the explicit fallback used when the lookup is
+	// unavailable (or when bot_open_id is set manually). With neither, a
+	// mention is never treated as addressing the bot.
+	// +optional
+	FeishuName string `json:"feishuName,omitempty"`
 }
 
 // PersistenceSpec controls durable runtime storage. The runtime home
