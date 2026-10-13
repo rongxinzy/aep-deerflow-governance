@@ -376,24 +376,35 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		if len(retrieval) == 0 {
 			retrieval = map[string]any{"top_k": 8, "score_threshold": 0.25, "max_injection_chars": 12000}
 		}
+		scope := spec.Memory.MemoryScope
+		if scope == "" {
+			scope = "instance"
+		}
+		backendConfig := map[string]any{
+			"base_url":               spec.Memory.ServerURL,
+			"owner_user_id":          employee.Name,
+			"single_tenant_instance": spec.Memory.SingleTenantInstance,
+			"api_key_env":            memkeySecretKey,
+			"timeout_seconds":        30,
+			"default_peer_id":        employee.Name,
+			"memory_scope":           scope,
+			"startup_policy":         "fail_fast",
+			"allow_insecure_http":    true,
+			"failure_policy":         map[string]any{"read": "fail_open", "write": "log_and_drop"},
+			"retrieval":              retrieval,
+		}
+		// shared_peer_id is only valid in requester scope; the backend rejects
+		// it otherwise, and a config that fails to parse crash-loops the pod.
+		if scope == "requester" && spec.Memory.SharedPeerID != "" {
+			backendConfig["shared_peer_id"] = spec.Memory.SharedPeerID
+		}
 		config["memory"] = map[string]any{
 			"enabled":                        true,
 			"injection_enabled":              true,
 			"shutdown_flush_timeout_seconds": 30,
 			"manager_class":                  "openviking",
 			"mode":                           "middleware",
-			"backend_config": map[string]any{
-				"base_url":               spec.Memory.ServerURL,
-				"owner_user_id":          employee.Name,
-				"single_tenant_instance": spec.Memory.SingleTenantInstance,
-				"api_key_env":            memkeySecretKey,
-				"timeout_seconds":        30,
-				"default_peer_id":        employee.Name,
-				"startup_policy":         "fail_fast",
-				"allow_insecure_http":    true,
-				"failure_policy":         map[string]any{"read": "fail_open", "write": "log_and_drop"},
-				"retrieval":              retrieval,
-			},
+			"backend_config":                 backendConfig,
 		}
 	}
 	encoded, _ := json.MarshalIndent(config, "", "  ")

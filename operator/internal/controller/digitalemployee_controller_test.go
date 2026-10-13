@@ -132,6 +132,27 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(home.EmptyDir).NotTo(BeNil())
 		})
 
+		It("defaults memory scope to instance without a shared bucket", func(ctx context.Context) {
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"memory_scope": "instance"`))
+			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring("shared_peer_id"))
+		})
+
+		It("renders requester-scoped memory with a curated shared bucket", func(ctx context.Context) {
+			employee.Spec.Memory.MemoryScope = "requester"
+			employee.Spec.Memory.SharedPeerID = "df-shared-finance"
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"memory_scope": "requester"`))
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"shared_peer_id": "df-shared-finance"`))
+		})
+
 		It("renders channel-connections only for enabled IM channels", func(ctx context.Context) {
 			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true}
 			Expect(fx.client.Update(ctx, employee)).To(Succeed())
