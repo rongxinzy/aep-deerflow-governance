@@ -28,6 +28,11 @@ for name, attrs in {
     "deerflow": {},
     "deerflow.runtime": {},
     "deerflow.runtime.user_context": {},
+    "deerflow.agents": {},
+    "deerflow.agents.middlewares": {},
+    "deerflow.agents.middlewares.dynamic_context_middleware": {
+        "DynamicContextMiddleware": type("DynamicContextMiddleware", (), {}),
+    },
 }.items():
     m = types.ModuleType(name)
     for k, v in attrs.items():
@@ -114,6 +119,19 @@ def main() -> None:
     assert mw.resolve_aep_user(rt2) is None
     assert rt2.context.get("requester_id") is None, "unresolved requester published as None"
     assert _requester_published[-1] is None, "unresolved requester published on the contextvar too"
+
+    # before_agent must resolve + publish (memory's first recall runs in another
+    # middleware's before_agent, i.e. earlier than the model call).
+    _holder["user"] = User("aep-real")
+    rt3 = RuntimeCtx()
+    assert mw.before_agent({}, rt3) is None, "before_agent resolves without mutating state"
+    assert rt3.context.get("requester_id") == "aep-real", "before_agent published the requester"
+
+    # Ordering: governance runs before the middleware that performs the first
+    # memory recall, so the requester exists by then.
+    anchor = getattr(AepGovernanceMiddleware, "_prev_anchor", None)
+    assert anchor is not None, "governance declares a before-anchor"
+    assert getattr(anchor, "__name__", "") == "DynamicContextMiddleware", f"before DynamicContextMiddleware, got {anchor}"
 
     print("ALL-IDENTITY-CHAIN-TESTS-PASS")
 
