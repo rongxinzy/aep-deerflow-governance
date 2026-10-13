@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -170,6 +171,20 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			fresh := getWorkspace(ctx)
 			Expect(string(fresh.Status.Phase)).To(Equal("Failed"))
 		})
+
+		It("rejects duplicate companion names", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Companions = []v1alpha1.CompanionSpec{
+				{Name: "assistant", Model: "glm-4.6"},
+				{Name: "assistant", Model: "glm-4.6"},
+			}
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			_, err := fx.workspaceReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).To(MatchError(ContainSubstring("duplicate companion name")))
+
+			Expect(string(getWorkspace(ctx).Status.Phase)).To(Equal("Failed"))
+			Expect(fx.stub.registers).To(Equal(0), "a rejected roster must not mint identities")
+		})
 	})
 
 	Describe("memory identities", func() {
@@ -208,6 +223,27 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			Expect(fx.stub.deletes).To(Equal(2))
 			err = fx.client.Get(ctx, client.ObjectKeyFromObject(workspace), &v1alpha1.PersonalWorkspace{})
 			Expect(err).To(HaveOccurred(), "finalizer released after memory cleanup")
+		})
+
+		It("deletes a removed companion's memory user immediately", func(ctx context.Context) {
+			reconcile(ctx)
+			updated := getWorkspace(ctx)
+			updated.Spec.Companions = updated.Spec.Companions[:1] // drop "researcher"
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+
+			Expect(fx.stub.deletes).To(Equal(1), "roster removal cleans up the minted user at once")
+			Expect(getWorkspace(ctx).Status.MemoryUsers).To(ConsistOf("pw-zhangsan-assistant"))
+		})
+
+		It("refuses to drop spec.memory after provisioning", func(ctx context.Context) {
+			reconcile(ctx)
+			updated := getWorkspace(ctx)
+			updated.Spec.Memory = nil
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			_, err := fx.workspaceReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).To(MatchError(ContainSubstring("spec.memory cannot be removed")))
+			Expect(fx.stub.deletes).To(Equal(0), "refusal must not silently delete identities")
 		})
 
 		It("skips memory provisioning when spec.memory is absent", func(ctx context.Context) {
@@ -277,7 +313,7 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 		It("fails reconciliation when the root key source errors", func(ctx context.Context) {
 			r := fx.workspaceReconciler()
 			r.OVRootFn = func(context.Context, client.Client, string, string) (string, error) {
-				return "", errWrap("stub: no root key", nil)
+				return "", fmt.Errorf("stub: no root key")
 			}
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
 			Expect(err).To(HaveOccurred())

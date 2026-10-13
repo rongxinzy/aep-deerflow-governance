@@ -75,6 +75,9 @@ func (r *PersonalWorkspaceReconciler) Reconcile(ctx context.Context, request ctr
 	if workspace.Spec.Runtime == "microvm" {
 		return ctrl.Result{}, r.failWorkspace(ctx, &workspace, errMicrovmUnavailable)
 	}
+	if err := validateCompanionNames(&workspace); err != nil {
+		return ctrl.Result{}, r.failWorkspace(ctx, &workspace, err)
+	}
 
 	// 1. Per-companion memory identities (idempotent; keys minted once,
 	// internal tokens never rotate).
@@ -147,12 +150,37 @@ func companionMemkeySecretName(workspace *v1alpha1.PersonalWorkspace, companion 
 	return "pw-" + workspace.Name + "-" + companion + "-memkey"
 }
 
+// validateCompanionNames rejects duplicate roster entries: two companions
+// sharing a name would silently share one memkey secret and one routing key.
+func validateCompanionNames(workspace *v1alpha1.PersonalWorkspace) error {
+	seen := make(map[string]bool, len(workspace.Spec.Companions))
+	for i := range workspace.Spec.Companions {
+		name := workspace.Spec.Companions[i].Name
+		if seen[name] {
+			return fmt.Errorf("duplicate companion name %q: companion names must be unique inside the workspace", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
 // ensureCompanionMemkeys mints one OpenViking user per companion (unless the
 // CR pins an externally managed secret) and persists key + internal token.
 // Existing values are authoritative: keys are minted once, tokens never
-// rotate.
+// rotate. Removing a companion from the roster deletes its memory user
+// immediately (the identity is dead the moment the roster drops it);
+// status.memoryUsers tracks the live set so finalization cleans up exactly
+// what was minted, not what the spec happens to say at deletion time.
 func (r *PersonalWorkspaceReconciler) ensureCompanionMemkeys(ctx context.Context, workspace *v1alpha1.PersonalWorkspace) error {
+	previous := append([]string(nil), workspace.Status.MemoryUsers...)
 	if workspace.Spec.Memory == nil {
+		if len(previous) > 0 {
+			// Dropping spec.memory would orphan the minted users: the
+			// server URL and account live in the spec, so deletion-time
+			// cleanup would be impossible. Refuse loudly instead of
+			// leaking; remove companions or delete the workspace.
+			return fmt.Errorf("spec.memory cannot be removed after provisioning (%d memory users minted); delete the workspace or remove companions instead", len(previous))
+		}
 		workspace.Status.MemoryUsers = nil
 		return nil
 	}
@@ -219,23 +247,65 @@ func (r *PersonalWorkspaceReconciler) ensureCompanionMemkeys(ctx context.Context
 		}
 		memoryUsers = append(memoryUsers, userID)
 	}
+	// Companion removed from the roster: its minted identity is gone with
+	// it — delete now rather than at workspace deletion.
+	for _, userID := range previous {
+		stillPresent := false
+		for _, live := range memoryUsers {
+			if live == userID {
+				stillPresent = true
+				break
+			}
+		}
+		if !stillPresent {
+			if err := ov.DeleteUser(ctx, accountID, userID); err != nil {
+				return errWrap("delete removed companion memory user: ", err)
+			}
+		}
+	}
 	workspace.Status.MemoryUsers = memoryUsers
+	// Persist the minted set the moment it changes: the later phase write
+	// no-ops when phase and message are unchanged, which would otherwise
+	// swallow a roster-shrink update on a steady-state workspace.
+	if !sameStringSet(previous, memoryUsers) {
+		if err := r.Status().Update(ctx, workspace); err != nil {
+			return errWrap("persist memory users: ", err)
+		}
+	}
 	return nil
+}
+
+// sameStringSet compares two id lists ignoring order (both derive from
+// roster order, which the API does not guarantee stable).
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, item := range a {
+		counts[item]++
+	}
+	for _, item := range b {
+		counts[item]--
+		if counts[item] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *PersonalWorkspaceReconciler) finalizeWorkspace(ctx context.Context, workspace *v1alpha1.PersonalWorkspace) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(workspace, workspaceMemoryFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	// Clean up what was actually minted (status), not what the spec says at
+	// deletion time — a companion removed in the same window must not
+	// double-delete, and one added but never minted must not be missed.
 	if workspace.Spec.Memory != nil {
 		if rootKey, err := r.workspaceOVRootKey(ctx, workspace); err == nil {
 			ov := ovNew(workspace.Spec.Memory.ServerURL, rootKey)
-			for i := range workspace.Spec.Companions {
-				companion := &workspace.Spec.Companions[i]
-				if companion.Memory != nil && companion.Memory.UserKeySecret != "" {
-					continue
-				}
-				_ = ov.DeleteUser(ctx, workspace.Spec.Memory.AccountID, companionUserID(workspace, companion.Name))
+			for _, userID := range workspace.Status.MemoryUsers {
+				_ = ov.DeleteUser(ctx, workspace.Spec.Memory.AccountID, userID)
 			}
 		}
 	}
@@ -248,7 +318,7 @@ func (r *PersonalWorkspaceReconciler) finalizeWorkspace(ctx context.Context, wor
 
 func (r *PersonalWorkspaceReconciler) workspaceOVRootKey(ctx context.Context, workspace *v1alpha1.PersonalWorkspace) (string, error) {
 	if r.OVRootFn == nil {
-		return "", errWrap("no openviking root key source configured", nil)
+		return "", fmt.Errorf("no openviking root key source configured")
 	}
 	return r.OVRootFn(ctx, r.Client, workspace.Namespace, workspace.Spec.Credentials.Name)
 }
