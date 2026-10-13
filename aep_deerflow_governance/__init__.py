@@ -555,6 +555,21 @@ class AepGovernanceMiddleware(AgentMiddleware):
             messages = [governance]
         return request.override(messages=messages)
 
+    def before_agent(self, state: Any, runtime: Any) -> dict | None:
+        """Resolve and publish the trusted requester before any memory recall.
+
+        Memory's first recall runs inside another middleware's ``before_agent``,
+        so resolving only at model-call time is too late — the recall would see
+        an unresolved requester. Publishing here (idempotent) makes the identity
+        available for the memory read path as well as the model call.
+        """
+        self.resolve_aep_user(runtime)
+        return None
+
+    async def abefore_agent(self, state: Any, runtime: Any) -> dict | None:
+        self.resolve_aep_user(runtime)
+        return None
+
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         return handler(self._decorated(request))
 
@@ -610,3 +625,16 @@ class AepGovernanceMiddleware(AgentMiddleware):
                 return enriched
             request = enriched
         return await handler(request)
+
+
+# Positioning: the dynamic-context middleware's ``before_agent`` performs the
+# first memory recall, so governance must run before it for the trusted
+# requester to be published in time. Harmless when the host lacks that module.
+try:  # pragma: no cover - depends on the host providing deerflow
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware as _DynamicContextMiddleware,
+    )
+
+    AepGovernanceMiddleware._prev_anchor = _DynamicContextMiddleware  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    pass
