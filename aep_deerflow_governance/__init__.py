@@ -244,6 +244,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         """
         if isinstance(context, dict):
             context["requester_id"] = requester_id
+        # Also publish as a task-local ContextVar: memory's read path
+        # (prompt assembly) has no runtime handle, and background timers do not
+        # inherit contextvars, so the write path captures it while still in-task.
+        try:
+            from deerflow.runtime.user_context import set_requester_id
+        except Exception:  # pragma: no cover - deerflow always present in-runtime
+            return
+        set_requester_id(requester_id)
 
     def _is_aep_user(self, user_id: str) -> bool:
         """Positive-cache check that *user_id* resolves in AEP (data-scope API)."""

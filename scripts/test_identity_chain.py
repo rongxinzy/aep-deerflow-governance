@@ -35,7 +35,9 @@ for name, attrs in {
     sys.modules[name] = m
 
 _holder = {"user": None}
+_requester_published: list = []
 sys.modules["deerflow.runtime.user_context"].get_current_user = lambda: _holder["user"]
+sys.modules["deerflow.runtime.user_context"].set_requester_id = _requester_published.append
 
 from aep_deerflow_governance import AepGovernanceMiddleware  # noqa: E402
 
@@ -111,6 +113,7 @@ def main() -> None:
     rt2 = RuntimeCtx()
     assert mw.resolve_aep_user(rt2) is None
     assert rt2.context.get("requester_id") is None, "unresolved requester published as None"
+    assert _requester_published[-1] is None, "unresolved requester published on the contextvar too"
 
     print("ALL-IDENTITY-CHAIN-TESTS-PASS")
 
