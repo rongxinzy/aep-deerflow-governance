@@ -79,7 +79,7 @@ def main() -> None:
     mw = make_mw()
 
     _holder["user"] = None
-    assert mw.resolve_aep_user(None) == "default-uid", "default fallback"
+    assert mw.resolve_aep_user(None) is None, "no requester -> fail closed (no default fallback)"
 
     _holder["user"] = User("aep-real")
     assert mw.resolve_aep_user(None) == "aep-real", "valid aep id passthrough"
@@ -89,7 +89,7 @@ def main() -> None:
     assert mw.client.calls.count("aep-real") == 1, "positive cache hit"
 
     _holder["user"] = User("ghost")
-    assert mw.resolve_aep_user(None) == "default-uid", "invalid falls to default"
+    assert mw.resolve_aep_user(None) is None, "unknown user -> fail closed (no default fallback)"
 
     mw.user_map = {"local-7": "aep-real"}
     _holder["user"] = User("local-7")

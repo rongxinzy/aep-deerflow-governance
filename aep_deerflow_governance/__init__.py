@@ -195,17 +195,21 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:
-        """Identity chain: IM platform sender -> DeerFlow user map -> runtime user -> default.
+        """Identity chain: IM platform sender -> DeerFlow user map -> runtime user.
 
-        Returns None for an unmapped IM sender (fail closed everywhere).
+        Returns ``None`` when the requester cannot be resolved (unmapped IM
+        sender, unknown runtime user, or a user that AEP does not know). The
+        configured ``default_aep_user`` is **not** used as an authorization
+        source: an unresolved requester must not inherit that identity's scope.
+        Callers that legitimately act must carry a trusted identity.
 
         The runtime-user branch covers the web-chat path: the portal proxies
         browser sessions to the employee runtime with
         ``X-DeerFlow-Owner-User-Id`` set to the caller's AEP user id, so the
         runtime ``user_context`` id IS an AEP user id. It is validated against
         the AEP data-scope API (positive cache, TTL-bounded) before being
-        trusted — a stale or fabricated id falls back to ``default_aep_user``
-        instead of gaining its (nonexistent) scope.
+        trusted — a stale or fabricated id resolves to ``None`` instead of
+        gaining its (nonexistent) scope.
         """
         context = getattr(runtime, "context", None) if runtime is not None else None
         if isinstance(context, dict) and context.get("channel_user_id"):
@@ -224,7 +228,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
                 return self.user_map[user_id]
             if self._is_aep_user(user_id):
                 return user_id
-        return self.default_aep_user
+        return None
 
     def _is_aep_user(self, user_id: str) -> bool:
         """Positive-cache check that *user_id* resolves in AEP (data-scope API)."""
