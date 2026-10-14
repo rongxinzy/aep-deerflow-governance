@@ -97,6 +97,8 @@ func main() {
 		},
 		WorkspaceImage: envOrDefault("PERSONAL_WORKSPACE_IMAGE", "harbor.zhiyuan.local:30443/zhiyuan/pi-companion:0.4.2"),
 		ModelBaseURL:   envOrDefault("WORKSPACE_MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"),
+		MicrovmNodes:   splitCSV(os.Getenv("WORKSPACE_MICROVM_NODES")),
+		MicrovmSubnet:  envOrDefault("WORKSPACE_MICROVM_SUBNET", "192.168.77.0/24"),
 	}
 	if err := workspaceReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "workspace controller setup failed")
@@ -146,6 +148,18 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// splitCSV parses a comma-separated env value (order-preserving; empty
+// entries dropped) — e.g. WORKSPACE_MICROVM_NODES=rtl-l20,burst6.
+func splitCSV(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func envIntOrDefault(key string, fallback int) int {

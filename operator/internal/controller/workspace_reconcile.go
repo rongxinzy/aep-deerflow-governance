@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -26,21 +27,18 @@ import (
 const modelAPIKeySecretKey = "BIGMODEL_API_KEY"
 
 func (r *PersonalWorkspaceReconciler) ensureWorkspaceChildren(ctx context.Context, workspace *v1alpha1.PersonalWorkspace) error {
-	manifest := renderCompanionsManifest(workspace)
-	manifestMap := &corev1.ConfigMap{ObjectMeta: objectMeta(workspaceConfigName(workspace), workspace.Namespace)}
-	manifestMap.Data = map[string]string{"companions.json": manifest}
-	if err := controllerutil.SetControllerReference(workspace, manifestMap, r.Scheme); err != nil {
+	// The manifest ConfigMap is shared by both runtimes: the pod form rolls
+	// its Deployment via the checksum, the microvm node agent copies it
+	// verbatim into the guest config disk (single roster source).
+	if err := ensureWorkspaceManifest(ctx, r.Client, r.Scheme, workspace); err != nil {
 		return err
-	}
-	if err := safeCreateOrUpdate(ctx, r.Client, manifestMap); err != nil {
-		return errWrap("companions config map: ", err)
 	}
 
 	if err := r.ensureWorkspacePVC(ctx, workspace); err != nil {
 		return errWrap("workspace pvc: ", err)
 	}
 
-	deployment := r.renderWorkspaceDeployment(workspace, configChecksum(manifest, ""))
+	deployment := r.renderWorkspaceDeployment(workspace, configChecksum(renderCompanionsManifest(workspace), ""))
 	if err := controllerutil.SetControllerReference(workspace, deployment, r.Scheme); err != nil {
 		return err
 	}
@@ -54,6 +52,22 @@ func (r *PersonalWorkspaceReconciler) ensureWorkspaceChildren(ctx context.Contex
 	}
 	if err := safeCreateOrUpdate(ctx, r.Client, service); err != nil {
 		return errWrap("workspace service: ", err)
+	}
+	return nil
+}
+
+// ensureWorkspaceManifest upserts the companions.json ConfigMap (the
+// gateway's roster input, the pod rollout checksum source, and the node
+// agent's config-disk source for microvm workspaces).
+func ensureWorkspaceManifest(ctx context.Context, c client.Client, scheme *runtime.Scheme, workspace *v1alpha1.PersonalWorkspace) error {
+	manifest := renderCompanionsManifest(workspace)
+	manifestMap := &corev1.ConfigMap{ObjectMeta: objectMeta(workspaceConfigName(workspace), workspace.Namespace)}
+	manifestMap.Data = map[string]string{"companions.json": manifest}
+	if err := controllerutil.SetControllerReference(workspace, manifestMap, scheme); err != nil {
+		return err
+	}
+	if err := safeCreateOrUpdate(ctx, c, manifestMap); err != nil {
+		return errWrap("companions config map: ", err)
 	}
 	return nil
 }

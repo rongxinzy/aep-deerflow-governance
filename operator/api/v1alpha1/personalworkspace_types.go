@@ -194,6 +194,39 @@ type PersonalWorkspaceStatus struct {
 	// companions (one per companion with memory enabled).
 	// +optional
 	MemoryUsers []string `json:"memoryUsers,omitempty"`
+	// NodeName is the KVM host a microvm workspace is pinned to. Written
+	// once by the operator (sticky for the workspace's lifetime; cleared
+	// only manually per the runbook when a node is permanently lost).
+	// Single-writer: the operator owns this field; the workspace-agent
+	// never rewrites it.
+	// +optional
+	NodeName string `json:"nodeName,omitempty"`
+	// VMSubnet is the /30 carved from the operator's microvm subnet pool
+	// for this workspace's guest network (tap host .1, guest .2). Written
+	// once together with NodeName.
+	// +optional
+	VMSubnet string `json:"vmSubnet,omitempty"`
+	// VM carries the node agent's runtime report for a microvm workspace.
+	// Single-writer: the workspace-agent owns phase/gatewayEndpoint/vm on
+	// the microvm path (the operator stops reconciling availability once
+	// NodeName is assigned).
+	// +optional
+	VM *WorkspaceVMStatus `json:"vm,omitempty"`
+}
+
+// WorkspaceVMStatus is the workspace-agent's report for one microvm
+// workspace: the host port of its TCP proxy in front of the in-VM gateway
+// and the config hash the running guest was booted with (config-change
+// rollouts compare against it).
+type WorkspaceVMStatus struct {
+	// HostPort is the node-local port the agent's proxy listens on; callers
+	// reach the gateway at http://<nodeIP>:<hostPort>.
+	// +optional
+	HostPort int32 `json:"hostPort,omitempty"`
+	// ConfigHash is the checksum of the config disk contents (companions
+	// manifest + env) the running VM was booted with.
+	// +optional
+	ConfigHash string `json:"configHash,omitempty"`
 }
 
 // +kubebuilder:object:root=true

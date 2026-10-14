@@ -33,9 +33,9 @@ const (
 	workspaceMemoryFinalizer = "digitalemployee.zhiyuan.io/workspace-memory"
 )
 
-// errMicrovmUnavailable fails reconciliation loudly instead of silently
-// rendering a pod for a workspace that asked for the Firecracker substrate.
-var errMicrovmUnavailable = fmt.Errorf("runtime microvm is not available in this operator version")
+// errMicrovmPoolEmpty fails a microvm workspace loudly instead of parking it
+// silently when no KVM node pool is configured.
+var errMicrovmPoolEmpty = fmt.Errorf("microvm runtime requested but no KVM node pool is configured (WORKSPACE_MICROVM_NODES)")
 
 // PersonalWorkspaceReconciler reconciles a PersonalWorkspace object.
 type PersonalWorkspaceReconciler struct {
@@ -48,6 +48,13 @@ type PersonalWorkspaceReconciler struct {
 	// ModelBaseURL is the model gateway route companions call (defaults to
 	// the in-cluster Higress gateway).
 	ModelBaseURL string
+	// MicrovmNodes is the eligible KVM node pool (WORKSPACE_MICROVM_NODES);
+	// order is the assignment tie-break (first pool entry wins ties, so the
+	// cicd pool lists the preferred host first).
+	MicrovmNodes []string
+	// MicrovmSubnet is the /24 pool /30s are carved from
+	// (WORKSPACE_MICROVM_SUBNET, default 192.168.77.0/24).
+	MicrovmSubnet string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=personalworkspaces,verbs=*
@@ -72,9 +79,6 @@ func (r *PersonalWorkspaceReconciler) Reconcile(ctx context.Context, request ctr
 	if !workspace.DeletionTimestamp.IsZero() {
 		return r.finalizeWorkspace(ctx, &workspace)
 	}
-	if workspace.Spec.Runtime == "microvm" {
-		return ctrl.Result{}, r.failWorkspace(ctx, &workspace, errMicrovmUnavailable)
-	}
 	if err := validateCompanionNames(&workspace); err != nil {
 		return ctrl.Result{}, r.failWorkspace(ctx, &workspace, err)
 	}
@@ -83,6 +87,22 @@ func (r *PersonalWorkspaceReconciler) Reconcile(ctx context.Context, request ctr
 	// internal tokens never rotate).
 	if err := r.ensureCompanionMemkeys(ctx, &workspace); err != nil {
 		return ctrl.Result{}, r.failWorkspace(ctx, &workspace, err)
+	}
+
+	// Microvm path: the operator assigns node + subnet once and renders the
+	// manifest ConfigMap (single roster source the node agent copies into
+	// the guest config disk), then hands phase/gatewayEndpoint over to the
+	// workspace-agent — no Deployment/PVC/Service, no availability gate.
+	if workspace.Spec.Runtime == "microvm" {
+		if err := ensureWorkspaceManifest(ctx, r.Client, r.Scheme, &workspace); err != nil {
+			return ctrl.Result{}, r.failWorkspace(ctx, &workspace, err)
+		}
+		if err := r.ensureMicrovmAssignment(ctx, &workspace); err != nil {
+			return ctrl.Result{}, r.failWorkspace(ctx, &workspace, err)
+		}
+		logger.Info("personal workspace assigned to node",
+			"node", workspace.Status.NodeName, "subnet", workspace.Status.VMSubnet)
+		return ctrl.Result{}, nil
 	}
 
 	// 2. Children.
