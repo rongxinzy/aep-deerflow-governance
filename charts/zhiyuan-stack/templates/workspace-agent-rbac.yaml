@@ -1,0 +1,68 @@
+{{- if .Values.workspaceAgent.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pw-node-agent
+  namespace: {{ include "zhiyuan.ns" . }}
+---
+# 工作区与配置所在命名空间内的权限（namespaced，与 de-operator 同风格）。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pw-node-agent
+  namespace: {{ include "zhiyuan.ns" . }}
+rules:
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces/status"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["digitalemployee.zhiyuan.io"]
+    resources: ["personalworkspaces/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pw-node-agent
+  namespace: {{ include "zhiyuan.ns" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pw-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: pw-node-agent
+    namespace: {{ include "zhiyuan.ns" . }}
+---
+# 跨命名空间只读：higress-system / memory-system / kube-system 的 Service
+# 与 Endpoints（kube-dns ClusterIP + 白名单端点解析）。chart 首个 ClusterRole。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pw-node-agent-endpoints-read
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pw-node-agent-endpoints-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pw-node-agent-endpoints-read
+subjects:
+  - kind: ServiceAccount
+    name: pw-node-agent
+    namespace: {{ include "zhiyuan.ns" . }}
+{{- end }}

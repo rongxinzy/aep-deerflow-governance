@@ -307,6 +307,36 @@ observability:
 conversationStore:
   backend: postgres
 
+# P1 节点代理（Firecracker microVM 运行时）。enabled 需先完成两件事：
+#   1) kubectl label node <kvm-hosts> zhiyuan.io/kvm=true（当前=burst6、rtl-l20）
+#   2) operator env WORKSPACE_MICROVM_NODES 指向同一批节点（分配池，顺序=偏好）
+# 特权+root 为 PoC 级隔离决策（无 jailer，2026-10-14）；加固轮再收敛。
+workspaceAgent:
+  enabled: false
+  # microvm 分配池（operator 的 WORKSPACE_MICROVM_NODES）——顺序=分配偏好：
+  # cicd 把 rtl-l20 排前（burst6 根盘 92% 红线，首个工作区避开）。
+  microvmNodes: []
+  microvmSubnet: 192.168.77.0/24
+  image:
+    repository: rongxinzy/pw-node-agent
+    tag: 0.1.0
+  # pw-rootfs 模板镜像（pi-durable-bench 构建，独立版本线 0.5.x）
+  templateImage:
+    repository: rongxinzy/pw-rootfs
+    tag: 0.5.0
+  nodeSelector:
+    zhiyuan.io/kvm: "true"
+  tolerations:
+    - key: rtl.ai/externally-managed
+      operator: Exists
+      effect: NoSchedule
+  workdirRoot: /var/lib/zhiyuan/workspace-agent
+  portRange: 8800-8899
+  modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local/v1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
 employees: []
 #  - name: sales-helper
 #    displayName: 销售助理
