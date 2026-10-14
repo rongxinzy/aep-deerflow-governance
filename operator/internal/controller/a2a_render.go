@@ -24,11 +24,18 @@ func renderA2ADeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment 
 		{Name: "A2A_PUBLIC_URL", Value: "http://" + a2aServiceName(employee) + ":8102"},
 		{Name: "A2A_MAX_DEPTH", Value: int32String(maxDepth)},
 	}
+	// The adapter calls the employee's runtime with the same per-employee
+	// internal token the runtime itself gets (envFrom the memkey secret):
+	// authentication is ON in production, and the internal header also exempts
+	// the sidecar from the CSRF double-submit check.
 	container := corev1.Container{
 		Name:  "a2a",
 		Image: spec.Image,
 		Ports: []corev1.ContainerPort{{ContainerPort: 8102}},
-		Env:   environment,
+		EnvFrom: []corev1.EnvFromSource{{
+			SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: memkeySecretName(employee)}},
+		}},
+		Env: environment,
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstrFromInt(8102)}},
 			InitialDelaySeconds: 3,
