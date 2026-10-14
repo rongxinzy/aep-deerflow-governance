@@ -6,8 +6,8 @@ DeerFlow 是执行引擎，治理（企业身份、按请求者数据范围、fa
 DeerFlow 官方 `extensions.middlewares` 扩展点注入。数字员工自称使用 fork 的
 `lead_identity` 配置接口：operator 将 CR 中的企业实例、员工、部门和负责人快照写入
 运行配置，fork 把这些可由业务用户影响的标签作为 user-role 数据提供给模型，而非
-作为权限依据或原样拼入 system prompt。迁移自
-picoclaw 时代的 aepgate 资产（语义 1:1：活查、缓存、fail-closed、结构性拒绝）。
+作为权限依据或原样拼入 system prompt。治理语义源自早期 aepgate 资产
+（语义 1:1：活查、缓存、fail-closed、结构性拒绝）。
 
 ## 组件
 
