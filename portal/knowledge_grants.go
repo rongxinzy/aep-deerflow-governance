@@ -138,7 +138,10 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 				preview = preview[:5]
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":            fmt.Sprintf("以下授权主体不存在：%s（共 %d 项）", strings.Join(preview, "、"), len(unknownSubjects)),
+				"error": map[string]string{
+					"code":    "KNOWLEDGE_GRANT_SUBJECT_UNKNOWN",
+					"message": fmt.Sprintf("以下授权主体不存在：%s（共 %d 项）", strings.Join(preview, "、"), len(unknownSubjects)),
+				},
 				"unknown_subjects": unknownSubjects,
 			})
 			return
