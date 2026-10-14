@@ -53,6 +53,12 @@ CSRF 和自行传入的内部 token 不会送到 gateway，owner header 由 port
 - `GET /api/v1/workplace/files?path=...`：共享文件目录。
 - `GET /api/v1/workplace/files/content?path=...&download=1`：实际文件内容下载。
 
+桌面/浏览器的截图与输入同样经此 HTTP 代理。Portal 将已认证凭据派生为
+不透明的 `X-Workspace-Session-Id`，覆盖浏览器自带值；原始凭据不会传给
+runtime。浏览器的 `X-Workspace-Agent-Token` 被移除，不能冒充本机模型工具。
+接管租约的获取、续期、释放和输入由 runtime 按 owner、session 与随机 leaseId
+校验；session 绑定不扩大工作区访问范围。
+
 代理保留查询参数、响应 Content-Type/Content-Disposition 和流式响应。
 每搭档的 `/api/tasks`、`/api/artifacts`（含内容下载）继续通过现有
 `/api/v1/workspaces/{workspace}/{companion}/chat/api/...`，不共享搭档私有数据库。
