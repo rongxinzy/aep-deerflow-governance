@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -118,6 +120,29 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 			}
 			return request.Grants[i].Type < request.Grants[j].Type
 		})
+		// 授权按不透明 id 存储，形状校验拦不住打错的 UUID：那会静默存下一行
+		// 指向不存在主体的授权（审计还记 succeeded）。删除既有授权之前先逐个
+		// 确认主体存在于 AEP 目录，顺序让返回的未知清单稳定可读。
+		unknownSubjects, lookupErr := p.resolveKnowledgeGrantSubjects(r.Context(), request.Grants)
+		if lookupErr != nil {
+			// Fail closed：校验依赖的目录不可用就不放行，并在审计里留一条
+			// 失败记录，运维能看到「授权没保存」源于上游而不是静默成功。
+			p.recordKnowledgeGrantFailure(r.Context(), ident, tenant, baseID, lookupErr)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "知识库授权主体校验暂不可用"})
+			return
+		}
+		if len(unknownSubjects) > 0 {
+			// 面向控制台：错误消息只列前几个，完整清单由 unknown_subjects 给出。
+			preview := unknownSubjects
+			if len(preview) > 5 {
+				preview = preview[:5]
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":            fmt.Sprintf("以下授权主体不存在：%s（共 %d 项）", strings.Join(preview, "、"), len(unknownSubjects)),
+				"unknown_subjects": unknownSubjects,
+			})
+			return
+		}
 		grants := make([]knowledgeGrantDTO, 0, len(request.Grants))
 		for _, grant := range request.Grants {
 			grants = append(grants, knowledgeGrantDTO{Type: grant.Type, ID: grant.ID, GrantedBy: ident.UserID})
@@ -164,4 +189,45 @@ func (p *portal) replaceKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"knowledge_base_id": baseID, "tenant_id": tenant, "grants": grants})
+}
+
+// resolveKnowledgeGrantSubjects confirms every grant subject exists in the
+// live AEP directory and returns the ids that do not, as "type:id" so the
+// console can name them. Callers must have completed shape validation: the
+// type is always user or team here. A non-nil error means the directory
+// needed for the check was unavailable — callers must fail closed. One
+// lookup per distinct subject: referenceResolver caches per request.
+func (p *portal) resolveKnowledgeGrantSubjects(ctx context.Context, grants []knowledgeGrantInput) ([]string, error) {
+	resolver := newReferenceResolver(p, ctx)
+	unknown := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		var (
+			found bool
+			err   error
+		)
+		if grant.Type == "user" {
+			_, found, err = resolver.lookupUser(grant.ID)
+		} else {
+			_, found, err = resolver.lookupTeam(grant.ID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			unknown = append(unknown, grant.Type+":"+grant.ID)
+		}
+	}
+	return unknown, nil
+}
+
+// recordKnowledgeGrantFailure keeps a failed replace_grants attempt visible
+// when subject validation could not run. The audit write is best effort: it
+// must not change the fail-closed response the caller already owes.
+func (p *portal) recordKnowledgeGrantFailure(ctx context.Context, ident identity, tenant, baseID string, cause error) {
+	p.logger.Warn("knowledge grants: subject directory unavailable", "error", cause)
+	op, err := p.beginManagedAudit(ctx, ident, tenant, "replace_grants", "knowledge_base", baseID, "")
+	if err != nil {
+		return
+	}
+	_ = p.finishManagedAudit(ctx, op, baseID, "failed", http.StatusBadGateway)
 }

@@ -17,10 +17,10 @@ import (
 
 func grantRegressionHarness(t *testing.T) (*apiTestPortal, identity) {
 	t.Helper()
-	h := newAPIHarness(t)
-	h.cfg.aepDeploymentID = "demo"
-	h.cfg.managedKnowledge.tenantID = "tenant-1"
-	return h, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}}
+	// Grant replaces now confirm every subject against the AEP directory, so
+	// these cases run behind a stub where any id exists — they are about
+	// transaction and audit semantics, not about subject existence.
+	return newGrantsSubjectHarness(t, newGrantsDirectoryStub(t, false, nil, nil))
 }
 
 func expectGrantRegistry(mock sqlmock.Sqlmock) {
