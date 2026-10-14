@@ -55,6 +55,11 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/workspaces/{name}", p.auth(p.deleteWorkspace))
 	mux.HandleFunc("/api/v1/workspaces/{name}/{companion}/chat/{rest...}", p.auth(p.handleWorkspaceChat))
 	mux.HandleFunc("/api/v1/workspaces/{name}/{companion}/chat", p.auth(p.handleWorkspaceChat))
+	// Rooms (群聊), owner-scoped top-level: the workspace is resolved from the
+	// session identity (one per user), which also keeps this disjoint from the
+	// workspaces/{name}/{companion}/chat wildcard tree.
+	mux.HandleFunc("/api/v1/rooms/{rest...}", p.auth(p.handleRooms))
+	mux.HandleFunc("/api/v1/rooms", p.auth(p.handleRooms))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
