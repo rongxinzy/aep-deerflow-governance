@@ -57,6 +57,15 @@ func (f *fixture) workspaceReconciler() *PersonalWorkspaceReconciler {
 	}
 }
 
+// roomsChannelReconciler is the workspace reconciler with the employee A2A
+// channel armed (agent credentials secret + AEP base URL).
+func (f *fixture) roomsChannelReconciler() *PersonalWorkspaceReconciler {
+	r := f.workspaceReconciler()
+	r.RoomsAgentSecret = "rooms-agent-creds"
+	r.RoomsAEPBaseURL = "http://aep-control.aep-system.svc.cluster.local:8080"
+	return r
+}
+
 var _ = Describe("PersonalWorkspace reconciler", func() {
 	var fx *fixture
 	var workspace *v1alpha1.PersonalWorkspace
@@ -147,6 +156,46 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceServiceName(workspace)}, service)).To(Succeed())
 			Expect(service.Spec.Type).To(Equal(corev1.ServiceTypeClusterIP))
 			Expect(service.Spec.Ports[0].Port).To(Equal(int32(80)))
+		})
+
+		It("injects the rooms employee channel when armed, stays off otherwise", func(ctx context.Context) {
+			// Channel armed: credentials secret rides envFrom, AEP base URL is explicit.
+			_, err := fx.roomsChannelReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).NotTo(HaveOccurred())
+			deployment := getDeployment(ctx)
+			var hasRoomsSecret bool
+			for _, source := range deployment.Spec.Template.Spec.Containers[0].EnvFrom {
+				if source.SecretRef != nil && source.SecretRef.Name == "rooms-agent-creds" {
+					hasRoomsSecret = true
+				}
+			}
+			Expect(hasRoomsSecret).To(BeTrue(), "rooms agent credentials secret must ride envFrom")
+			var aepBase string
+			for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+				if item.Name == "AEP_BASE_URL" {
+					aepBase = item.Value
+				}
+			}
+			Expect(aepBase).To(Equal("http://aep-control.aep-system.svc.cluster.local:8080"))
+
+			// Channel off (default): neither the secret nor the env appears.
+			off := fx.workspaceFixture("lisi")
+			off.Spec.Image = "reg/pi-companion:0.2.1"
+			Expect(fx.client.Create(ctx, off)).To(Succeed())
+			_, err = fx.workspaceReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: off.Namespace, Name: off.Name}})
+			Expect(err).NotTo(HaveOccurred())
+			offDeployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: off.Namespace, Name: workspaceDeploymentName(off)}, offDeployment)).To(Succeed())
+			for _, source := range offDeployment.Spec.Template.Spec.Containers[0].EnvFrom {
+				if source.SecretRef != nil && source.SecretRef.Name == "rooms-agent-creds" {
+					Fail("rooms agent secret must not ride the deployment when the channel is off")
+				}
+			}
+			for _, item := range offDeployment.Spec.Template.Spec.Containers[0].Env {
+				if item.Name == "AEP_BASE_URL" {
+					Fail("AEP_BASE_URL must not be set when the channel is off")
+				}
+			}
 		})
 
 		It("falls back to the operator image default", func(ctx context.Context) {

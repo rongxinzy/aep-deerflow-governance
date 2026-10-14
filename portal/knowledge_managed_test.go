@@ -74,10 +74,14 @@ func TestManagedKnowledgeFileUploadUsesOnlyFileAndAuditsDocumentID(t *testing.T)
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 
-func TestManagedKnowledgeUploadMapsDuplicateFileToDeterministicConflict(t *testing.T) {
+func TestManagedKnowledgeUploadForwardsFolderRelativePath(t *testing.T) {
 	stub := newServicesStubs(t)
 	h := newServicesHarness(t, stub)
 	configureManagedTest(t, h, "10000")
+	var (
+		gotFileName string
+		gotBody     string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
@@ -85,9 +89,19 @@ func TestManagedKnowledgeUploadMapsDuplicateFileToDeterministicConflict(t *testi
 		case "/api/v1/knowledge-bases/kb-1":
 			_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
 		case "/api/v1/knowledge-bases/kb-1/knowledge/file":
-			// WeKnora deduplicates by content hash and answers with this body.
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"code":"duplicate_file","data":{"id":"doc-existing","tenant_id":10000,"knowledge_base_id":"kb-1"}}`))
+			if err := r.ParseMultipartForm(4 << 20); err != nil {
+				t.Errorf("multipart parse: %v", err)
+			}
+			gotFileName = r.FormValue("fileName")
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Errorf("file field: %v", err)
+				return
+			}
+			defer func() { _ = file.Close() }()
+			data, _ := io.ReadAll(file)
+			gotBody = string(data)
+			_, _ = w.Write([]byte(`{"data":{"id":"doc-2","tenant_id":10000,"knowledge_base_id":"kb-1","file_name":"day-one.md","parse_status":"pending"}}`))
 		default:
 			t.Errorf("unexpected upstream request %s", r.URL.Path)
 		}
@@ -96,27 +110,68 @@ func TestManagedKnowledgeUploadMapsDuplicateFileToDeterministicConflict(t *testi
 	h.cfg.knowledgeAPIURL = server.URL
 	h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
 	h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "upload_file", "document", "", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
-	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "failed", http.StatusConflict).WillReturnResult(sqlmock.NewResult(0, 1))
+	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-2", "accepted", 202).WillReturnResult(sqlmock.NewResult(0, 1))
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
-	part, err := form.CreateFormFile("file", "note.txt")
+	part, err := form.CreateFormFile("file", "day-one.md")
 	require.NoError(t, err)
-	_, _ = part.Write([]byte("synthetic text"))
+	_, _ = part.Write([]byte("folder upload body"))
+	require.NoError(t, form.WriteField("fileName", "handbook/onboarding/day-one.md"))
 	require.NoError(t, form.Close())
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/managed/bases/kb-1/documents/file", &body)
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.SetPathValue("baseID", "kb-1")
 	w := httptest.NewRecorder()
 	h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
-	// Deterministic rejection, not an uncertain write: the console must not lock
-	// every following write behind "结果不确定".
-	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
-	var denied managedError
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &denied))
-	assert.Equal(t, "KNOWLEDGE_DUPLICATE_FILE", denied.Error.Code)
-	assert.Equal(t, "该知识库已存在内容相同的文件", denied.Error.Message)
-	assert.NotContains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
+	assert.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	// Forwarded verbatim: WeKnora owns the folder-path normalization rules.
+	assert.Equal(t, "handbook/onboarding/day-one.md", gotFileName)
+	assert.Equal(t, "folder upload body", gotBody)
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+func TestManagedKnowledgeUploadRejectsInvalidFileNameField(t *testing.T) {
+	for name, value := range map[string]string{
+		"control-character": "handbook/bad\nname.md",
+		"oversize":          strings.Repeat("a", maxManagedUploadFileNameBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var uploadCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge-bases/kb-1/knowledge/file":
+					uploadCalls++
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			part, err := form.CreateFormFile("file", "a.txt")
+			require.NoError(t, err)
+			_, _ = part.Write([]byte("body"))
+			require.NoError(t, form.WriteField("fileName", value))
+			require.NoError(t, form.Close())
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/managed/bases/kb-1/documents/file", &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			req.SetPathValue("baseID", "kb-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			assert.Zero(t, uploadCalls)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestManagedKnowledgeUploadRejectsExtraMultipartFieldsAndOversizeBodies(t *testing.T) {
@@ -1312,5 +1367,50 @@ func TestManagedKnowledgeHasNoImplicitLegacyKeyFallback(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Contains(t, w.Body.String(), "KNOWLEDGE_CREDENTIAL_UNAVAILABLE")
 	assert.NotContains(t, w.Body.String(), "wk-key")
+	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+func TestManagedKnowledgeUploadMapsDuplicateFileToDeterministicConflict(t *testing.T) {
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	configureManagedTest(t, h, "10000")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		case "/api/v1/knowledge-bases/kb-1":
+			_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+		case "/api/v1/knowledge-bases/kb-1/knowledge/file":
+			// WeKnora deduplicates by content hash and answers with this body.
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"duplicate_file","data":{"id":"doc-existing","tenant_id":10000,"knowledge_base_id":"kb-1"}}`))
+		default:
+			t.Errorf("unexpected upstream request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h.cfg.knowledgeAPIURL = server.URL
+	h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+	h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "upload_file", "document", "", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "", "failed", http.StatusConflict).WillReturnResult(sqlmock.NewResult(0, 1))
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", "note.txt")
+	require.NoError(t, err)
+	_, _ = part.Write([]byte("synthetic text"))
+	require.NoError(t, form.Close())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/managed/bases/kb-1/documents/file", &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req.SetPathValue("baseID", "kb-1")
+	w := httptest.NewRecorder()
+	h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+	// Deterministic rejection, not an uncertain write: the console must not lock
+	// every following write behind "结果不确定".
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	var denied managedError
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &denied))
+	assert.Equal(t, "KNOWLEDGE_DUPLICATE_FILE", denied.Error.Code)
+	assert.Equal(t, "该知识库已存在内容相同的文件", denied.Error.Message)
+	assert.NotContains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }

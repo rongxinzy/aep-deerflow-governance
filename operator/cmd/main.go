@@ -95,10 +95,12 @@ func main() {
 		OVRootFn: func(ctx context.Context, c client.Client, namespace, secretName string) (string, error) {
 			return readSecretKey(ctx, c, namespace, secretName, "OPENVIKING_ROOT_API_KEY")
 		},
-		WorkspaceImage: envOrDefault("PERSONAL_WORKSPACE_IMAGE", "harbor.zhiyuan.local:30443/zhiyuan/pi-companion:0.4.2"),
-		ModelBaseURL:   envOrDefault("WORKSPACE_MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"),
-		MicrovmNodes:   splitCSV(os.Getenv("WORKSPACE_MICROVM_NODES")),
-		MicrovmSubnet:  envOrDefault("WORKSPACE_MICROVM_SUBNET", "192.168.77.0/24"),
+		WorkspaceImage:   envOrDefault("PERSONAL_WORKSPACE_IMAGE", "harbor.zhiyuan.local:30443/zhiyuan/pi-companion:0.4.2"),
+		ModelBaseURL:     envOrDefault("WORKSPACE_MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"),
+		RoomsAgentSecret: os.Getenv("ROOMS_AGENT_SECRET"),
+		RoomsAEPBaseURL:  envOrDefault("ROOMS_AEP_BASE_URL", ""),
+		MicrovmNodes:     splitCSV(os.Getenv("WORKSPACE_MICROVM_NODES")),
+		MicrovmSubnet:    envOrDefault("WORKSPACE_MICROVM_SUBNET", "192.168.77.0/24"),
 	}
 	if err := workspaceReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "workspace controller setup failed")
