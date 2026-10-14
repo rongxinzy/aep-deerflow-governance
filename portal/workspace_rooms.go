@@ -54,12 +54,19 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 		return
 	}
 	rest := strings.TrimPrefix(r.PathValue("rest"), "/")
+	gatewayPath := "/api/rooms"
+	if rest != "" {
+		gatewayPath += "/" + rest
+	}
 	proxy := &httputil.ReverseProxy{
 		// Flush immediately: the room feed is SSE.
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			pr.Out.URL.Path = "/api/rooms/" + rest
+			// Empty rest must NOT grow a trailing slash: the gateway's SPA
+			// fallback would swallow /api/rooms/ (both sides tolerate it now,
+			// but keep the canonical form).
+			pr.Out.URL.Path = gatewayPath
 			// Room owner scoping: the portal session identity is the source of
 			// truth — the gateway never sees the browser's cookies.
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
