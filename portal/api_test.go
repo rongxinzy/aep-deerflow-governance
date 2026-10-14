@@ -353,7 +353,7 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 			case "rd-dept":
 				_, _ = w.Write([]byte(`{"id":"rd-dept","name":"研发部"}`))
 			case "sales-dept":
-				_, _ = w.Write([]byte(`{"id":"sales-dept","name":"销售部"}`))
+				_, _ = w.Write([]byte(`{"id":"sales-dept","name":"销售部","parentId":"biz-group"}`))
 			default:
 				http.NotFound(w, r)
 			}
