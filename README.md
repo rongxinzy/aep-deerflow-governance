@@ -29,7 +29,9 @@ subagent 两条中间件链同时生效。
    `scope_cache_seconds`，解析失败=零可见）→ AEP 用户；
    未映射 → 工具层 DENIED + "账号尚未绑定企业身份" 提示。
 2. **直连 API**：DeerFlow 用户 → `user_map` 映射 → AEP 用户；
-   兜底 `default_aep_user`（每实例一个，生产多用户应开 DeerFlow 认证 + user_map）。
+   解析不出即 **fail-closed（拒绝）**。`default_aep_user` 仍为必填配置，但**不再作为授权兜底**：
+   没有 `user_map` 命中、运行时用户 id 也不是 AEP 用户时，受管工具会被拒绝（这是有意语义）。
+   生产多用户应开 DeerFlow 认证 + `user_map`。
 
 范围：`GET /aep/v1/admin/data-scope/context?userId=` 活查（`orgScope`）+ 缓存 +
 fail-closed；受管工具（`governed_tools`）调用范围外部门**不执行**，返回显式拒绝。

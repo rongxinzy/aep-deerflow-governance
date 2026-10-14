@@ -199,36 +199,63 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:
-        """Identity chain: IM platform sender -> DeerFlow user map -> runtime user -> default.
+        """Identity chain: IM platform sender -> DeerFlow user map -> runtime user.
 
-        Returns None for an unmapped IM sender (fail closed everywhere).
+        Returns ``None`` when the requester cannot be resolved (unmapped IM
+        sender, unknown runtime user, or a user that AEP does not know). The
+        configured ``default_aep_user`` is **not** used as an authorization
+        source: an unresolved requester must not inherit that identity's scope.
+        Callers that legitimately act must carry a trusted identity.
 
         The runtime-user branch covers the web-chat path: the portal proxies
         browser sessions to the employee runtime with
         ``X-DeerFlow-Owner-User-Id`` set to the caller's AEP user id, so the
         runtime ``user_context`` id IS an AEP user id. It is validated against
         the AEP data-scope API (positive cache, TTL-bounded) before being
-        trusted — a stale or fabricated id falls back to ``default_aep_user``
-        instead of gaining its (nonexistent) scope.
+        trusted — a stale or fabricated id resolves to ``None`` instead of
+        gaining its (nonexistent) scope.
         """
         context = getattr(runtime, "context", None) if runtime is not None else None
         if isinstance(context, dict) and context.get("channel_user_id"):
             if self.identities is None:
-                return None  # IM traffic without a configured identity source: closed
-            mapped = self.identities.resolve(str(context["channel_user_id"]))
-            return mapped  # None -> unmapped -> fail closed
+                resolved = None  # IM traffic without a configured identity source: closed
+            else:
+                resolved = self.identities.resolve(str(context["channel_user_id"]))
+            self._publish_requester(context, resolved)
+            return resolved  # None -> unmapped -> fail closed
         try:
             from deerflow.runtime.user_context import get_current_user
             user = get_current_user()
             user_id = str(getattr(user, "id", "") or "") if user is not None else ""
         except Exception:
             user_id = ""
+        resolved = None
         if user_id:
             if user_id in self.user_map:
-                return self.user_map[user_id]
-            if self._is_aep_user(user_id):
-                return user_id
-        return self.default_aep_user
+                resolved = self.user_map[user_id]
+            elif self._is_aep_user(user_id):
+                resolved = user_id
+        self._publish_requester(context, resolved)
+        return resolved
+
+    @staticmethod
+    def _publish_requester(context: Any, requester_id: str | None) -> None:
+        """Publish the trusted requester for downstream consumers (memory).
+
+        The run context is shared by the middlewares in this run; memory reads
+        ``requester_id`` from it. ``None`` means "not resolved" and must stay
+        distinguishable from "resolved to this id".
+        """
+        if isinstance(context, dict):
+            context["requester_id"] = requester_id
+        # Also publish as a task-local ContextVar: memory's read path
+        # (prompt assembly) has no runtime handle, and background timers do not
+        # inherit contextvars, so the write path captures it while still in-task.
+        try:
+            from deerflow.runtime.user_context import set_requester_id
+        except Exception:  # pragma: no cover - deerflow always present in-runtime
+            return
+        set_requester_id(requester_id)
 
     def _is_aep_user(self, user_id: str) -> bool:
         """Positive-cache check that *user_id* resolves in AEP (data-scope API)."""
@@ -532,6 +559,21 @@ class AepGovernanceMiddleware(AgentMiddleware):
             messages = [governance]
         return request.override(messages=messages)
 
+    def before_agent(self, state: Any, runtime: Any) -> dict | None:
+        """Resolve and publish the trusted requester before any memory recall.
+
+        Memory's first recall runs inside another middleware's ``before_agent``,
+        so resolving only at model-call time is too late — the recall would see
+        an unresolved requester. Publishing here (idempotent) makes the identity
+        available for the memory read path as well as the model call.
+        """
+        self.resolve_aep_user(runtime)
+        return None
+
+    async def abefore_agent(self, state: Any, runtime: Any) -> dict | None:
+        self.resolve_aep_user(runtime)
+        return None
+
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         return handler(self._decorated(request))
 
@@ -587,3 +629,16 @@ class AepGovernanceMiddleware(AgentMiddleware):
                 return enriched
             request = enriched
         return await handler(request)
+
+
+# Positioning: the dynamic-context middleware's ``before_agent`` performs the
+# first memory recall, so governance must run before it for the trusted
+# requester to be published in time. Harmless when the host lacks that module.
+try:  # pragma: no cover - depends on the host providing deerflow
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware as _DynamicContextMiddleware,
+    )
+
+    AepGovernanceMiddleware._prev_anchor = _DynamicContextMiddleware  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    pass
