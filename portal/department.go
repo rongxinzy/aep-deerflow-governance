@@ -414,7 +414,7 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 	}
 	// Paged fetch (same 10-page guard as contacts): a single limit=100 page
 	// silently truncated every department past the 100th.
-	directory, err := p.fetchTeams(r.Context(), adminToken)
+	teams, err := p.fetchTeams(r.Context(), adminToken)
 	if err != nil {
 		if p.logger != nil {
 			p.logger.Warn("departments: team listing failed", "error", err.Error())
@@ -422,8 +422,10 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "aep returned an error listing teams"})
 		return
 	}
-	out := make([]map[string]any, 0, len(directory))
-	for _, team := range directory {
+	// Upstream listing order: selector endpoints must not shuffle between
+	// calls the way a map iteration would.
+	out := make([]map[string]any, 0, len(teams))
+	for _, team := range teams {
 		entry := map[string]any{"id": team.ID, "name": team.Name}
 		if team.ParentID != nil {
 			entry["parentId"] = *team.ParentID

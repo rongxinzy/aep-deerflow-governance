@@ -72,6 +72,12 @@ func TestHandleOrganization(t *testing.T) {
 		}
 		require.NoError(t, jsonUnmarshal(w.Body.String(), &got))
 		require.Len(t, got.Departments, 4, "both cursor pages must be followed")
+		// 上游列表序（跨页保持）：选择器/树不应在两次调用间洗牌
+		order := make([]string, 0, len(got.Departments))
+		for _, d := range got.Departments {
+			order = append(order, d.ID)
+		}
+		assert.Equal(t, []string{"eng", "rd", "fe", "sales"}, order)
 		byID := map[string]struct {
 			ID       string  `json:"id"`
 			Name     string  `json:"name"`
