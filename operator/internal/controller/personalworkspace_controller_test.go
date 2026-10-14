@@ -161,12 +161,80 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(Equal("reg/pi-companion:0.2.1"))
 		})
 
-		It("rejects the microvm runtime loudly", func(ctx context.Context) {
+		It("assigns the microvm runtime to a pool node without rendering pod children", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Runtime = "microvm"
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconciler := fx.workspaceReconciler()
+			reconciler.MicrovmNodes = []string{"node-a", "node-b"}
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			fresh := getWorkspace(ctx)
+			Expect(string(fresh.Status.Phase)).To(Equal("Pending"))
+			Expect(fresh.Status.NodeName).To(Equal("node-a")) // pool order wins ties
+			Expect(fresh.Status.VMSubnet).To(Equal("192.168.77.0/30"))
+
+			// No pod-form children; the shared manifest ConfigMap still renders
+			// (the node agent's config-disk source), and memkeys still mint.
+			deployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceDeploymentName(workspace)}, deployment)).NotTo(Succeed())
+			service := &corev1.Service{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceServiceName(workspace)}, service)).NotTo(Succeed())
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspacePVCName(workspace)}, pvc)).NotTo(Succeed())
+			manifest := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceConfigName(workspace)}, manifest)).To(Succeed())
+			Expect(manifest.Data["companions.json"]).To(ContainSubstring("assistant"))
+			Expect(fx.stub.registers).To(Equal(2)) // memkeys mint for both companions, same as the pod path
+		})
+
+		It("keeps the assignment sticky across reconciles", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Runtime = "microvm"
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconciler := fx.workspaceReconciler()
+			reconciler.MicrovmNodes = []string{"node-a", "node-b"}
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).NotTo(HaveOccurred())
+			first := getWorkspace(ctx)
+
+			// A second reconcile (and even a pool reorder) never reassigns.
+			reconciler.MicrovmNodes = []string{"node-b", "node-a"}
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).NotTo(HaveOccurred())
+			fresh := getWorkspace(ctx)
+			Expect(fresh.Status.NodeName).To(Equal(first.Status.NodeName))
+			Expect(fresh.Status.VMSubnet).To(Equal(first.Status.VMSubnet))
+		})
+
+		It("carves a unique subnet and balances the next microvm workspace", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Runtime = "microvm"
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconciler := fx.workspaceReconciler()
+			reconciler.MicrovmNodes = []string{"node-a", "node-b"}
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			second := fx.workspaceFixture("lisi")
+			second.Spec.Runtime = "microvm"
+			Expect(fx.client.Create(ctx, second)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			freshSecond := &v1alpha1.PersonalWorkspace{}
+			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(second), freshSecond)).To(Succeed())
+			Expect(freshSecond.Status.VMSubnet).To(Equal("192.168.77.4/30")) // next free /30
+			Expect(freshSecond.Status.NodeName).To(Equal("node-b"))          // 1-vs-0 balance
+		})
+
+		It("fails the microvm runtime loudly when no node pool is configured", func(ctx context.Context) {
 			updated := getWorkspace(ctx)
 			updated.Spec.Runtime = "microvm"
 			Expect(fx.client.Update(ctx, updated)).To(Succeed())
 			_, err := fx.workspaceReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}})
-			Expect(err).To(MatchError(ContainSubstring("microvm")))
+			Expect(err).To(MatchError(ContainSubstring("WORKSPACE_MICROVM_NODES")))
 
 			fresh := getWorkspace(ctx)
 			Expect(string(fresh.Status.Phase)).To(Equal("Failed"))

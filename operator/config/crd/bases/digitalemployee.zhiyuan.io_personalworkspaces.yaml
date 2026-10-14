@@ -176,11 +176,31 @@ spec:
                     maximum: 100000
                     minimum: 256
                     type: integer
+                  memoryScope:
+                    default: instance
+                    description: |-
+                      MemoryScope selects how OpenViking memory is partitioned inside this
+                      employee. "instance" (default) keeps the shipped behavior: memory
+                      belongs to the employee instance, so every requester shares one space.
+                      "requester" partitions memory per requesting user (DeerFlow's
+                      memory_scope knob), so several humans on one instance stop sharing one
+                      memory space. Instance-to-instance isolation is unchanged either way.
+                    enum:
+                    - instance
+                    - requester
+                    type: string
                   scoreThreshold:
                     maximum: 1
                     type: number
                   serverURL:
                     description: ServerURL of the OpenViking service.
+                    type: string
+                  sharedPeerID:
+                    description: |-
+                      SharedPeerID is an optional curated shared memory bucket, read in
+                      addition to the requester's own memory when MemoryScope is "requester".
+                      It must use the backend-reserved "df-shared-" prefix. Empty means
+                      personal memory only. Ignored when MemoryScope is "instance".
                     type: string
                   singleTenantInstance:
                     default: false
@@ -281,6 +301,14 @@ spec:
               message:
                 description: Message carries the last error detail when Phase == Failed.
                 type: string
+              nodeName:
+                description: |-
+                  NodeName is the KVM host a microvm workspace is pinned to. Written
+                  once by the operator (sticky for the workspace's lifetime; cleared
+                  only manually per the runbook when a node is permanently lost).
+                  Single-writer: the operator owns this field; the workspace-agent
+                  never rewrites it.
+                type: string
               observedGeneration:
                 format: int64
                 type: integer
@@ -291,6 +319,31 @@ spec:
                 - Running
                 - Failed
                 - Terminating
+                type: string
+              vm:
+                description: |-
+                  VM carries the node agent's runtime report for a microvm workspace.
+                  Single-writer: the workspace-agent owns phase/gatewayEndpoint/vm on
+                  the microvm path (the operator stops reconciling availability once
+                  NodeName is assigned).
+                properties:
+                  configHash:
+                    description: |-
+                      ConfigHash is the checksum of the config disk contents (companions
+                      manifest + env) the running VM was booted with.
+                    type: string
+                  hostPort:
+                    description: |-
+                      HostPort is the node-local port the agent's proxy listens on; callers
+                      reach the gateway at http://<nodeIP>:<hostPort>.
+                    format: int32
+                    type: integer
+                type: object
+              vmSubnet:
+                description: |-
+                  VMSubnet is the /30 carved from the operator's microvm subnet pool
+                  for this workspace's guest network (tap host .1, guest .2). Written
+                  once together with NodeName.
                 type: string
             type: object
         type: object
