@@ -36,38 +36,38 @@ type knowledgeGrantInput struct {
 // an empty set therefore revokes all user/team access.
 func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Request, ident identity) {
 	if !ident.isAdmin(p.cfg) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator role required"})
+		p.managedWriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限", "")
 		return
 	}
 	if !p.managedReadyIdentity(ident) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "session deployment is not configured for knowledge management"})
+		p.managedWriteError(w, http.StatusForbidden, "DEPLOYMENT_MISMATCH", "会话部署与当前服务不匹配", "")
 		return
 	}
 	if p.db == nil || p.cfg.managedKnowledge.tenantID == "" || ident.DeploymentID == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grant storage unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权存储暂不可用", "")
 		return
 	}
 	baseID, ok := safeKnowledgeID(r.PathValue("baseID"))
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid knowledge base id"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库 ID 无效", "")
 		return
 	}
 	tenant := p.cfg.managedKnowledge.tenantID
 	var registered string
 	err := p.db.QueryRowContext(r.Context(), `SELECT knowledge_base_id FROM knowledge_base_registry WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3 AND lifecycle_state='active'`, ident.DeploymentID, tenant, baseID).Scan(&registered)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "knowledge base is not registered for this deployment"})
+		p.managedWriteError(w, http.StatusNotFound, "KNOWLEDGE_NOT_FOUND", "该知识库未在当前部署登记", "")
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grant registry unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权登记表暂不可用", "")
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
 		rows, err := p.db.QueryContext(r.Context(), `SELECT subject_type,subject_id,granted_by,created_at FROM knowledge_base_grants WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3 ORDER BY subject_type,subject_id`, ident.DeploymentID, tenant, baseID)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 			return
 		}
 		defer func() { _ = rows.Close() }()
@@ -75,28 +75,28 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 		for rows.Next() {
 			var grant knowledgeGrantDTO
 			if err := rows.Scan(&grant.Type, &grant.ID, &grant.GrantedBy, &grant.CreatedAt); err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+				p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 				return
 			}
 			grants = append(grants, grant)
 		}
 		if err := rows.Err(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 			return
 		}
 		if err := p.auditManagedKnowledgeRead(r.Context(), ident, tenant, "list_grants", "knowledge_base", baseID, ""); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grant audit unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库授权审计", "")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"knowledge_base_id": baseID, "tenant_id": tenant, "grants": grants})
 	case http.MethodPut:
 		var request replaceKnowledgeGrantsRequest
 		if err := decodeStrictJSON(w, r, &request, 64<<10); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid grants request"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "授权请求无效", "")
 			return
 		}
 		if request.Grants == nil || len(request.Grants) > 500 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "grants must be an explicit list of at most 500 entries"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "授权必须是显式列表，且不超过 500 项", "")
 			return
 		}
 		seen := make(map[string]struct{}, len(request.Grants))
@@ -104,12 +104,12 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 			grant := &request.Grants[index]
 			grant.ID = strings.TrimSpace(grant.ID)
 			if (grant.Type != "user" && grant.Type != "team") || grant.ID == "" || len(grant.ID) > 256 || strings.ContainsRune(grant.ID, '\x00') {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "each grant needs a valid user/team type and id"})
+				p.managedWriteError(w, http.StatusBadRequest, "KNOWLEDGE_GRANT_INVALID", "每条授权都需要合法的用户/团队类型与 ID", "")
 				return
 			}
 			key := grant.Type + "\x00" + grant.ID
 			if _, duplicate := seen[key]; duplicate {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "duplicate grant"})
+				p.managedWriteError(w, http.StatusBadRequest, "KNOWLEDGE_GRANT_INVALID", "同一条授权重复出现", "")
 				return
 			}
 			seen[key] = struct{}{}
@@ -128,7 +128,7 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 			// Fail closed：校验依赖的目录不可用就不放行，并在审计里留一条
 			// 失败记录，运维能看到「授权没保存」源于上游而不是静默成功。
 			p.recordKnowledgeGrantFailure(r.Context(), ident, tenant, baseID, lookupErr)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "知识库授权主体校验暂不可用"})
+			p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权主体校验暂不可用", "")
 			return
 		}
 		if len(unknownSubjects) > 0 {
@@ -150,42 +150,42 @@ func (p *portal) handleKnowledgeBaseGrants(w http.ResponseWriter, r *http.Reques
 		p.replaceKnowledgeBaseGrants(w, r, ident, tenant, baseID, grants)
 	default:
 		w.Header().Set("Allow", "GET, PUT")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		p.managedWriteError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "不支持的请求方法", "")
 	}
 }
 
 func (p *portal) replaceKnowledgeBaseGrants(w http.ResponseWriter, r *http.Request, ident identity, tenant, baseID string, grants []knowledgeGrantDTO) {
 	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "replace_grants", "knowledge_base", baseID, "")
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grant audit unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库授权审计", "")
 		return
 	}
 	tx, err := p.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		_ = p.finishManagedAudit(r.Context(), op, baseID, "failed", http.StatusServiceUnavailable)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `DELETE FROM knowledge_base_grants WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND knowledge_base_id=$3`, ident.DeploymentID, tenant, baseID); err != nil {
 		_ = p.finishManagedAudit(r.Context(), op, baseID, "failed", http.StatusServiceUnavailable)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 		return
 	}
 	for _, grant := range grants {
 		if _, err := tx.ExecContext(r.Context(), `INSERT INTO knowledge_base_grants (deployment_id,weknora_tenant_id,knowledge_base_id,subject_type,subject_id,granted_by) VALUES ($1,$2,$3,$4,$5,$6)`, ident.DeploymentID, tenant, baseID, grant.Type, grant.ID, ident.UserID); err != nil {
 			_ = p.finishManagedAudit(r.Context(), op, baseID, "failed", http.StatusServiceUnavailable)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权暂不可用", "")
 			return
 		}
 	}
 	if _, err := tx.ExecContext(r.Context(), `UPDATE knowledge_audit_events SET outcome='succeeded',status_code=$2 WHERE operation_id=$1`, op, http.StatusOK); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grant audit unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库授权审计", "")
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		_ = p.finishManagedAudit(r.Context(), op, baseID, "uncertain", http.StatusServiceUnavailable)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge grants commit uncertain"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_GRANTS_UNAVAILABLE", "知识库授权提交结果不确定，请刷新后核对", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"knowledge_base_id": baseID, "tenant_id": tenant, "grants": grants})
