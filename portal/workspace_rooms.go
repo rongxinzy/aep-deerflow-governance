@@ -217,6 +217,14 @@ func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	rest := strings.TrimPrefix(r.PathValue("rest"), "/")
+	// PathValue is already URL-decoded. Reject traversal before the Node
+	// gateway normalizes dot segments into a different, separately authorized API.
+	for _, segment := range strings.Split(strings.ReplaceAll(rest, "\\", "/"), "/") {
+		if segment == "." || segment == ".." {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid gateway path"})
+			return
+		}
+	}
 	// Room roster authorization applies only to room dispatches.
 	if gatewayRoot == "/api/rooms" {
 		if code, errMsg := p.authorizeRoomRequest(w, r, target, rest, ident); code != 0 {

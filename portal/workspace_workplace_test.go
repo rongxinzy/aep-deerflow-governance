@@ -65,6 +65,17 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 			assert.Contains(t, string(body), "data:")
 		}
 	}
+	// The actual mux decodes wildcard values: these must never become
+	// /api/rooms in the Node gateway and bypass room roster authorization.
+	for _, suffix := range []string{"/%2e%2e/rooms", "/%2e%2e%2frooms", "/.%2e/rooms", "/%2e%2e%5crooms"} {
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace"+suffix, strings.NewReader(`{"members":[]}`))
+		request.Header.Set("X-CSRF-Token", csrfFrom(t, jar, server.URL))
+		response, err := client.Do(request)
+		require.NoError(t, err)
+		_ = response.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, response.StatusCode, suffix)
+	}
+
 	for _, withCSRF := range []bool{false, true} {
 		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace", strings.NewReader(`{}`))
 		if withCSRF {
