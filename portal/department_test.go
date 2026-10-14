@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,9 @@ type departmentStubUpstreams struct {
 	aepCalls int
 	ovCalls  int
 	wkCalls  int
+	// createdTeamBodies captures the AEP POST /admin/teams payloads so the
+	// create specs can assert exactly what crossed the boundary.
+	createdTeamBodies []string
 }
 
 func newDepartmentStubs(t *testing.T) *departmentStubUpstreams {
@@ -41,9 +45,11 @@ func newDepartmentStubs(t *testing.T) *departmentStubUpstreams {
 		case strings.HasSuffix(r.URL.Path, "/auth/password/login"):
 			_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
 		case r.URL.Path == "/aep/v1/admin/teams" && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			stubs.createdTeamBodies = append(stubs.createdTeamBodies, string(body))
 			_, _ = w.Write([]byte(`{"id":"rd-dept"}`))
 		case r.URL.Path == "/aep/v1/admin/teams" && r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"teams":[{"id":"rd-dept","name":"研发部"}]}`))
+			_, _ = w.Write([]byte(`{"teams":[{"id":"eng","name":"研发中心"},{"id":"rd-dept","name":"研发部","parentId":"eng"}]}`))
 		case strings.HasPrefix(r.URL.Path, "/aep/v1/admin/teams/") && r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusOK)
 		case strings.HasPrefix(r.URL.Path, "/aep/v1/admin/teams/") && r.Method == http.MethodDelete:
@@ -170,6 +176,61 @@ func TestDepartmentOrchestration(t *testing.T) {
 		assert.Contains(t, status.Message, "weknora")
 	})
 
+	t.Run("create with parentId forwards the hierarchy link to AEP", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
+			strings.NewReader(`{"name":"前端组","parentId":"rd-dept"}`))
+		w := httptest.NewRecorder()
+		h.handleCreateDepartment(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, stubs.createdTeamBodies, 1)
+		// 精确断言跨界负载：parentId 必须原样到达 AEP（建队路径/深度在 AEP 侧定死）
+		assert.JSONEq(t, `{"name":"前端组","parentId":"rd-dept"}`, stubs.createdTeamBodies[0])
+	})
+
+	t.Run("create without parentId stays a root team", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
+			strings.NewReader(`{"name":"研发部"}`))
+		w := httptest.NewRecorder()
+		h.handleCreateDepartment(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Len(t, stubs.createdTeamBodies, 1)
+		assert.JSONEq(t, `{"name":"研发部"}`, stubs.createdTeamBodies[0], "absent parent must not become a null key")
+	})
+
+	t.Run("AEP rejects the parent as 4xx surfaces 400 not 502", func(t *testing.T) {
+		// 未知父部门是调用方错误：按 400 带细节返回，而不是网关故障的 502。
+		stubs := &departmentStubUpstreams{
+			aep: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/auth/password/login"):
+					_, _ = w.Write([]byte(`{"accessToken":"admin-token"}`))
+				case r.URL.Path == "/aep/v1/admin/teams" && r.Method == http.MethodPost:
+					w.Header().Set("Content-Type", "application/problem+json")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"title":"Not Found","detail":"parent team ghost-dept not found","status":404}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})),
+			ov:      httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+			weknora: httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })),
+		}
+		t.Cleanup(stubs.aep.Close)
+		t.Cleanup(stubs.ov.Close)
+		t.Cleanup(stubs.weknora.Close)
+		h := newDepartmentHarness(t, stubs)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/departments",
+			strings.NewReader(`{"name":"前端组","parentId":"ghost-dept"}`))
+		w := httptest.NewRecorder()
+		h.handleCreateDepartment(w, req, adminIdentity())
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "ghost-dept not found")
+	})
+
 	t.Run("list returns the AEP teams", func(t *testing.T) {
 		stubs := newDepartmentStubs(t)
 		h := newDepartmentHarness(t, stubs)
@@ -177,7 +238,8 @@ func TestDepartmentOrchestration(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.handleListDepartments(w, req, adminIdentity())
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "研发部")
+		assert.Contains(t, w.Body.String(), `"name":"研发部","parentId":"eng"`, "hierarchy link must survive the listing")
+		assert.Contains(t, w.Body.String(), `"id":"eng","name":"研发中心"`)
 	})
 
 	t.Run("rename forwards to AEP", func(t *testing.T) {

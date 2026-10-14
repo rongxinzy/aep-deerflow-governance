@@ -127,6 +127,10 @@ type aepUser struct {
 type aepTeam struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// ParentID is nil/absent for root teams: the AEP hierarchy link
+	// (immutable per team, path/depth fixed at creation). Every surface that
+	// projects teams downstream must carry it or the org tree renders flat.
+	ParentID *string `json:"parentId"`
 }
 
 type aepSkillVersion struct {

@@ -20,22 +20,32 @@ import (
 // leg is derived from the employee CR's phase so 审批状态 and 部署状态
 // stay separately visible, as the wireframes require.
 
+// workbenchTeam is one of the caller's teams in /me: the parentId link is
+// what lets the workbench org tree place the node inside a department
+// hierarchy instead of always at the root.
+type workbenchTeam struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	ParentID *string `json:"parentId,omitempty"`
+}
+
 // handleMe reports the caller's workbench profile: identity, team names,
 // and quota. /me is the workbench first paint, so every enrichable lookup
 // degrades instead of failing the whole response.
 func (p *portal) handleMe(w http.ResponseWriter, r *http.Request, ident identity) {
 	resolver := newReferenceResolver(p, r.Context())
-	teams := make([]map[string]string, 0, len(ident.Teams))
+	teams := make([]workbenchTeam, 0, len(ident.Teams))
 	for _, id := range ident.Teams {
-		name := ""
-		if team, found, err := resolver.lookupTeam(id); err != nil {
+		team := workbenchTeam{ID: id}
+		if resolved, found, err := resolver.lookupTeam(id); err != nil {
 			// A name lookup failure must not blank the workbench: the id
 			// still renders and the next request retries.
 			p.logger.Warn("workbench team lookup failed", "team", id, "error", err)
 		} else if found {
-			name = team.Name
+			team.Name = resolved.Name
+			team.ParentID = resolved.ParentID
 		}
-		teams = append(teams, map[string]string{"id": id, "name": name})
+		teams = append(teams, team)
 	}
 	// Same quota formula as the apply gate (applyForEmployee): owned CRs
 	// plus parked requests, so "配额已满" from the server and the number

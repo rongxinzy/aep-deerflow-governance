@@ -26,7 +26,7 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 		return
 	}
 
-	teamNames, teamErr := p.fetchTeamNames(r.Context(), adminToken)
+	teamDirectory, teamErr := p.fetchTeams(r.Context(), adminToken)
 	if teamErr != nil {
 		// Fail closed, same as a failed users page: a silent partial org
 		// structure would surface as departments flickering in and out.
@@ -49,8 +49,9 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 	}
 
 	type contactTeam struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID       string  `json:"id"`
+		Name     string  `json:"name"`
+		ParentID *string `json:"parentId,omitempty"`
 	}
 	contacts := make([]map[string]any, 0, 64)
 	cursor := ""
@@ -114,8 +115,8 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 			}
 			teams := make([]contactTeam, 0, len(u.TeamIDs))
 			for _, id := range u.TeamIDs {
-				if name, ok := teamNames[id]; ok {
-					teams = append(teams, contactTeam{ID: id, Name: name})
+				if team, ok := teamDirectory[id]; ok {
+					teams = append(teams, contactTeam{ID: id, Name: team.Name, ParentID: team.ParentID})
 				}
 			}
 			contacts = append(contacts, map[string]any{
@@ -130,15 +131,16 @@ func (p *portal) handleContacts(w http.ResponseWriter, r *http.Request, ident id
 	writeJSON(w, http.StatusOK, map[string]any{"contacts": contacts})
 }
 
-// fetchTeamNames resolves AEP team ids to display names for the contacts org
-// structure. Follows nextCursor with the same 10-page guard as the users loop
-// (AEP pages teams for real; stopping at page one would silently drop every
-// member past the 100th team into 未分组); any non-200 page fails the whole
-// map so the caller can fail closed instead of half-grouping the directory.
-// Upstream bodies stay in the error for the server log — the employee-facing
-// response gets the sanitized message only (same discipline as the users loop).
-func (p *portal) fetchTeamNames(ctx context.Context, adminToken string) (map[string]string, error) {
-	names := make(map[string]string, 16)
+// fetchTeams lists every AEP team as the directory map (id → aepTeam, with
+// the parentId hierarchy link). Follows nextCursor with the same 10-page
+// guard as the users loop (AEP pages teams for real; stopping at page one
+// would silently drop every member past the 100th team into 未分组); any
+// non-200 page fails the whole map so callers can fail closed instead of
+// half-grouping the directory. Upstream bodies stay in the error for the
+// server log — the employee-facing response gets the sanitized message only
+// (same discipline as the users loop).
+func (p *portal) fetchTeams(ctx context.Context, adminToken string) (map[string]aepTeam, error) {
+	directory := make(map[string]aepTeam, 16)
 	cursor := ""
 	for page := 0; page < 10; page++ {
 		query := url.Values{"limit": {"100"}}
@@ -162,11 +164,8 @@ func (p *portal) fetchTeamNames(ctx context.Context, adminToken string) (map[str
 			return nil, fmt.Errorf("teams listing returned %d: %s", resp.StatusCode, string(raw))
 		}
 		var result struct {
-			Teams []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"teams"`
-			Next *string `json:"nextCursor"`
+			Teams []aepTeam `json:"teams"`
+			Next  *string   `json:"nextCursor"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			_ = resp.Body.Close()
@@ -175,13 +174,13 @@ func (p *portal) fetchTeamNames(ctx context.Context, adminToken string) (map[str
 		_ = resp.Body.Close()
 		for _, t := range result.Teams {
 			if t.ID != "" && t.Name != "" {
-				names[t.ID] = t.Name
+				directory[t.ID] = t
 			}
 		}
 		if result.Next == nil || *result.Next == "" {
-			return names, nil
+			return directory, nil
 		}
 		cursor = *result.Next
 	}
-	return names, nil
+	return directory, nil
 }

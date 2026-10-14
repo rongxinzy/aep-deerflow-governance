@@ -19,6 +19,10 @@ import (
 type departmentRequest struct {
 	Name     string   `json:"name"`     // e.g. "研发部"; the AEP team id is server-generated from it
 	AdminIDs []string `json:"adminIds"` // AEP user IDs who manage this department
+	// ParentID makes the new department a child of an existing one (二级部门
+	// and below). nil/absent = root. Immutable per the AEP contract (path and
+	// depth are fixed at creation); reparenting is not offered.
+	ParentID *string `json:"parentId"`
 }
 
 type departmentStatus struct {
@@ -48,9 +52,15 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 
 	// 1. AEP team (identity) — the id is server-generated from the name and
 	// keys the downstream OpenViking/WeKnora provisioning as well.
-	teamID, err := p.createAepTeam(r, req)
+	teamID, aepStatus, err := p.createAepTeam(r, req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("aep-team: %v", err)})
+		// An AEP 4xx (unknown parent, name policy) is the caller's mistake,
+		// not an upstream outage: surface it as 400 with the detail.
+		code := http.StatusBadGateway
+		if aepStatus >= 400 && aepStatus < 500 {
+			code = http.StatusBadRequest
+		}
+		writeJSON(w, code, map[string]string{"error": fmt.Sprintf("aep-team: %v", err)})
 		return
 	}
 	status := departmentStatus{ID: teamID, Name: req.Name, Phase: "provisioning", AepTeamID: teamID}
@@ -84,32 +94,34 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, error) {
-	body, _ := json.Marshal(map[string]any{
-		"name": req.Name,
-	})
+func (p *portal) createAepTeam(r *http.Request, req departmentRequest) (string, int, error) {
+	payload := map[string]any{"name": req.Name}
+	if req.ParentID != nil {
+		payload["parentId"] = *req.ParentID
+	}
+	body, _ := json.Marshal(payload)
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		p.cfg.aepBaseURL+"/aep/v1/admin/teams", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-AEP-Protocol-Version", "1.0")
 	request.Header.Set("Authorization", "Bearer "+p.adminToken(r.Context()))
 	resp, err := serviceProbeClient.Do(request)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("aep returned %d: %s", resp.StatusCode, string(raw))
+		return "", resp.StatusCode, fmt.Errorf("aep returned %d: %s", resp.StatusCode, string(raw))
 	}
 	var result struct {
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(raw, &result)
-	return result.ID, nil
+	return result.ID, resp.StatusCode, nil
 }
 
 func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (string, error) {
@@ -392,40 +404,31 @@ func (p *portal) refreshSessionTeams(sessionToken string, ident identity) {
 }
 
 // handleListDepartments returns all AEP teams (departments) with their
-// provisioning status, for the admin console's team selector.
+// provisioning status, for the admin console's team selector. parentId rides
+// along so hierarchical selectors (二级部门 and below) can group correctly.
 func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, ident identity) {
 	adminToken := p.adminToken(r.Context())
 	if adminToken == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "admin token unavailable"})
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		p.cfg.aepBaseURL+"/aep/v1/admin/teams?limit=100", nil)
+	// Paged fetch (same 10-page guard as contacts): a single limit=100 page
+	// silently truncated every department past the 100th.
+	directory, err := p.fetchTeams(r.Context(), adminToken)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		if p.logger != nil {
+			p.logger.Warn("departments: team listing failed", "error", err.Error())
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "aep returned an error listing teams"})
 		return
 	}
-	request.Header.Set("Authorization", "Bearer "+adminToken)
-	request.Header.Set("X-AEP-Protocol-Version", "1.0")
-	resp, err := serviceProbeClient.Do(request)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var result struct {
-		Teams []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"teams"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&result) != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad upstream response"})
-		return
-	}
-	out := make([]map[string]any, 0, len(result.Teams))
-	for _, team := range result.Teams {
-		out = append(out, map[string]any{"id": team.ID, "name": team.Name})
+	out := make([]map[string]any, 0, len(directory))
+	for _, team := range directory {
+		entry := map[string]any{"id": team.ID, "name": team.Name}
+		if team.ParentID != nil {
+			entry["parentId"] = *team.ParentID
+		}
+		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"departments": out})
 }

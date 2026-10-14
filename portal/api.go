@@ -140,6 +140,10 @@ func (p *portal) routes() http.Handler {
 	// projected to id/username/displayName by the portal (AEP's user listing
 	// is admin-scoped, so employees never call it directly).
 	mux.HandleFunc("GET /api/v1/contacts", p.auth(p.handleContacts))
+	// Full department tree (id/name/parentId) for the workbench org view:
+	// parent departments with no direct members never appear in me.teams or
+	// any contact's teams, so the tree needs this authoritative listing.
+	mux.HandleFunc("GET /api/v1/organization", p.auth(p.handleOrganization))
 	mux.HandleFunc("GET /api/v1/requests/mine", p.auth(p.handleMyRequests))
 	mux.HandleFunc("GET /api/v1/requests/{id}", p.auth(p.handleRequestDetail))
 	mux.HandleFunc("GET /api/v1/requests", p.auth(p.listRequests))

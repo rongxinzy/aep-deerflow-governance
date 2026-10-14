@@ -118,8 +118,9 @@ func TestMe(t *testing.T) {
 			Kind        string `json:"kind"`
 		} `json:"user"`
 		Teams []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID       string  `json:"id"`
+			Name     string  `json:"name"`
+			ParentID *string `json:"parentId"`
 		} `json:"teams"`
 		Quota struct {
 			Limit   int `json:"limit"`
@@ -134,10 +135,15 @@ func TestMe(t *testing.T) {
 	assert.Equal(t, "张三", out.User.DisplayName)
 	// Team names resolve through the admin directory; a missing team
 	// degrades to an empty name instead of failing the whole response.
-	assert.Equal(t, []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}{{ID: "sales-dept", Name: "销售部"}, {ID: "ghost", Name: ""}}, out.Teams)
+	// The parentId link rides along so the org tree can nest the node
+	// (销售部 under 商务群) instead of pinning everything at the root.
+	require.Len(t, out.Teams, 2)
+	assert.Equal(t, "sales-dept", out.Teams[0].ID)
+	assert.Equal(t, "销售部", out.Teams[0].Name)
+	require.NotNil(t, out.Teams[0].ParentID)
+	assert.Equal(t, "biz-group", *out.Teams[0].ParentID)
+	assert.Equal(t, "ghost", out.Teams[1].ID)
+	assert.Nil(t, out.Teams[1].ParentID, "unresolvable team must not grow a parent")
 	assert.Equal(t, 2, out.Quota.Limit)
 	assert.Equal(t, 2, out.Quota.Used, "parked requests count against the quota")
 	assert.Equal(t, 1, out.Quota.Owned)

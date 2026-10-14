@@ -45,7 +45,7 @@ func contactsStubAEP(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"user":{"id":"u1","displayName":"张三","kind":"human"},"roles":[]}`))
 		case "/aep/v1/admin/teams":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"teams":[{"id":"rd","name":"研发部"},{"id":"sales","name":"销售部"}]}`))
+			_, _ = w.Write([]byte(`{"teams":[{"id":"eng","name":"研发中心"},{"id":"rd","name":"研发部","parentId":"eng"},{"id":"sales","name":"销售部"}]}`))
 		case "/aep/v1/admin/users":
 			cursor := r.URL.Query().Get("cursor")
 			body, ok := pages[cursor]
@@ -91,8 +91,9 @@ func TestHandleContacts(t *testing.T) {
 				Username    string `json:"username"`
 				DisplayName string `json:"displayName"`
 				Teams       []struct {
-					ID   string `json:"id"`
-					Name string `json:"name"`
+					ID       string  `json:"id"`
+					Name     string  `json:"name"`
+					ParentID *string `json:"parentId"`
 				} `json:"teams"`
 			} `json:"contacts"`
 		}
@@ -106,8 +107,12 @@ func TestHandleContacts(t *testing.T) {
 		// 组织架构：teamIds 解析为名称；解析不出（ghost-team）的只丢弃该组，不裸奔 id
 		require.Len(t, got.Contacts[0].Teams, 1)
 		assert.Equal(t, "研发部", got.Contacts[0].Teams[0].Name)
+		// 组织层级：研发部挂在研发中心下；根部门（sales）不带 parentId 键
+		require.NotNil(t, got.Contacts[0].Teams[0].ParentID)
+		assert.Equal(t, "eng", *got.Contacts[0].Teams[0].ParentID)
 		require.Len(t, got.Contacts[1].Teams, 1)
 		assert.Equal(t, "sales", got.Contacts[1].Teams[0].ID)
+		assert.Nil(t, got.Contacts[1].Teams[0].ParentID)
 	})
 
 	t.Run("team listing failure fails the whole directory closed", func(t *testing.T) {
