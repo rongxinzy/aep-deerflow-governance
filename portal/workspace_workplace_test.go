@@ -27,7 +27,7 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 			_, _ = w.Write([]byte("png-frame"))
 		case "/api/workplace/desktop/input":
 			body, _ := io.ReadAll(r.Body)
-			assert.JSONEq(t, `{"leaseId":"lease-from-runtime","type":"click","x":20,"y":40}`, string(body))
+			assert.JSONEq(t, `{"leaseId":"lease-from-runtime","event":{"type":"click","x":20,"y":40}}`, string(body))
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/api/workplace/files/content":
 			assert.Equal(t, "reports/week.txt", r.URL.Query().Get("path"))
@@ -93,7 +93,7 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 	}
 
 	for _, withCSRF := range []bool{false, true} {
-		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace/desktop/input", strings.NewReader(`{"leaseId":"lease-from-runtime","type":"click","x":20,"y":40}`))
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace/desktop/input", strings.NewReader(`{"leaseId":"lease-from-runtime","event":{"type":"click","x":20,"y":40}}`))
 		if withCSRF {
 			request.Header.Set("X-CSRF-Token", csrfFrom(t, jar, server.URL))
 		}
