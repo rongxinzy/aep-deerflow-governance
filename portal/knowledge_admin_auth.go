@@ -12,21 +12,21 @@ import (
 func (p *portal) freshAdminOnly(next func(http.ResponseWriter, *http.Request, identity)) func(http.ResponseWriter, *http.Request, identity) {
 	return func(w http.ResponseWriter, r *http.Request, cached identity) {
 		if cached.Token == "" || p.aep == nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "current administrator identity is unavailable"})
+			p.managedWriteError(w, http.StatusUnauthorized, "ADMIN_IDENTITY_UNAVAILABLE", "当前管理员身份不可用，请重新登录", "")
 			return
 		}
 
 		current, err := p.aep.verify(r.Context(), cached.Token)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "current administrator role could not be verified"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "ADMIN_ROLE_UNVERIFIED", "无法校验当前管理员角色，请稍后重试", "")
 			return
 		}
 		if current.UserID == "" || current.UserID != cached.UserID {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "current administrator identity is unavailable"})
+			p.managedWriteError(w, http.StatusUnauthorized, "ADMIN_IDENTITY_UNAVAILABLE", "当前管理员身份不可用，请重新登录", "")
 			return
 		}
 		if !current.isAdmin(p.cfg) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator role required"})
+			p.managedWriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限", "")
 			return
 		}
 

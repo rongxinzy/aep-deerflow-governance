@@ -98,7 +98,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 	w.Header().Set("Cache-Control", "no-store")
 	employeeName := strings.TrimSpace(r.PathValue("name"))
 	if !namePattern.MatchString(employeeName) || p.k8s == nil || p.db == nil || p.sessions == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge runtime context unavailable"})
+		p.managedWriteError(w, http.StatusUnauthorized, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "知识库运行上下文不可用", "")
 		return
 	}
 	// The 256-bit opaque handle is the only credential available to the
@@ -107,7 +107,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 	// internal token crosses the service boundary.
 	handle := strings.TrimSpace(r.Header.Get(knowledgeContextHeader))
 	if len(handle) != 43 {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge runtime context unavailable"})
+		p.managedWriteError(w, http.StatusUnauthorized, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "知识库运行上下文不可用", "")
 		return
 	}
 	digest := sha256.Sum256([]byte(handle))
@@ -115,16 +115,16 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 	var sessionToken string
 	err := p.db.QueryRowContext(r.Context(), `SELECT session_token FROM knowledge_runtime_contexts WHERE handle_hash=$1 AND employee_name=$2 AND expires_at > now()`, contextHash, employeeName).Scan(&sessionToken)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge runtime context unavailable"})
+		p.managedWriteError(w, http.StatusUnauthorized, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "知识库运行上下文不可用", "")
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 		return
 	}
 	requester, _, ok := p.sessions.get(sessionToken)
 	if !ok || !p.knowledgeSessionActive(r.Context(), sessionToken, requester.UserID) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "knowledge runtime context unavailable"})
+		p.managedWriteError(w, http.StatusUnauthorized, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "知识库运行上下文不可用", "")
 		return
 	}
 	var input struct {
@@ -137,16 +137,16 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 		StatusCode       int      `json:"status_code"`
 	}
 	if err := decodeStrictJSON(w, r, &input, 16<<10); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid knowledge authorization request"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库授权请求无效", "")
 		return
 	}
 	if input.OperationID != "" {
 		if input.DocumentID != "" || len(input.KnowledgeBaseIDs) != 0 || input.Action != "" || input.RequireAll != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid audit completion request"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "审计完成请求无效", "")
 			return
 		}
 		if err := p.completeKnowledgeRuntimeAudit(r.Context(), requester, employeeName, contextHash, input.OperationID, input.Outcome, input.StatusCode); err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "knowledge audit operation unavailable"})
+			p.managedWriteError(w, http.StatusConflict, "KNOWLEDGE_CONFLICT", "知识库审计操作不可用或与已有记录冲突", "")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -154,79 +154,81 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 	}
 	action := knowledgeRuntimeAction(input.Action)
 	if action == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid knowledge action"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库操作类型无效", "")
 		return
 	}
 	if input.DocumentID != "" {
 		if len(input.KnowledgeBaseIDs) != 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must name either a document or knowledge bases"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求必须且只能指定资料或知识库", "")
 			return
 		}
 		key, err := p.platformSecretKey(r.Context(), p.cfg.managedKnowledge.apiKeySecretField)
 		if err != nil || p.cfg.managedKnowledge.tenantID == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 			return
 		}
 		tenant, err := p.managedTenant(r.Context(), key)
 		if err != nil || tenant != p.cfg.managedKnowledge.tenantID {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 			return
 		}
 		doc, found, err := p.managedFetchDocument(r.Context(), key, tenant, requester.DeploymentID, "", input.DocumentID)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 			return
 		}
 		if !found {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "knowledge access denied"})
+			p.managedWriteError(w, http.StatusForbidden, "KNOWLEDGE_ACCESS_DENIED", "所请求的资料不属于当前部署或租户", "")
 			return
 		}
 		if err := p.authorizeEmployeeKnowledgeBase(r.Context(), requester, employeeName, doc.KnowledgeBaseID); err != nil {
 			if errors.Is(err, errKnowledgeIdentityUnavailable) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+				p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 			} else {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "knowledge access denied"})
+				p.managedWriteError(w, http.StatusForbidden, "KNOWLEDGE_NOT_GRANTED", "该数字员工没有绑定该知识库或无权访问", "")
 			}
 			return
 		}
 		op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, tenant, employeeName, contextHash, action, "document", doc.ID, doc.KnowledgeBaseID)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge audit unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库操作审计", "")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"knowledge_base_id": doc.KnowledgeBaseID, "operation_id": op})
 		return
 	}
 	if len(input.KnowledgeBaseIDs) == 0 || len(input.KnowledgeBaseIDs) > 100 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "knowledge_base_ids must be an explicit list"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "knowledge_base_ids 必须是显式列表", "")
 		return
 	}
 	seen := make(map[string]struct{}, len(input.KnowledgeBaseIDs))
 	for _, id := range input.KnowledgeBaseIDs {
 		if _, ok := safeKnowledgeID(id); !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid knowledge base id"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库 ID 无效", "")
 			return
 		}
 		if _, duplicate := seen[id]; duplicate {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "duplicate knowledge base id"})
+			p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库 ID 重复", "")
 			return
 		}
 		seen[id] = struct{}{}
 	}
 	allowed, err := p.resolveEmployeeKnowledgeAccess(r.Context(), requester, employeeName, input.KnowledgeBaseIDs)
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge authorization unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_AUTHORIZATION_UNAVAILABLE", "知识库授权校验暂不可用", "")
 		return
 	}
 	requireAll := input.RequireAll == nil || *input.RequireAll
 	if (requireAll && len(allowed) != len(input.KnowledgeBaseIDs)) || len(allowed) == 0 {
-		writeJSON(w, http.StatusForbidden, map[string]any{"error": "knowledge access denied", "knowledge_base_ids": []string{}})
+		denied := managedError{}
+		denied.Error.Code, denied.Error.Message = "KNOWLEDGE_NOT_GRANTED", "该数字员工没有绑定所请求的知识库"
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": denied.Error, "knowledge_base_ids": []string{}})
 		return
 	}
 	resourceID := strings.Join(allowed, ",")
 	op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, p.cfg.managedKnowledge.tenantID, employeeName, contextHash, action, "knowledge_scope", resourceID, "")
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge audit unavailable"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库操作审计", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"knowledge_base_ids": allowed, "operation_id": op})

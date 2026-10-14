@@ -51,6 +51,17 @@ Successful creation audit and registry insertion share a PostgreSQL transaction;
 failure retains the pending intent for reconciliation. Startup metadata DDL is
 additive and idempotent; merely merging code does not migrate a running database.
 
+Managed, retrieval and runtime-authorization knowledge routes return one error
+envelope: `{"error":{"code":"UPPER_SNAKE","message":"面向管理员的中文"}}`, with the
+HTTP status unchanged. The admin console branches on `code` and renders
+`message`, so no raw upstream English sentence reaches the UI. A deterministic
+upstream rejection keeps its own status and code instead of collapsing into the
+generic 502: a content-duplicate upload (WeKnora `409 duplicate_file`) returns
+`409 KNOWLEDGE_DUPLICATE_FILE`, an oversize upload returns
+`413 KNOWLEDGE_INPUT_TOO_LARGE`, and other upstream 4xx format/type rejections
+return `422 KNOWLEDGE_UPSTREAM_REJECTED`. `502` stays reserved for network errors
+and upstream 5xx responses, which are the genuinely `uncertain` writes.
+
 Synthetic success DTO examples:
 
 ```json
