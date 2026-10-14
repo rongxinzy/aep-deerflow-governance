@@ -10,6 +10,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -195,6 +196,23 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/rooms")
 }
 
+const workspaceSessionHeader = "X-Workspace-Session-Id"
+
+// Called only behind p.auth: derive an opaque binding from the credential that
+// authentication actually selected, without forwarding that credential.
+func workspaceSessionID(r *http.Request) string {
+	credential := ""
+	if token := bearer(r); token != "" {
+		credential = "bearer:" + token
+	} else if cookie, err := r.Cookie(portalSessionCookie); err == nil && cookie.Value != "" {
+		credential = "session:" + cookie.Value
+	}
+	if credential == "" {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte("workspace-control:"+credential)))
+}
+
 // handleWorkplace exposes shared files and available environment capabilities from the
 // caller's own gateway. It never accepts a workspace owner from the browser.
 func (p *portal) handleWorkplace(w http.ResponseWriter, r *http.Request, ident identity) {
@@ -251,6 +269,11 @@ func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Requ
 			// caller-supplied owner header (the gateway also honors
 			// X-BotUI-User) is dropped before the stamp below.
 			pr.Out.Header.Del("X-BotUI-User")
+			pr.Out.Header.Del(workspaceSessionHeader)
+			pr.Out.Header.Del("X-Workspace-Agent-Token")
+			if gatewayRoot == "/api/workplace" {
+				pr.Out.Header.Set(workspaceSessionHeader, workspaceSessionID(pr.In))
+			}
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
 			pr.Out.Header.Del(workspaceTokenHeader)
 			pr.Out.Header.Del("Authorization")

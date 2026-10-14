@@ -15,10 +15,20 @@ import (
 func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "user-1", r.Header.Get(workspaceOwnerHeaderName))
+		assert.Len(t, r.Header.Get(workspaceSessionHeader), 64)
+		assert.NotEqual(t, "browser-forged-session", r.Header.Get(workspaceSessionHeader))
+		assert.Empty(t, r.Header.Get("X-Workspace-Agent-Token"))
 		for _, header := range []string{"Cookie", "Authorization", "X-CSRF-Token", workspaceTokenHeader} {
 			assert.Empty(t, r.Header.Get(header))
 		}
 		switch r.URL.Path {
+		case "/api/workplace/desktop/screenshot":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png-frame"))
+		case "/api/workplace/desktop/input":
+			body, _ := io.ReadAll(r.Body)
+			assert.JSONEq(t, `{"leaseId":"lease-from-runtime","event":{"type":"click","x":20,"y":40}}`, string(body))
+			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/api/workplace/files/content":
 			assert.Equal(t, "reports/week.txt", r.URL.Query().Get("path"))
 			assert.Equal(t, "1", r.URL.Query().Get("download"))
@@ -46,10 +56,12 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	_, loginBody := postJSON(t, client, server.URL+"/api/v1/session", `{"username":"user1","password":"pw-one"}`)
 	require.Contains(t, loginBody, "user-1")
-	for _, path := range []string{"", "/files/content?path=reports%2Fweek.txt&download=1", "/stream"} {
+	for _, path := range []string{"", "/files/content?path=reports%2Fweek.txt&download=1", "/stream", "/desktop/screenshot"} {
 		request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/workplace"+path, nil)
 		request.Header.Set(workspaceOwnerHeaderName, "forged-owner")
 		request.Header.Set(workspaceTokenHeader, "forged-token")
+		request.Header.Set(workspaceSessionHeader, "browser-forged-session")
+		request.Header.Set("X-Workspace-Agent-Token", "browser-forged-agent")
 		response, err := client.Do(request)
 		require.NoError(t, err)
 		body, err := io.ReadAll(response.Body)
@@ -59,6 +71,10 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 		if strings.Contains(path, "content?") {
 			assert.Equal(t, `attachment; filename="week.txt"`, response.Header.Get("Content-Disposition"))
 			assert.Equal(t, "actual file bytes", string(body))
+		}
+		if path == "/desktop/screenshot" {
+			assert.Equal(t, "image/png", response.Header.Get("Content-Type"))
+			assert.Equal(t, "png-frame", string(body))
 		}
 		if path == "/stream" {
 			assert.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
@@ -77,7 +93,7 @@ func TestWorkplaceAuthenticatedProxy(t *testing.T) {
 	}
 
 	for _, withCSRF := range []bool{false, true} {
-		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace", strings.NewReader(`{}`))
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/workplace/desktop/input", strings.NewReader(`{"leaseId":"lease-from-runtime","event":{"type":"click","x":20,"y":40}}`))
 		if withCSRF {
 			request.Header.Set("X-CSRF-Token", csrfFrom(t, jar, server.URL))
 		}
@@ -118,4 +134,22 @@ func TestWorkspaceSummaryRuntimeResources(t *testing.T) {
 	assert.Equal(t, ws.Spec.Resources, summary["resources"])
 	ws.Spec.Runtime = ""
 	assert.Equal(t, "pod", summarizeWorkspace(ws)["runtime"])
+}
+
+func TestWorkspaceSessionBinding(t *testing.T) {
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/workplace/control", nil)
+	first.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "first-session"})
+	first.Header.Set(workspaceSessionHeader, "spoofed")
+	firstID := workspaceSessionID(first)
+	require.Len(t, firstID, 64)
+	assert.NotContains(t, firstID, "first-session")
+	assert.Equal(t, firstID, workspaceSessionID(first))
+	second := httptest.NewRequest(http.MethodPost, "/api/v1/workplace/control", nil)
+	second.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "second-session"})
+	assert.NotEqual(t, firstID, workspaceSessionID(second))
+	// authenticate() selects Bearer before cookies; the binding must do so too.
+	first.Header.Set("Authorization", "Bearer verified-token")
+	second.Header.Set("Authorization", "Bearer verified-token")
+	assert.Equal(t, workspaceSessionID(first), workspaceSessionID(second))
+	assert.NotEqual(t, firstID, workspaceSessionID(first))
 }
