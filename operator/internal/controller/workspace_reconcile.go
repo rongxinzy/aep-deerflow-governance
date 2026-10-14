@@ -13,8 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -145,6 +145,11 @@ func (r *PersonalWorkspaceReconciler) renderWorkspaceDeployment(workspace *v1alp
 	if name := companionMemkeySecretName(workspace, primary.Name); name != "" {
 		envFrom = append(envFrom, corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}})
 	}
+	// Rooms employee channel: agent credentials envFrom + the AEP the rooms
+	// agent logs in to. Both unset = channel stays off inside the gateway.
+	if r.RoomsAgentSecret != "" {
+		envFrom = append(envFrom, corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: r.RoomsAgentSecret}}})
+	}
 	var env []corev1.EnvVar
 	if spec.Credentials.Name != "" {
 		env = append(env, corev1.EnvVar{
@@ -154,6 +159,9 @@ func (r *PersonalWorkspaceReconciler) renderWorkspaceDeployment(workspace *v1alp
 				Key:                  modelAPIKeySecretKey,
 			}},
 		})
+	}
+	if r.RoomsAEPBaseURL != "" {
+		env = append(env, corev1.EnvVar{Name: "AEP_BASE_URL", Value: r.RoomsAEPBaseURL})
 	}
 	env = append(env,
 		corev1.EnvVar{Name: "PORT", Value: "8080"},

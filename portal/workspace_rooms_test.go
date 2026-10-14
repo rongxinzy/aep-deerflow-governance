@@ -55,7 +55,8 @@ func TestOwnerScopedRoomsProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.handleRooms(w, req, ownerIdentity())
 		require.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, (*paths)[0], "GET /api/rooms")
+		// "? " 紧跟根路径：证明无尾斜杠（弱 contains 旧实现 /api/rooms/ 也过）
+		assert.Contains(t, (*paths)[0], "GET /api/rooms? owner")
 	})
 
 	t.Run("query strings survive the rewrite", func(t *testing.T) {

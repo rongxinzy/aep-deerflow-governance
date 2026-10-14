@@ -48,6 +48,14 @@ type PersonalWorkspaceReconciler struct {
 	// ModelBaseURL is the model gateway route companions call (defaults to
 	// the in-cluster Higress gateway).
 	ModelBaseURL string
+	// RoomsAgentSecret, when set, is a Secret (keys ROOMS_AGENT_USER /
+	// ROOMS_AGENT_PASSWORD) injected envFrom into every workspace gateway so
+	// the room orchestrator can speak A2A to digital employees under its own
+	// agent identity. Empty disables the employee channel.
+	RoomsAgentSecret string
+	// RoomsAEPBaseURL is the AEP control plane the rooms agent logs in to
+	// (AEP_BASE_URL in the gateway). Empty disables the employee channel.
+	RoomsAEPBaseURL string
 	// MicrovmNodes is the eligible KVM node pool (WORKSPACE_MICROVM_NODES);
 	// order is the assignment tie-break (first pool entry wins ties, so the
 	// cicd pool lists the preferred host first).
