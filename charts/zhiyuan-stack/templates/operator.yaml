@@ -22,6 +22,10 @@ spec:
             {{- if .Values.channelGateway.enabled }}
             - {name: CHANNEL_GATEWAY_URL, value: "http://de-channel-gateway.{{ include "zhiyuan.ns" . }}.svc.cluster.local:8899"}
             {{- end }}
+            {{- if .Values.workspaceAgent.microvmNodes }}
+            - {name: WORKSPACE_MICROVM_NODES, value: {{ join "," .Values.workspaceAgent.microvmNodes | quote }}}
+            - {name: WORKSPACE_MICROVM_SUBNET, value: {{ .Values.workspaceAgent.microvmSubnet | quote }}}
+            {{- end }}
           args: ["--namespace", {{ include "zhiyuan.ns" . | quote }}, "--leader-elect"]
           livenessProbe:
             httpGet: {path: /healthz, port: 8081}

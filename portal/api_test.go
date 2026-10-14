@@ -268,9 +268,23 @@ func TestApplyWithModelSelection(t *testing.T) {
 		assert.Equal(t, "BIGMODEL_API_KEY", first.ApiKeyEnv)
 		second := item.Spec.Runtime.Models[1]
 		assert.Equal(t, "openai", second.Provider)
-		assert.Equal(t, "http://172.18.5.123:8000/v1", second.BaseURL)
+		assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/v1", second.BaseURL, "openai models route through the gateway /v1 (header-routed), never the raw endpoint")
 		assert.Equal(t, "Qwen3.6-35B-A3B", second.NativeModel)
+		require.NotNil(t, second.Reasoning, "declared thinkingFormat must project onto the runtime reasoning block")
+		assert.Equal(t, "optional", second.Reasoning.Thinking)
+		assert.Equal(t, "preserve", second.Reasoning.History)
+		assert.Nil(t, first.Reasoning, "anthropic fixture declares no reasoning")
 		assert.Empty(t, item.Spec.Runtime.Model, "legacy singular fields stay empty when models are explicit")
+	})
+
+	t.Run("reasoning without history requirement maps to thinking-only", func(t *testing.T) {
+		_, item := apply(t, `["reason-no-history"]`)
+		require.NotNil(t, item)
+		require.Len(t, item.Spec.Runtime.Models, 1)
+		reasoning := item.Spec.Runtime.Models[0].Reasoning
+		require.NotNil(t, reasoning)
+		assert.Equal(t, "optional", reasoning.Thinking)
+		assert.Empty(t, reasoning.History, "no history requirement must not project preserve")
 	})
 
 	t.Run("rejects unknown or disabled models", func(t *testing.T) {
@@ -366,7 +380,8 @@ func newApplyHarness(t *testing.T) *apiTestPortal {
 			_, _ = w.Write([]byte(`{"models":[
 				{"id":"bench-glm","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
 				{"id":"bench-anthropic","sourceType":"gateway","protocol":"anthropic","endpoint":"https://open.bigmodel.cn/api/anthropic","upstreamModel":"glm-5.3-flash","enabled":true},
-				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true},
+				{"id":"bench-qwen","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true,"reasoningCompatibility":{"thinkingFormat":"zai","supportsReasoningEffort":true,"requiresReasoningContentOnAssistantMessages":true}},
+				{"id":"reason-no-history","sourceType":"gateway","protocol":"openai-compatible","endpoint":"http://172.18.5.123:8000/v1","upstreamModel":"Qwen3.6-35B-A3B","enabled":true,"reasoningCompatibility":{"thinkingFormat":"deepseek","supportsReasoningEffort":false,"requiresReasoningContentOnAssistantMessages":false}},
 				{"id":"disabled-model","sourceType":"gateway","protocol":"anthropic","endpoint":"https://x.example","upstreamModel":"x","enabled":false}]}`))
 		default:
 			http.NotFound(w, r)

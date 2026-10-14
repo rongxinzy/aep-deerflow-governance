@@ -210,6 +210,20 @@ func renderModelEntry(route v1alpha1.RuntimeModel) map[string]any {
 		entry["request_timeout"] = 300.0
 	}
 	entry["max_retries"] = 2
+	// A declared reasoning block keeps DeerFlow from downgrading thinking
+	// models to non-thinking (it infers support only from config).
+	if route.Reasoning != nil {
+		reasoning := map[string]any{}
+		if route.Reasoning.Thinking != "" {
+			reasoning["thinking"] = route.Reasoning.Thinking
+		}
+		if route.Reasoning.History != "" {
+			reasoning["history"] = route.Reasoning.History
+		}
+		if len(reasoning) > 0 {
+			entry["reasoning"] = reasoning
+		}
+	}
 	return entry
 }
 
@@ -348,6 +362,24 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			}
 		}
 	}
+	// Feishu group gate: the channel answers a fresh group message only when
+	// the bot is @-mentioned, and it matches that mention by display name, so
+	// the runtime needs the name itself. Only bot_name is rendered here —
+	// `enabled` and the credentials still come from the runtime store, so a CR
+	// without injected credentials does not make the channel try to start.
+	if spec.Channels != nil && spec.Channels.Feishu && spec.Channels.FeishuName != "" {
+		channels, ok := config["channels"].(map[string]any)
+		if !ok {
+			channels = map[string]any{}
+			config["channels"] = channels
+		}
+		feishu, ok := channels["feishu"].(map[string]any)
+		if !ok {
+			feishu = map[string]any{}
+			channels["feishu"] = feishu
+		}
+		feishu["bot_name"] = spec.Channels.FeishuName
+	}
 	if spec.Memory != nil {
 		retrieval := map[string]any{}
 		if spec.Memory.TopK > 0 {
@@ -362,24 +394,35 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		if len(retrieval) == 0 {
 			retrieval = map[string]any{"top_k": 8, "score_threshold": 0.25, "max_injection_chars": 12000}
 		}
+		scope := spec.Memory.MemoryScope
+		if scope == "" {
+			scope = "instance"
+		}
+		backendConfig := map[string]any{
+			"base_url":               spec.Memory.ServerURL,
+			"owner_user_id":          employee.Name,
+			"single_tenant_instance": spec.Memory.SingleTenantInstance,
+			"api_key_env":            memkeySecretKey,
+			"timeout_seconds":        30,
+			"default_peer_id":        employee.Name,
+			"memory_scope":           scope,
+			"startup_policy":         "fail_fast",
+			"allow_insecure_http":    true,
+			"failure_policy":         map[string]any{"read": "fail_open", "write": "log_and_drop"},
+			"retrieval":              retrieval,
+		}
+		// shared_peer_id is only valid in requester scope; the backend rejects
+		// it otherwise, and a config that fails to parse crash-loops the pod.
+		if scope == "requester" && spec.Memory.SharedPeerID != "" {
+			backendConfig["shared_peer_id"] = spec.Memory.SharedPeerID
+		}
 		config["memory"] = map[string]any{
 			"enabled":                        true,
 			"injection_enabled":              true,
 			"shutdown_flush_timeout_seconds": 30,
 			"manager_class":                  "openviking",
 			"mode":                           "middleware",
-			"backend_config": map[string]any{
-				"base_url":               spec.Memory.ServerURL,
-				"owner_user_id":          employee.Name,
-				"single_tenant_instance": spec.Memory.SingleTenantInstance,
-				"api_key_env":            memkeySecretKey,
-				"timeout_seconds":        30,
-				"default_peer_id":        employee.Name,
-				"startup_policy":         "fail_fast",
-				"allow_insecure_http":    true,
-				"failure_policy":         map[string]any{"read": "fail_open", "write": "log_and_drop"},
-				"retrieval":              retrieval,
-			},
+			"backend_config":                 backendConfig,
 		}
 	}
 	encoded, _ := json.MarshalIndent(config, "", "  ")

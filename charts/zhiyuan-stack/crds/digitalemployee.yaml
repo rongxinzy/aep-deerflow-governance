@@ -94,6 +94,14 @@ spec:
                   feishu:
                     description: Feishu enables the Feishu channel.
                     type: boolean
+                  feishuName:
+                    description: |-
+                      FeishuName is the bot's display name in Feishu groups. The channel
+                      resolves its own bot open_id at startup and matches @-mentions by that
+                      id; this name is the explicit fallback used when the lookup is
+                      unavailable (or when bot_open_id is set manually). With neither, a
+                      mention is never treated as addressing the bot.
+                    type: string
                   wecom:
                     description: Wecom enables the WeCom (企业微信) smart-bot channel.
                     type: boolean

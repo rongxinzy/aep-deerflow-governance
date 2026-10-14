@@ -132,6 +132,27 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(home.EmptyDir).NotTo(BeNil())
 		})
 
+		It("defaults memory scope to instance without a shared bucket", func(ctx context.Context) {
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"memory_scope": "instance"`))
+			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring("shared_peer_id"))
+		})
+
+		It("renders requester-scoped memory with a curated shared bucket", func(ctx context.Context) {
+			employee.Spec.Memory.MemoryScope = "requester"
+			employee.Spec.Memory.SharedPeerID = "df-shared-finance"
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"memory_scope": "requester"`))
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"shared_peer_id": "df-shared-finance"`))
+		})
+
 		It("renders channel-connections only for enabled IM channels", func(ctx context.Context) {
 			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true}
 			Expect(fx.client.Update(ctx, employee)).To(Succeed())
@@ -153,6 +174,30 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			fresh := &corev1.ConfigMap{}
 			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, fresh)).To(Succeed())
 			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"channel_connections"`))
+		})
+
+		It("renders the feishu bot name for the group mention gate", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Feishu: true, FeishuName: "数字员工"}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			rendered := config.Data["config.yaml"]
+			Expect(rendered).To(ContainSubstring(`"bot_name": "数字员工"`))
+			// Only the display name is rendered here; `enabled` and the
+			// credentials still come from the runtime store.
+			Expect(rendered).To(ContainSubstring(`"channels"`))
+		})
+
+		It("omits the feishu bot name when the CR does not set one", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Feishu: true}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring("bot_name"))
 		})
 
 		It("keeps the spec.owner field intact across reconciles", func(ctx context.Context) {
@@ -469,7 +514,7 @@ var _ = Describe("DigitalEmployee runtime model list", func() {
 		employee := fx.employeeFixture("multi-model-helper")
 		employee.Spec.Runtime.Models = []v1alpha1.RuntimeModel{
 			{Name: "bench-anthropic", Provider: "anthropic", NativeModel: "glm-5.3-flash", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic", ApiKeyEnv: "BIGMODEL_API_KEY"},
-			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/bench-qwen", ApiKeyEnv: "DEER_BENCH_API_KEY"},
+			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/v1", ApiKeyEnv: "DEER_BENCH_API_KEY", Reasoning: &v1alpha1.RuntimeReasoning{Thinking: "optional", History: "preserve"}},
 		}
 		employee.Spec.Runtime.Model = ""
 
@@ -490,6 +535,11 @@ var _ = Describe("DigitalEmployee runtime model list", func() {
 			HaveKeyWithValue("base_url", "http://higress-gateway.higress-system.svc.cluster.local/bench-anthropic"),
 		))
 		Expect(parsed.Models[0]).NotTo(HaveKey("request_timeout"))
+		Expect(parsed.Models[0]).NotTo(HaveKey("reasoning"), "undeclared models stay thinking-off (runtime default)")
+		Expect(parsed.Models[1]["reasoning"]).To(SatisfyAll(
+			HaveKeyWithValue("thinking", "optional"),
+			HaveKeyWithValue("history", "preserve"),
+		))
 		Expect(parsed.Models[1]).To(SatisfyAll(
 			HaveKeyWithValue("name", "bench-qwen"),
 			HaveKeyWithValue("model", "Qwen3.6-35B-A3B"),

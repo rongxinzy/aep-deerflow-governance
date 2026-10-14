@@ -94,6 +94,14 @@ spec:
                   feishu:
                     description: Feishu enables the Feishu channel.
                     type: boolean
+                  feishuName:
+                    description: |-
+                      FeishuName is the bot's display name in Feishu groups. The channel
+                      resolves its own bot open_id at startup and matches @-mentions by that
+                      id; this name is the explicit fallback used when the lookup is
+                      unavailable (or when bot_open_id is set manually). With neither, a
+                      mention is never treated as addressing the bot.
+                    type: string
                   wecom:
                     description: Wecom enables the WeCom (企业微信) smart-bot channel.
                     type: boolean
@@ -543,6 +551,360 @@ spec:
                 description: |-
                   RuntimeAccountMessage carries the last runtime-account detail
                   (failure reason, upgrade hint, …).
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: personalworkspaces.digitalemployee.zhiyuan.io
+spec:
+  group: digitalemployee.zhiyuan.io
+  names:
+    kind: PersonalWorkspace
+    listKind: PersonalWorkspaceList
+    plural: personalworkspaces
+    shortNames:
+    - pw
+    singular: personalworkspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.owner
+      name: Owner
+      type: string
+    - jsonPath: .spec.runtime
+      name: Runtime
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PersonalWorkspace is one user's persistent companion environment.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PersonalWorkspaceSpec defines the desired state of a personal
+              workspace.
+            properties:
+              browser:
+                description: |-
+                  Browser keeps the shared-browser policy (login state is a feature of
+                  the avatar model, not a compromise). Stored for the gateway; the
+                  operator does not enforce it in P0.
+                properties:
+                  maxTabs:
+                    description: MaxTabs bounds concurrent browser sessions per workspace.
+                    format: int32
+                    maximum: 64
+                    minimum: 1
+                    type: integer
+                  sharedProfile:
+                    default: true
+                    description: |-
+                      SharedProfile keeps one shared browser profile (login state) across
+                      the workspace's companions — the handoff-without-reconfiguration
+                      feature of the avatar model. Default true.
+                    type: boolean
+                type: object
+              companions:
+                description: |-
+                  Companions is the workspace's agent roster. Every entry gets its own
+                  memory identity and private storage; entries share the workspace's
+                  files and sessions. The list is managed by the business layer
+                  (portal); the operator renders it but never interprets tool grants.
+                items:
+                  description: CompanionSpec is one companion agent in the workspace
+                    roster.
+                  properties:
+                    displayName:
+                      description: DisplayName is the roster label shown to the user.
+                      type: string
+                    memory:
+                      description: Memory declares the companion's memory sharing
+                        surface.
+                      properties:
+                        scopes:
+                          description: |-
+                            Scopes is the declared sharing surface (e.g. private, person, org).
+                            The OpenViking ACL enforcement reads it via the gateway; the operator
+                            only stores it.
+                          items:
+                            type: string
+                          maxItems: 10
+                          type: array
+                        userKeySecret:
+                          description: |-
+                            UserKeySecret optionally names an externally managed Secret (key
+                            OPENVIKING_API_KEY) instead of an operator-minted per-companion user.
+                          type: string
+                      type: object
+                    model:
+                      description: |-
+                        Model is the AEP-approved model route the companion uses (wire id
+                        routed by the model gateway, never a provider-native name).
+                      type: string
+                    name:
+                      description: |-
+                        Name identifies the companion for routing and storage namespacing
+                        (DNS-label rules; unique inside the workspace).
+                      pattern: ^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$
+                      type: string
+                    resources:
+                      description: Resources bounds this companion inside the workspace
+                        budget.
+                      properties:
+                        cpu:
+                          description: CPU is the companion's CPU cap (Kubernetes
+                            quantity).
+                          type: string
+                        memory:
+                          description: Memory is the companion's process memory cap
+                            inside the workspace.
+                          type: string
+                      type: object
+                    tools:
+                      description: |-
+                        Tools lists the capability faces the companion may use. Stored for the
+                        gateway; the operator never interprets entries.
+                      items:
+                        type: string
+                      maxItems: 20
+                      type: array
+                  required:
+                  - model
+                  - name
+                  type: object
+                maxItems: 10
+                minItems: 1
+                type: array
+              credentials:
+                description: |-
+                  Credentials references the shared platform secret (OpenViking root
+                  key, model API key). Secrets are never embedded in the CR.
+                properties:
+                  name:
+                    description: Name of the Secret in the employee namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              image:
+                description: |-
+                  Image is the workspace container image (gateway + companion runtime).
+                  Empty falls back to the operator's PERSONAL_WORKSPACE_IMAGE default.
+                type: string
+              memory:
+                description: |-
+                  Memory configures the shared OpenViking backend the companions'
+                  per-companion users live in. Nil disables memory provisioning.
+                properties:
+                  accountID:
+                    description: AccountID is the OpenViking account the employee
+                      user lives in.
+                    type: string
+                  maxInjectionChars:
+                    format: int32
+                    maximum: 100000
+                    minimum: 256
+                    type: integer
+                  memoryScope:
+                    default: instance
+                    description: |-
+                      MemoryScope selects how OpenViking memory is partitioned inside this
+                      employee. "instance" (default) keeps the shipped behavior: memory
+                      belongs to the employee instance, so every requester shares one space.
+                      "requester" partitions memory per requesting user (DeerFlow's
+                      memory_scope knob), so several humans on one instance stop sharing one
+                      memory space. Instance-to-instance isolation is unchanged either way.
+                    enum:
+                    - instance
+                    - requester
+                    type: string
+                  scoreThreshold:
+                    maximum: 1
+                    type: number
+                  serverURL:
+                    description: ServerURL of the OpenViking service.
+                    type: string
+                  sharedPeerID:
+                    description: |-
+                      SharedPeerID is an optional curated shared memory bucket, read in
+                      addition to the requester's own memory when MemoryScope is "requester".
+                      It must use the backend-reserved "df-shared-" prefix. Empty means
+                      personal memory only. Ignored when MemoryScope is "instance".
+                    type: string
+                  singleTenantInstance:
+                    default: false
+                    description: |-
+                      SingleTenantInstance maps every runtime user of this single-tenant
+                      instance onto the employee's memory owner (per-request human identity
+                      lives in governance, not in the memory tenant).
+                    type: boolean
+                  topK:
+                    description: Retrieval tuning; zero values fall back to the backend
+                      defaults.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  type:
+                    description: Type of memory backend. Only "openviking" is implemented.
+                    enum:
+                    - openviking
+                    type: string
+                required:
+                - accountID
+                - serverURL
+                - type
+                type: object
+              owner:
+                description: |-
+                  Owner is the AEP user id of the workspace owner: the quota and RBAC
+                  subject every companion in this workspace acts on behalf of.
+                type: string
+              resources:
+                description: Resources bounds the workspace as a whole.
+                properties:
+                  disk:
+                    default: 2Gi
+                    description: |-
+                      Disk is the workspace volume size (files, sessions, per-companion
+                      SQLite). Default 2Gi.
+                    type: string
+                  memory:
+                    default: 512Mi
+                    description: Memory is the container memory limit. Default 512Mi.
+                    type: string
+                  vcpus:
+                    description: |-
+                      VCPUs is reserved for the microvm substrate (P1); the pod runtime
+                      ignores it.
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
+                type: object
+              runtime:
+                default: pod
+                description: |-
+                  Runtime selects the execution substrate. "pod" renders a plain
+                  Deployment; "microvm" is reserved for the Firecracker backend and is
+                  rejected until that lands.
+                enum:
+                - pod
+                - microvm
+                type: string
+              security:
+                description: |-
+                  Security declares the workspace's egress surface. Stored for the
+                  gateway/substrate; the operator does not render network policy in P0.
+                properties:
+                  egressAllow:
+                    description: |-
+                      EgressAllow lists the destination classes the workspace may reach
+                      (model-gateway, memory, registry). Stored for the substrate; the
+                      whitelist itself is rendered by the gateway/node agent, not P0.
+                    items:
+                      type: string
+                    maxItems: 10
+                    type: array
+                type: object
+            required:
+            - companions
+            - credentials
+            - owner
+            type: object
+          status:
+            description: PersonalWorkspaceStatus defines the observed state of a workspace.
+            properties:
+              gatewayEndpoint:
+                description: |-
+                  GatewayEndpoint is the in-cluster gateway service DNS name callers
+                  (portal chat proxy) route to.
+                type: string
+              memoryUsers:
+                description: |-
+                  MemoryUsers lists the OpenViking user ids provisioned for the
+                  companions (one per companion with memory enabled).
+                items:
+                  type: string
+                type: array
+              message:
+                description: Message carries the last error detail when Phase == Failed.
+                type: string
+              nodeName:
+                description: |-
+                  NodeName is the KVM host a microvm workspace is pinned to. Written
+                  once by the operator (sticky for the workspace's lifetime; cleared
+                  only manually per the runbook when a node is permanently lost).
+                  Single-writer: the operator owns this field; the workspace-agent
+                  never rewrites it.
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: PersonalWorkspacePhase describes the reconciliation phase.
+                enum:
+                - Pending
+                - Running
+                - Failed
+                - Terminating
+                type: string
+              vm:
+                description: |-
+                  VM carries the node agent's runtime report for a microvm workspace.
+                  Single-writer: the workspace-agent owns phase/gatewayEndpoint/vm on
+                  the microvm path (the operator stops reconciling availability once
+                  NodeName is assigned).
+                properties:
+                  configHash:
+                    description: |-
+                      ConfigHash is the checksum of the config disk contents (companions
+                      manifest + env) the running VM was booted with.
+                    type: string
+                  hostPort:
+                    description: |-
+                      HostPort is the node-local port the agent's proxy listens on; callers
+                      reach the gateway at http://<nodeIP>:<hostPort>.
+                    format: int32
+                    type: integer
+                type: object
+              vmSubnet:
+                description: |-
+                  VMSubnet is the /30 carved from the operator's microvm subnet pool
+                  for this workspace's guest network (tap host .1, guest .2). Written
+                  once together with NodeName.
                 type: string
             type: object
         type: object

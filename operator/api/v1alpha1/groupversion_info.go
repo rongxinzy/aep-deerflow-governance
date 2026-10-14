@@ -21,4 +21,5 @@ var (
 
 func init() {
 	SchemeBuilder.Register(&DigitalEmployee{}, &DigitalEmployeeList{})
+	SchemeBuilder.Register(&PersonalWorkspace{}, &PersonalWorkspaceList{})
 }

@@ -1,0 +1,111 @@
+{{- if .Values.workspaceAgent.enabled }}
+# P1 节点代理：在带 /dev/kvm 的节点上监督 PersonalWorkspace microVM。
+# 特权 + root：PoC 级隔离决策（无 jailer，2026-10-14 用户拍板）——需要节点
+# root 能力（tuntap、iptables、/dev/kvm、chroot 宿主命令），覆盖 ko 默认的
+# runAsUser 65532。加固轮（jailer）再收敛。
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pw-node-agent
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels:
+    app: pw-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: pw-node-agent
+  template:
+    metadata:
+      labels:
+        app: pw-node-agent
+    spec:
+      serviceAccountName: pw-node-agent
+      nodeSelector:
+        {{- range $k, $v := .Values.workspaceAgent.nodeSelector }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      {{- with .Values.workspaceAgent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      hostNetwork: true
+      initContainers:
+        # 模板物化：从 pw-rootfs 镜像拷 payload 到 hostPath 并按 SHA256SUMS
+        # 校验（agent 启动时会再验一次；这里提前失败让 DS 事件可见）。
+        - name: template-materialize
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.workspaceAgent.templateImage.repository "tag" .Values.workspaceAgent.templateImage.tag) }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DEST="{{ .Values.workspaceAgent.workdirRoot }}/templates/{{ .Values.workspaceAgent.templateImage.tag }}"
+              mkdir -p "$DEST"
+              cd /payload
+              sha256sum -c SHA256SUMS
+              for f in rootfs.ext4 vmlinux firecracker SHA256SUMS; do
+                if [ ! -f "$DEST/$f" ]; then cp "$f" "$DEST/$f"; fi
+              done
+              chmod 755 "$DEST/firecracker"
+          volumeMounts:
+            - name: workdir
+              mountPath: {{ .Values.workspaceAgent.workdirRoot }}
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: agent
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.workspaceAgent.image.repository "tag" .Values.workspaceAgent.image.tag) }}
+          args:
+            - --namespace={{ include "zhiyuan.ns" . }}
+            - --node-name=$(NODE_NAME)
+            - --host-ip=$(HOST_IP)
+            - --workdir={{ .Values.workspaceAgent.workdirRoot }}
+            - --template-tag={{ .Values.workspaceAgent.templateImage.tag }}
+            - --port-range={{ .Values.workspaceAgent.portRange }}
+            - --model-base-url={{ .Values.workspaceAgent.modelBaseURL }}
+            - --host-root=/host
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: workdir
+              mountPath: {{ .Values.workspaceAgent.workdirRoot }}
+            # 同一 hostPath 再挂一份到 /host 之下：chroot /host 执行的
+            # mkfs.ext4 需要可写视图（host-root 本体只读，嵌套挂载覆盖子路径）。
+            - name: workdir
+              mountPath: /host{{ .Values.workspaceAgent.workdirRoot }}
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: tun
+              mountPath: /dev/net/tun
+          resources:
+            {{- toYaml .Values.workspaceAgent.resources | nindent 12 }}
+      volumes:
+        - name: workdir
+          hostPath:
+            path: {{ .Values.workspaceAgent.workdirRoot }}
+            type: DirectoryOrCreate
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+{{- end }}

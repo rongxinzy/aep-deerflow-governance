@@ -24,6 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// maxManagedUploadFileNameBytes bounds the folder-upload path we forward. It is
+// deliberately looser than WeKnora's own budget (folder path 1024 + segment +
+// file name); the upstream normalizes and truncates, this only stops an
+// unbounded string from being buffered here.
+const maxManagedUploadFileNameBytes = 2048
+
 // The managed API is deliberately a fixed adapter, not a general-purpose
 // WeKnora proxy. Every route is admin-only and bound to the verified AEP
 // deployment plus an explicitly configured WeKnora tenant.
@@ -841,8 +847,29 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		p.managedWriteError(w, 400, "INVALID_UPLOAD", "上传请求无效或超过大小限制", "")
 		return
 	}
-	if len(r.MultipartForm.Value) != 0 || len(r.MultipartForm.File) != 1 || len(r.MultipartForm.File["file"]) != 1 {
-		p.managedWriteError(w, 400, "INVALID_UPLOAD", "仅允许一个 file 文件字段，不接受其他表单字段", "")
+	// Exactly one file part. The one extra form field we accept is fileName,
+	// which carries a folder upload's relative path ("docs/spec/design.md"):
+	// WeKnora owns that contract (types.SplitKnowledgeRelativePath +
+	// NormalizeKnowledgeFolderPath cap depth/length/segments), so the portal
+	// forwards the raw value rather than keeping a second, divergent path spec.
+	if len(r.MultipartForm.File) != 1 || len(r.MultipartForm.File["file"]) != 1 {
+		p.managedWriteError(w, 400, "INVALID_UPLOAD", "仅允许一个 file 文件字段，不接受其他文件字段", "")
+		return
+	}
+	fileName := ""
+	for name, values := range r.MultipartForm.Value {
+		if name != "fileName" || len(values) != 1 {
+			p.managedWriteError(w, 400, "INVALID_UPLOAD", "仅允许一个 file 文件字段与一个可选的 fileName 字段", "")
+			return
+		}
+		fileName = strings.TrimSpace(values[0])
+	}
+	if len(fileName) > maxManagedUploadFileNameBytes {
+		p.managedWriteError(w, 400, "INVALID_UPLOAD", "fileName 过长", "")
+		return
+	}
+	if strings.IndexFunc(fileName, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		p.managedWriteError(w, 400, "INVALID_UPLOAD", "fileName 含控制字符", "")
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -861,6 +888,12 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if _, err = io.Copy(part, file); err != nil {
 		p.managedWriteError(w, 400, "INVALID_UPLOAD", "读取上传文件失败", "")
 		return
+	}
+	if fileName != "" {
+		if err = mw.WriteField("fileName", fileName); err != nil {
+			p.managedWriteError(w, 400, "INVALID_UPLOAD", "上传请求无效", "")
+			return
+		}
 	}
 	_ = mw.Close()
 	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "upload_file", "document", "", id)
