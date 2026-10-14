@@ -123,13 +123,17 @@ func TestGrantReplaceRejectsUnknownSubjects(t *testing.T) {
 			h.handleKnowledgeBaseGrants(w, grantRequest(http.MethodPut, tc.body), ident)
 			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 			var payload struct {
-				Error   string   `json:"error"`
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
 				Unknown []string `json:"unknown_subjects"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
 			require.Equal(t, tc.unknown, payload.Unknown)
+			require.Equal(t, "KNOWLEDGE_GRANT_SUBJECT_UNKNOWN", payload.Error.Code)
 			for _, subject := range tc.unknown {
-				require.Contains(t, payload.Error, subject, "错误消息必须点名未知主体")
+				require.Contains(t, payload.Error.Message, subject, "错误消息必须点名未知主体")
 			}
 			require.ErrorContains(t, h.dbmock.ExpectationsWereMet(), "DELETE FROM knowledge_base_grants",
 				"未知主体必须在删除既有授权之前被拦下")
