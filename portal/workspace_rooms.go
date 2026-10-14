@@ -39,6 +39,16 @@ func (p *portal) ownerWorkspace(ctx context.Context, ident identity) (*dev1alpha
 // orchestrator (companion/rooms.mjs): list/create rooms, @-routed messages,
 // and the room SSE stream.
 func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident identity) {
+	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/rooms")
+}
+
+// handleWorkplace exposes shared files, tasks and the browser session from the
+// caller's own gateway. It never accepts a workspace owner from the browser.
+func (p *portal) handleWorkplace(w http.ResponseWriter, r *http.Request, ident identity) {
+	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/workplace")
+}
+
+func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Request, ident identity, gatewayRoot string) {
 	item, code, errMsg := p.ownerWorkspace(r.Context(), ident)
 	if code != 0 {
 		writeJSON(w, code, map[string]string{"error": errMsg})
@@ -54,7 +64,7 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 		return
 	}
 	rest := strings.TrimPrefix(r.PathValue("rest"), "/")
-	gatewayPath := "/api/rooms"
+	gatewayPath := gatewayRoot
 	if rest != "" {
 		gatewayPath += "/" + rest
 	}
@@ -67,9 +77,11 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 			// fallback would swallow /api/rooms/ (both sides tolerate it now,
 			// but keep the canonical form).
 			pr.Out.URL.Path = gatewayPath
+			pr.Out.URL.RawPath = ""
 			// Room owner scoping: the portal session identity is the source of
 			// truth — the gateway never sees the browser's cookies.
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
+			pr.Out.Header.Del(workspaceTokenHeader)
 			pr.Out.Header.Del("Authorization")
 			pr.Out.Header.Del("Cookie")
 			pr.Out.Header.Del("X-CSRF-Token")

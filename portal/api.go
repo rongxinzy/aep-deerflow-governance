@@ -60,6 +60,8 @@ func (p *portal) routes() http.Handler {
 	// workspaces/{name}/{companion}/chat wildcard tree.
 	mux.HandleFunc("/api/v1/rooms/{rest...}", p.auth(p.handleRooms))
 	mux.HandleFunc("/api/v1/rooms", p.auth(p.handleRooms))
+	mux.HandleFunc("/api/v1/workplace/{rest...}", p.auth(p.handleWorkplace))
+	mux.HandleFunc("/api/v1/workplace", p.auth(p.handleWorkplace))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never

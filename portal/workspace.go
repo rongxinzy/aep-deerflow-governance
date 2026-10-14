@@ -251,6 +251,10 @@ func (p *portal) deleteWorkspace(w http.ResponseWriter, r *http.Request, ident i
 }
 
 func summarizeWorkspace(item *dev1alpha1.PersonalWorkspace) map[string]any {
+	runtime := item.Spec.Runtime
+	if runtime == "" {
+		runtime = "pod" // CRD default, not a claim that a VM is provisioned.
+	}
 	companions := make([]map[string]any, 0, len(item.Spec.Companions))
 	for i := range item.Spec.Companions {
 		c := &item.Spec.Companions[i]
@@ -265,6 +269,8 @@ func summarizeWorkspace(item *dev1alpha1.PersonalWorkspace) map[string]any {
 		"owner":      item.Spec.Owner,
 		"phase":      string(item.Status.Phase),
 		"companions": companions,
+		"runtime":    runtime,
+		"resources":  item.Spec.Resources,
 	}
 	if item.Status.GatewayEndpoint != "" {
 		out["gatewayEndpoint"] = item.Status.GatewayEndpoint
