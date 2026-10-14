@@ -74,6 +74,106 @@ func TestManagedKnowledgeFileUploadUsesOnlyFileAndAuditsDocumentID(t *testing.T)
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 
+func TestManagedKnowledgeUploadForwardsFolderRelativePath(t *testing.T) {
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	configureManagedTest(t, h, "10000")
+	var (
+		gotFileName string
+		gotBody     string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		case "/api/v1/knowledge-bases/kb-1":
+			_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+		case "/api/v1/knowledge-bases/kb-1/knowledge/file":
+			if err := r.ParseMultipartForm(4 << 20); err != nil {
+				t.Errorf("multipart parse: %v", err)
+			}
+			gotFileName = r.FormValue("fileName")
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Errorf("file field: %v", err)
+				return
+			}
+			defer func() { _ = file.Close() }()
+			data, _ := io.ReadAll(file)
+			gotBody = string(data)
+			_, _ = w.Write([]byte(`{"data":{"id":"doc-2","tenant_id":10000,"knowledge_base_id":"kb-1","file_name":"day-one.md","parse_status":"pending"}}`))
+		default:
+			t.Errorf("unexpected upstream request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h.cfg.knowledgeAPIURL = server.URL
+	h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+	h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "upload_file", "document", "", "kb-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "doc-2", "accepted", 202).WillReturnResult(sqlmock.NewResult(0, 1))
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", "day-one.md")
+	require.NoError(t, err)
+	_, _ = part.Write([]byte("folder upload body"))
+	require.NoError(t, form.WriteField("fileName", "handbook/onboarding/day-one.md"))
+	require.NoError(t, form.Close())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/managed/bases/kb-1/documents/file", &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req.SetPathValue("baseID", "kb-1")
+	w := httptest.NewRecorder()
+	h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+	assert.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	// Forwarded verbatim: WeKnora owns the folder-path normalization rules.
+	assert.Equal(t, "handbook/onboarding/day-one.md", gotFileName)
+	assert.Equal(t, "folder upload body", gotBody)
+	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+func TestManagedKnowledgeUploadRejectsInvalidFileNameField(t *testing.T) {
+	for name, value := range map[string]string{
+		"control-character": "handbook/bad\nname.md",
+		"oversize":          strings.Repeat("a", maxManagedUploadFileNameBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newServicesStubs(t)
+			h := newServicesHarness(t, stub)
+			configureManagedTest(t, h, "10000")
+			var uploadCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/auth/me":
+					_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+				case "/api/v1/knowledge-bases/kb-1":
+					_, _ = w.Write([]byte(`{"data":{"id":"kb-1","name":"Docs","tenant_id":10000}}`))
+				case "/api/v1/knowledge-bases/kb-1/knowledge/file":
+					uploadCalls++
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			h.cfg.knowledgeAPIURL = server.URL
+			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			part, err := form.CreateFormFile("file", "a.txt")
+			require.NoError(t, err)
+			_, _ = part.Write([]byte("body"))
+			require.NoError(t, form.WriteField("fileName", value))
+			require.NoError(t, form.Close())
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/knowledge/managed/bases/kb-1/documents/file", &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			req.SetPathValue("baseID", "kb-1")
+			w := httptest.NewRecorder()
+			h.handleManagedKnowledgeUpload(w, req, identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			assert.Zero(t, uploadCalls)
+			assert.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestManagedKnowledgeUploadRejectsExtraMultipartFieldsAndOversizeBodies(t *testing.T) {
 	for _, oversized := range []bool{false, true} {
 		name := "extra-field"
