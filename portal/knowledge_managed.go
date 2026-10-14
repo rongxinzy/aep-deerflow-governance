@@ -441,13 +441,15 @@ func (p *portal) handleManagedKnowledgeReadiness(w http.ResponseWriter, r *http.
 		}
 	}
 	modelState := "not_configured"
+	modelName := ""
 	if p.cfg.managedKnowledge.embeddingModelID != "" {
 		modelState = "unavailable"
 		if selected != nil {
 			modelState = "configured"
+			modelName = selected.Name
 		}
 	}
-	writeJSON(w, 200, map[string]any{"deploymentId": ident.DeploymentID, "tenantId": tenant, "tenant": "verified", "embeddingModel": map[string]any{"state": modelState, "id": p.cfg.managedKnowledge.embeddingModelID, "availability": "unverified"}, "storage": "unverified", "parser": "unverified"})
+	writeJSON(w, 200, map[string]any{"deploymentId": ident.DeploymentID, "tenantId": tenant, "tenant": "verified", "embeddingModel": map[string]any{"state": modelState, "id": p.cfg.managedKnowledge.embeddingModelID, "name": modelName, "availability": "unverified"}, "storage": "unverified", "parser": "unverified"})
 }
 
 func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Request, ident identity) {

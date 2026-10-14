@@ -469,11 +469,12 @@ func TestManagedKnowledgeReadinessReportsConfiguredAndUnverifiedModelStates(t *t
 		modelID    string
 		modelsJSON string
 		wantState  string
+		wantName   string
 	}{
 		{name: "not configured", modelsJSON: `[]`, wantState: "not_configured"},
 		{name: "configured model absent", modelID: "emb-1", modelsJSON: `[]`, wantState: "unavailable"},
 		{name: "configured model wrong type", modelID: "emb-1", modelsJSON: `[ {"id":"emb-1","type":"chat"} ]`, wantState: "unavailable"},
-		{name: "configured embedding", modelID: "emb-1", modelsJSON: `[ {"id":"emb-1","type":"Embedding","parameters":{"embedding_parameters":{"dimension":768}},"provider_secret":"do-not-return"} ]`, wantState: "configured"},
+		{name: "configured embedding", modelID: "emb-1", modelsJSON: `[ {"id":"emb-1","name":"bge-small-zh-v1.5","type":"Embedding","parameters":{"embedding_parameters":{"dimension":768}},"provider_secret":"do-not-return"} ]`, wantState: "configured", wantName: "bge-small-zh-v1.5"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -501,6 +502,7 @@ func TestManagedKnowledgeReadinessReportsConfiguredAndUnverifiedModelStates(t *t
 			var response struct {
 				EmbeddingModel struct {
 					State        string `json:"state"`
+					Name         string `json:"name"`
 					Availability string `json:"availability"`
 				} `json:"embeddingModel"`
 				Storage string `json:"storage"`
@@ -508,6 +510,7 @@ func TestManagedKnowledgeReadinessReportsConfiguredAndUnverifiedModelStates(t *t
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
 			assert.Equal(t, tt.wantState, response.EmbeddingModel.State)
+			assert.Equal(t, tt.wantName, response.EmbeddingModel.Name)
 			assert.Equal(t, "unverified", response.EmbeddingModel.Availability)
 			assert.Equal(t, "unverified", response.Storage)
 			assert.Equal(t, "unverified", response.Parser)
