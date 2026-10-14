@@ -171,7 +171,11 @@ class AepGovernanceMiddleware(AgentMiddleware):
         scope_cache_seconds: int = 60,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        # langchain 1.x AgentMiddleware has no __init__ of its own (MRO ends
+        # at object): forwarding unknown factory kwargs to super() raised
+        # "object.__init__() takes exactly one argument" and took the whole
+        # agent factory down. Unknown kwargs are tolerated here instead.
+        super().__init__()
         self.client = _AepClient(aep_base_url, deployment_id, service_username, service_password)
         self.default_aep_user = default_aep_user
         self.user_map = user_map or {}
