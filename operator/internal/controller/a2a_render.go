@@ -35,7 +35,13 @@ func renderA2ADeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment 
 		EnvFrom: []corev1.EnvFromSource{{
 			SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: memkeySecretName(employee)}},
 		}},
-		Env: environment,
+		Env: append(environment,
+			// Persistent task ledger: survives container restarts within the
+			// pod's life (crash loops); a pod rebuild loses history but the
+			// fail-closed orphan recovery keeps semantics honest either way.
+			corev1.EnvVar{Name: "A2A_TASK_STORE", Value: "/data/a2a-tasks.sqlite"},
+		),
+		VolumeMounts: []corev1.VolumeMount{{Name: "a2a-tasks", MountPath: "/data"}},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstrFromInt(8102)}},
 			InitialDelaySeconds: 3,
@@ -54,7 +60,17 @@ func renderA2ADeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment 
 			Selector: &metav1.LabelSelector{MatchLabels: a2aLabels(employee)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: a2aLabels(employee)},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{container}},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{container},
+					Volumes: []corev1.Volume{{
+						Name: "a2a-tasks",
+						// Ephemeral by design: keeps the ledger across container
+						// restarts (crash loops) within a pod's life; a pod
+						// rebuild loses history — the adapter's fail-closed
+						// orphan recovery keeps task semantics honest either way.
+						VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+					}},
+				},
 			},
 		},
 	}
