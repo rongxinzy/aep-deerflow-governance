@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +37,10 @@ func TestLegacyKnowledgeProxyIsGoneForManagedTenant(t *testing.T) {
 	h.routes().ServeHTTP(response, request)
 
 	require.Equal(t, http.StatusGone, response.Code, response.Body.String())
-	require.Contains(t, response.Body.String(), "managed knowledge API")
+	var gone managedError
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &gone))
+	require.Equal(t, "KNOWLEDGE_LEGACY_PROXY_DISABLED", gone.Error.Code)
+	require.Equal(t, "旧版知识库代理已停用，请改用托管知识库接口", gone.Error.Message)
 	require.Zero(t, upstreamCalls, "legacy proxy must not authenticate or forward requests for a managed tenant")
 	require.NoError(t, h.dbmock.ExpectationsWereMet())
 }

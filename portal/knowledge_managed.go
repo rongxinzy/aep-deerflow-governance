@@ -139,6 +139,10 @@ type managedSpan struct {
 	Children     []managedSpan `json:"children,omitempty"`
 }
 
+// managedError is the machine-readable knowledge error envelope
+// ({error:{code,message}}). Every knowledge route — managed, retrieval,
+// runtime authorization and the legacy proxy — returns it so the admin console
+// branches on code instead of echoing an upstream English sentence.
 type managedError struct {
 	Error struct {
 		Code        string `json:"code"`
@@ -215,6 +219,9 @@ func (p *portal) managedReadyIdentity(ident identity) bool {
 	return ident.DeploymentID != "" && ident.DeploymentID == p.cfg.aepDeploymentID
 }
 
+// managedWriteError writes the shared knowledge error envelope with an
+// uppercase machine-readable code and an administrator-facing Chinese message.
+// op carries the audit operation id only when the outcome is uncertain.
 func (p *portal) managedWriteError(w http.ResponseWriter, status int, code, message, op string) {
 	body := managedError{}
 	body.Error.Code, body.Error.Message, body.Error.OperationID = code, message, op
@@ -312,6 +319,21 @@ func decodeManagedData(resp *http.Response, out any) error {
 		return errors.New("upstream data missing")
 	}
 	return json.Unmarshal(envelope.Data, out)
+}
+
+// managedUpstreamErrorCode extracts the machine-readable code from a WeKnora
+// rejection body ({"code":"duplicate_file","data":{...}}) so a deterministic
+// upstream decision can be mapped to a specific portal code. It consumes and
+// closes resp.Body; only call it once the payload is known not to be needed.
+func managedUpstreamErrorCode(resp *http.Response) string {
+	defer func() { _ = resp.Body.Close() }()
+	var envelope struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&envelope); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.Trim(strings.TrimSpace(string(envelope.Code)), `"`))
 }
 
 func (p *portal) managedRegistered(ctx context.Context, deployment, tenant, id string) (managedKB, bool, error) {
@@ -870,6 +892,30 @@ func (p *portal) handleManagedKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		_ = p.finishManagedAudit(r.Context(), op, "", "uncertain", 502)
 		p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传结果不确定，请使用操作编号核对", op)
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A rejected upload is a deterministic decision (duplicate content,
+		// unsupported type, size limit). Folding it into the "uncertain" 502
+		// would make the console lock every subsequent write.
+		status, upstreamCode := resp.StatusCode, managedUpstreamErrorCode(resp)
+		outcome := "uncertain"
+		if status >= 400 && status < 500 {
+			outcome = "failed"
+		}
+		_ = p.finishManagedAudit(r.Context(), op, "", outcome, status)
+		switch {
+		case status == http.StatusConflict && upstreamCode == "duplicate_file":
+			p.managedWriteError(w, http.StatusConflict, "KNOWLEDGE_DUPLICATE_FILE", "该知识库已存在内容相同的文件", op)
+		case status == http.StatusConflict:
+			p.managedWriteError(w, http.StatusConflict, "KNOWLEDGE_CONFLICT", "知识库服务以状态冲突拒绝了该文件", op)
+		case status == http.StatusRequestEntityTooLarge:
+			p.managedWriteError(w, http.StatusRequestEntityTooLarge, "KNOWLEDGE_INPUT_TOO_LARGE", "文件超过上游大小限制", op)
+		case status == http.StatusBadRequest || status == http.StatusUnsupportedMediaType || status == http.StatusUnprocessableEntity:
+			p.managedWriteError(w, http.StatusUnprocessableEntity, "KNOWLEDGE_UPSTREAM_REJECTED", "上游拒绝了该文件的格式或类型", op)
+		default:
+			p.managedWriteError(w, 502, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "文件上传被上游拒绝，请使用操作编号核对", op)
+		}
 		return
 	}
 	var result managedKnowledge
