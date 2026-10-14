@@ -192,6 +192,16 @@ func (p *portal) ownerWorkspace(ctx context.Context, ident identity) (*dev1alpha
 // orchestrator (companion/rooms.mjs): list/create rooms, @-routed messages,
 // and the room SSE stream.
 func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident identity) {
+	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/rooms")
+}
+
+// handleWorkplace exposes shared files and available environment capabilities from the
+// caller's own gateway. It never accepts a workspace owner from the browser.
+func (p *portal) handleWorkplace(w http.ResponseWriter, r *http.Request, ident identity) {
+	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/workplace")
+}
+
+func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Request, ident identity, gatewayRoot string) {
 	item, code, errMsg := p.ownerWorkspace(r.Context(), ident)
 	if code != 0 {
 		writeJSON(w, code, map[string]string{"error": errMsg})
@@ -207,12 +217,22 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 		return
 	}
 	rest := strings.TrimPrefix(r.PathValue("rest"), "/")
-	// Roster authorization before any dispatch (see the gate block above).
-	if code, errMsg := p.authorizeRoomRequest(w, r, target, rest, ident); code != 0 {
-		writeJSON(w, code, map[string]string{"error": errMsg})
-		return
+	// PathValue is already URL-decoded. Reject traversal before the Node
+	// gateway normalizes dot segments into a different, separately authorized API.
+	for _, segment := range strings.Split(strings.ReplaceAll(rest, "\\", "/"), "/") {
+		if segment == "." || segment == ".." {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid gateway path"})
+			return
+		}
 	}
-	gatewayPath := "/api/rooms"
+	// Room roster authorization applies only to room dispatches.
+	if gatewayRoot == "/api/rooms" {
+		if code, errMsg := p.authorizeRoomRequest(w, r, target, rest, ident); code != 0 {
+			writeJSON(w, code, map[string]string{"error": errMsg})
+			return
+		}
+	}
+	gatewayPath := gatewayRoot
 	if rest != "" {
 		gatewayPath += "/" + rest
 	}
@@ -225,12 +245,14 @@ func (p *portal) handleRooms(w http.ResponseWriter, r *http.Request, ident ident
 			// fallback would swallow /api/rooms/ (both sides tolerate it now,
 			// but keep the canonical form).
 			pr.Out.URL.Path = gatewayPath
+			pr.Out.URL.RawPath = ""
 			// Room owner scoping: the portal session identity is the source of
 			// truth — the gateway never sees the browser's cookies, and any
 			// caller-supplied owner header (the gateway also honors
 			// X-BotUI-User) is dropped before the stamp below.
 			pr.Out.Header.Del("X-BotUI-User")
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
+			pr.Out.Header.Del(workspaceTokenHeader)
 			pr.Out.Header.Del("Authorization")
 			pr.Out.Header.Del("Cookie")
 			pr.Out.Header.Del("X-CSRF-Token")

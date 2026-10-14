@@ -38,3 +38,31 @@ operator 之外唯一的 DigitalEmployee CR 写入口。终端用户持 AEP toke
 - **教训**：operator 的 typed 客户端读 CR 时丢弃其结构体没有的字段，任何
   `r.Update(整对象)`（如加 finalizer）都会把未知字段擦掉——CRD 加字段后
   **operator 必须同版本升级**（0.3.0 起 spec.owner 安全）。
+
+## 个人工作现场代理
+
+`/api/v1/workplace` 与 `/api/v1/workplace/{rest...}` 由登录身份解析本人的
+PersonalWorkspace，映射到该工作区 gateway 的 `/api/workplace` 同名路径。
+与群聊相同，管理员也不能通过此个人入口读取他人的工作现场；工作区必须为
+`Running`。请求经过现有 session/CSRF 中间件，浏览器 Cookie、Authorization、
+CSRF 和自行传入的内部 token 不会送到 gateway，owner header 由 portal 重写。
+
+当前 runtime 契约包括：
+
+- `GET /api/v1/workplace`：实际可用的共享环境和能力；没有桌面服务时返回不可用。
+- `GET /api/v1/workplace/files?path=...`：共享文件目录。
+- `GET /api/v1/workplace/files/content?path=...&download=1`：实际文件内容下载。
+
+代理保留查询参数、响应 Content-Type/Content-Disposition 和流式响应。
+每搭档的 `/api/tasks`、`/api/artifacts`（含内容下载）继续通过现有
+`/api/v1/workspaces/{workspace}/{companion}/chat/api/...`，不共享搭档私有数据库。
+此代理需要配套 pi-durable-bench gateway 的 `/api/workplace` 实现；旧 runtime
+没有该接口时按上游失败返回，不生成模拟云电脑、文件或任务。
+
+工作区列表/详情增加 `runtime` 和 `resources`，来源分别是 CR spec 的运行底座
+和配置资源额度，并非实时利用率。未填写 runtime 时按 CRD 默认 `pod` 展示；
+新建工作区仍使用既有 pod 默认，未改变集群配置或自动迁移到 Firecracker。
+
+本地验证无需集群：`cd portal && go test ./...`。工作现场测试使用真实 HTTP
+代理、假 AEP 登录及内存 Kubernetes client，覆盖 owner 范围、Running 门槛、
+CSRF、文件下载头、请求头清理和流式内容；不代表已完成真实 FC 部署验收。
