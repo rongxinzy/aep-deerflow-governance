@@ -163,11 +163,11 @@ func (p *portal) auth(next func(http.ResponseWriter, *http.Request, identity)) h
 	return func(w http.ResponseWriter, r *http.Request) {
 		ident, status, ok := p.authenticate(r)
 		if !ok {
-			message := "missing bearer token or session"
+			code, message := "AUTH_REQUIRED", "缺少访问令牌或登录会话，请重新登录"
 			if status == http.StatusForbidden {
-				message = "csrf token missing or mismatched"
+				code, message = "CSRF_INVALID", "CSRF 令牌缺失或不匹配，请刷新页面后重试"
 			}
-			writeJSON(w, status, map[string]string{"error": message})
+			p.managedWriteError(w, status, code, message, "")
 			return
 		}
 		next(w, r, ident)
@@ -177,7 +177,7 @@ func (p *portal) auth(next func(http.ResponseWriter, *http.Request, identity)) h
 func (p *portal) adminOnly(next func(http.ResponseWriter, *http.Request, identity)) func(http.ResponseWriter, *http.Request, identity) {
 	return func(w http.ResponseWriter, r *http.Request, ident identity) {
 		if !ident.isAdmin(p.cfg) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator role required"})
+			p.managedWriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限", "")
 			return
 		}
 		next(w, r, ident)

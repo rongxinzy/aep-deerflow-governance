@@ -198,16 +198,16 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 	if employee.Spec.Knowledge != nil {
 		cookie, err := r.Cookie(portalSessionCookie)
 		if err != nil || cookie.Value == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "portal session required for knowledge access"})
+			p.managedWriteError(w, http.StatusUnauthorized, "KNOWLEDGE_SESSION_UNAVAILABLE", "访问知识库需要登录门户会话", "")
 			return
 		}
 		knowledgeContext, err = p.issueKnowledgeRuntimeContext(r.Context(), cookie.Value, name)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "knowledge context unavailable"})
+			p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "知识库运行上下文暂不可用", "")
 			return
 		}
 		if err := injectKnowledgeRunContext(r, rest, knowledgeContext, name); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "knowledge run context unavailable"})
+			p.managedWriteError(w, http.StatusBadRequest, "KNOWLEDGE_CONTEXT_UNAVAILABLE", "无法注入知识库运行上下文", "")
 			return
 		}
 	}

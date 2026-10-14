@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -370,8 +371,57 @@ func TestEmployeeKnowledgeSourceImageAndDownloadDenyForeignDeploymentKB(t *testi
 				p.handleEmployeeKnowledgeDocumentDownload(w, r, ident)
 			}
 			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			// The denial must stay machine-readable and Chinese-facing: no raw
+			// English upstream sentence may reach the admin console.
+			assert.Contains(t, w.Body.String(), `"code":"KNOWLEDGE_NOT_GRANTED"`)
+			assert.NotContains(t, w.Body.String(), "knowledge access denied")
 			require.Equal(t, []string{"/api/v1/auth/me", "/api/v1/knowledge/doc-foreign"}, upstreamCalls)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+// A KB the employee CR does not bind is the common production denial: the
+// administrator must be told the employee is not bound to this KB instead of
+// seeing the upstream "knowledge access denied" sentence.
+func TestEmployeeKnowledgeSearchRejectsUnboundKnowledgeBaseWithMachineReadableCode(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		default:
+			t.Errorf("an unbound knowledge base must not reach upstream: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	p, mock := newKnowledgeAccessPortalFixture(t,
+		knowledgeAccessEmployee([]dev1alpha1.KnowledgeBaseRef{{ID: "kb-bound"}}, &dev1alpha1.VisibilitySpec{Mode: "all"}),
+		knowledgeAEPResponse(nil))
+	p.cfg.aepDeploymentID = "dep-1"
+	p.cfg.managedKnowledge.tenantID = "10000"
+	p.cfg.managedKnowledge.apiKeySecretField = "WEKNORA_KNOWLEDGE_API_KEY"
+	p.cfg.credentialsSecret = "de-platform-creds"
+	p.cfg.knowledgeAPIURL = upstream.URL
+	require.NoError(t, p.k8s.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "knowledge-test", Name: "de-platform-creds"},
+		Data:       map[string][]byte{"WEKNORA_KNOWLEDGE_API_KEY": []byte("server-only-test-key")},
+	}))
+	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM sessions WHERE token=\$1 AND expires_at > now\(\)\)`).
+		WithArgs("session-token").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"query":"question","knowledge_base_ids":["kb-unbound"],"mode":"hybrid","limit":5}`))
+	req.SetPathValue("name", "employee-1")
+	req.AddCookie(&http.Cookie{Name: portalSessionCookie, Value: "session-token"})
+	response := httptest.NewRecorder()
+	p.handleEmployeeKnowledgeSearch(response, req, identity{Token: "stored-aep-token", UserID: "user-1", DeploymentID: "dep-1"})
+
+	require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	var denied managedError
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &denied))
+	assert.Equal(t, "KNOWLEDGE_NOT_GRANTED", denied.Error.Code)
+	assert.Equal(t, "该数字员工没有绑定所请求的知识库", denied.Error.Message)
+	assert.NotContains(t, response.Body.String(), "knowledge access denied")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -32,38 +32,36 @@ func refuseKnowledgeRedirect(_ *http.Request, _ []*http.Request) error {
 // Routes: /api/v1/knowledge/{path...} → WeKnora /api/v1/{path...}
 func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, ident identity) {
 	if p.cfg.managedKnowledge.tenantID != "" {
-		writeJSON(w, http.StatusGone, map[string]string{
-			"error": "legacy knowledge proxy is disabled; use the managed knowledge API",
-		})
+		p.managedWriteError(w, http.StatusGone, "KNOWLEDGE_LEGACY_PROXY_DISABLED", "旧版知识库代理已停用，请改用托管知识库接口", "")
 		return
 	}
 	if !ident.isAdmin(p.cfg) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		p.managedWriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限", "")
 		return
 	}
 	rest := r.PathValue("rest")
 	if rest == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path required"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少知识库接口路径", "")
 		return
 	}
 
 	// Authenticate to WeKnora
 	user, pass := p.weknoraAdminCreds(r.Context())
 	if user == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "weknora not configured"})
+		p.managedWriteError(w, http.StatusServiceUnavailable, "KNOWLEDGE_NOT_CONFIGURED", "知识库服务尚未配置管理员凭据", "")
 		return
 	}
 	loginBody, _ := json.Marshal(map[string]string{"email": user, "password": pass})
 	loginReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		strings.TrimRight(p.cfg.knowledgeAPIURL, "/")+"/api/v1/auth/login", bytes.NewReader(loginBody))
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "knowledge service authentication unavailable"})
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务认证暂不可用", "")
 		return
 	}
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginResp, err := knowledgeAuthClient.Do(loginReq)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "knowledge service authentication unavailable"})
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务认证暂不可用", "")
 		return
 	}
 	defer func() { _ = loginResp.Body.Close() }()
@@ -72,7 +70,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 	}
 	if loginResp.StatusCode < http.StatusOK || loginResp.StatusCode >= http.StatusMultipleChoices ||
 		json.NewDecoder(loginResp.Body).Decode(&login) != nil || login.Token == "" {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "weknora auth failed"})
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_REJECTED", "知识库服务拒绝了管理员凭据", "")
 		return
 	}
 
@@ -83,7 +81,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 	}
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid knowledge request"})
+		p.managedWriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "知识库请求无效", "")
 		return
 	}
 	proxyReq.Header.Set("Authorization", "Bearer "+login.Token)
@@ -94,20 +92,20 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 
 	resp, err := knowledgeTransferClient.Do(proxyReq)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "knowledge service request failed"})
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务请求失败", "")
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "knowledge service redirect refused"})
+		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库服务返回了不受信任的重定向", "")
 		return
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		message := "knowledge service request rejected"
+		code, message := "KNOWLEDGE_UPSTREAM_REJECTED", "知识库服务拒绝了请求"
 		if resp.StatusCode >= http.StatusInternalServerError {
-			message = "knowledge service failed"
+			code, message = "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务调用失败"
 		}
-		writeJSON(w, resp.StatusCode, map[string]string{"error": message})
+		p.managedWriteError(w, resp.StatusCode, code, message, "")
 		return
 	}
 
@@ -128,7 +126,7 @@ func (p *portal) handleKnowledgeProxy(w http.ResponseWriter, r *http.Request, id
 // with document counts, going beyond the simple health check.
 func (p *portal) handleKnowledgeListBases(w http.ResponseWriter, r *http.Request, ident identity) {
 	if !ident.isAdmin(p.cfg) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		p.managedWriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限", "")
 		return
 	}
 	user, pass := p.weknoraAdminCreds(r.Context())
