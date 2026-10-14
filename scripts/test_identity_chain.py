@@ -3,9 +3,10 @@
 Run:  python3 scripts/test_identity_chain.py
 
 Stubs langchain + deerflow, then exercises resolve_aep_user:
-  default fallback -> valid-AEP-id passthrough (web chat path) ->
-  positive cache -> invalid id falls back -> user_map priority ->
-  IM fail-closed without identity source.
+  no requester -> fail closed (no default fallback) -> valid-AEP-id passthrough
+  (web chat path) -> positive cache -> unknown id fails closed -> user_map
+  priority -> IM fail closed without identity source -> resolved requester is
+  published on the run context for downstream (memory) consumers.
 """
 
 import os
@@ -27,6 +28,11 @@ for name, attrs in {
     "deerflow": {},
     "deerflow.runtime": {},
     "deerflow.runtime.user_context": {},
+    "deerflow.agents": {},
+    "deerflow.agents.middlewares": {},
+    "deerflow.agents.middlewares.dynamic_context_middleware": {
+        "DynamicContextMiddleware": type("DynamicContextMiddleware", (), {}),
+    },
 }.items():
     m = types.ModuleType(name)
     for k, v in attrs.items():
@@ -34,7 +40,9 @@ for name, attrs in {
     sys.modules[name] = m
 
 _holder = {"user": None}
+_requester_published: list = []
 sys.modules["deerflow.runtime.user_context"].get_current_user = lambda: _holder["user"]
+sys.modules["deerflow.runtime.user_context"].set_requester_id = _requester_published.append
 
 from aep_deerflow_governance import AepGovernanceMiddleware  # noqa: E402
 
@@ -59,7 +67,8 @@ class User:
 
 
 class RuntimeCtx:
-    context = {"channel_user_id": "wx_123"}
+    def __init__(self, **context):
+        self.context = dict(context)
 
 
 def make_mw() -> AepGovernanceMiddleware:
@@ -79,7 +88,7 @@ def main() -> None:
     mw = make_mw()
 
     _holder["user"] = None
-    assert mw.resolve_aep_user(None) == "default-uid", "default fallback"
+    assert mw.resolve_aep_user(None) is None, "no requester -> fail closed (no default fallback)"
 
     _holder["user"] = User("aep-real")
     assert mw.resolve_aep_user(None) == "aep-real", "valid aep id passthrough"
@@ -89,14 +98,40 @@ def main() -> None:
     assert mw.client.calls.count("aep-real") == 1, "positive cache hit"
 
     _holder["user"] = User("ghost")
-    assert mw.resolve_aep_user(None) == "default-uid", "invalid falls to default"
+    assert mw.resolve_aep_user(None) is None, "unknown user -> fail closed (no default fallback)"
 
     mw.user_map = {"local-7": "aep-real"}
     _holder["user"] = User("local-7")
     assert mw.resolve_aep_user(None) == "aep-real", "user_map priority"
     assert mw.client.calls.count("aep-real") == 1, "user_map needs no api call"
 
-    assert mw.resolve_aep_user(RuntimeCtx()) is None, "IM fail closed without identity source"
+    assert mw.resolve_aep_user(RuntimeCtx(channel_user_id="wx_123")) is None, "IM fail closed without identity source"
+
+    # The resolved requester is published on the run context for downstream
+    # consumers (memory); "unresolved" is published too, not silently dropped.
+    _holder["user"] = User("aep-real")
+    rt = RuntimeCtx()
+    assert mw.resolve_aep_user(rt) == "aep-real"
+    assert rt.context.get("requester_id") == "aep-real", "resolved requester published"
+
+    _holder["user"] = None
+    rt2 = RuntimeCtx()
+    assert mw.resolve_aep_user(rt2) is None
+    assert rt2.context.get("requester_id") is None, "unresolved requester published as None"
+    assert _requester_published[-1] is None, "unresolved requester published on the contextvar too"
+
+    # before_agent must resolve + publish (memory's first recall runs in another
+    # middleware's before_agent, i.e. earlier than the model call).
+    _holder["user"] = User("aep-real")
+    rt3 = RuntimeCtx()
+    assert mw.before_agent({}, rt3) is None, "before_agent resolves without mutating state"
+    assert rt3.context.get("requester_id") == "aep-real", "before_agent published the requester"
+
+    # Ordering: governance runs before the middleware that performs the first
+    # memory recall, so the requester exists by then.
+    anchor = getattr(AepGovernanceMiddleware, "_prev_anchor", None)
+    assert anchor is not None, "governance declares a before-anchor"
+    assert getattr(anchor, "__name__", "") == "DynamicContextMiddleware", f"before DynamicContextMiddleware, got {anchor}"
 
     print("ALL-IDENTITY-CHAIN-TESTS-PASS")
 
