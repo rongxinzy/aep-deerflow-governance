@@ -78,6 +78,10 @@ spec:
           volumeMounts:
             - name: workdir
               mountPath: {{ .Values.workspaceAgent.workdirRoot }}
+            # 同一 hostPath 再挂一份到 /host 之下：chroot /host 执行的
+            # mkfs.ext4 需要可写视图（host-root 本体只读，嵌套挂载覆盖子路径）。
+            - name: workdir
+              mountPath: /host{{ .Values.workspaceAgent.workdirRoot }}
             - name: host-root
               mountPath: /host
               readOnly: true

@@ -169,9 +169,13 @@ func (f *Firecracker) Stop(grace time.Duration) error {
 	return nil
 }
 
-// Alive reports process liveness.
+// Alive reports process liveness. pid 0 (no pid file / unknown process)
+// is NOT alive: syscall.Kill(0, 0) targets the caller's process group and
+// succeeds unconditionally — the classic footgun that made the agent treat
+// every stopped VM as alive and skip booting forever.
 func (f *Firecracker) Alive() bool {
-	return syscall.Kill(f.PID(), 0) == nil
+	pid := f.PID()
+	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
 // PID reads the recorded pid (0 when absent or dead-unknown).

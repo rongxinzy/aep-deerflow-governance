@@ -35,11 +35,22 @@ type DiskIO interface {
 // populate without loop mounts).
 type Images struct {
 	Run hostcmd.Runner
+	// StagingRoot holds config-disk staging trees. It MUST live under the
+	// shared workdir (not /tmp): mkfs runs chrooted into the host view,
+	// where the container's /tmp does not exist.
+	StagingRoot string
 }
 
 // stagingDir builds the payload directory tree then lets mkfs -d copy it.
 func (m *Images) stageConfig(ctx context.Context, payload *render.ConfigPayload) (string, func(), error) {
-	staging, err := os.MkdirTemp("", "pw-cfg-")
+	root := m.StagingRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", nil, err
+	}
+	staging, err := os.MkdirTemp(root, "pw-cfg-")
 	if err != nil {
 		return "", nil, err
 	}

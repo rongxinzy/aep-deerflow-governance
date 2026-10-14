@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -90,7 +91,10 @@ func main() {
 
 	m := manager.New(cfg, c,
 		hostcmd.NewChrootRunner(*hostRoot),
-		&disk.Images{Run: hostcmd.NewChrootRunner(*hostRoot)},
+		&disk.Images{
+			Run:         hostcmd.NewChrootRunner(*hostRoot),
+			StagingRoot: filepath.Join(cfg.Workdir, "cfg-staging"),
+		},
 		func(runDir string) vm.Driver { return vm.NewFirecracker(runDir) },
 	)
 
