@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # im-mock-smoke.sh — protocol-level smoke for an IM channel leg.
 #
-# Runs the picoclaw mockfeishu double (a real Lark websocket + REST double)
+# Runs the mockfeishu double (a real Lark websocket + REST double)
 # and probes the deployed runtime's Feishu leg: wait for the runtime's ws
 # client to attach, push one inbound message, then dump what the channel
 # sent back (reaction / thinking card / final card).
@@ -12,9 +12,9 @@
 # Do not run it against a host whose dev stack already uses those ports.
 # Exits non-zero when the leg never attaches or sends fewer than 3 frames.
 #
-# The mock is built from rongxinzy/picoclaw:
-#   GOOS=linux GOARCH=amd64 go build -tags 'goolm,stdjson' \
-#     -o D:/tmp/mockfeishu ./tests/aep-e2e/mockfeishu
+# The mock is built from this repo:
+#   cd tests/e2e-mocks && GOOS=linux GOARCH=amd64 go build -tags 'goolm,stdjson' \
+#     -o /tmp/mockfeishu ./mockfeishu
 #
 # Env:
 #   MOCK_FEISHU_BIN   path to the mockfeishu binary (default /tmp/mockfeishu)

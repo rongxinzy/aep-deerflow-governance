@@ -114,7 +114,7 @@ DEER_FLOW_CONFIG_PATH=<cfg> DEER_FLOW_AUTH_DISABLED=1 PYTHONPATH=<治理包目�
 
 ## 5. mock 平台与验收
 
-- mockfeishu：`picoclaw/tests/aep-e2e/mockfeishu`（`go build -tags 'goolm,stdjson'`）。
+- mockfeishu：`tests/e2e-mocks/mockfeishu`（本仓，`go build -tags 'goolm,stdjson'`）。
   供集群用时 `-http 0.0.0.0:18086 -ws 0.0.0.0:18087 -advertise <nodeIP>:18087`
   （pod 需通告地址回连）。飞书回复是卡片：POST "thinking..." + PATCH 最终答案，
   断言需 `JSON.parse` 解 unicode 转义。

@@ -1,7 +1,7 @@
 """AEP governance middlewares for DeerFlow (digital-employee Phase 1).
 
-Ports the governance assets proven on the picoclaw runtime onto DeerFlow's
-agent middleware chains:
+Ports the governance assets proven on the earlier aepgate runtime onto
+DeerFlow's agent middleware chains:
 
 - identity: which AEP user a conversation acts on behalf of (per-instance
   default, DeerFlow-user map, resolved live per run);
@@ -10,7 +10,7 @@ agent middleware chains:
   fail-closed semantics;
 - enforcement: governed tools are wrapped with ``wrap_tool_call`` — calls
   naming a department outside the requester's ``orgScope`` never execute and
-  return an explicit denial, exactly like the picoclaw dept_data tool;
+  return an explicit denial, exactly like the aepgate dept_data tool;
 - context: a transient system reminder before each model call tells the
   model whose scope it operates in, so refusals are graceful.
 """
@@ -95,7 +95,7 @@ class _AepClient:
 class _IdentityResolver:
     """Platform sender -> AEP user through the AEP identity-mappings API.
 
-    Same semantics as the picoclaw aepgate resolver: paged listing of one
+    Same semantics as the aepgate resolver: paged listing of one
     identity source's active user mappings, short cache, fail closed (an
     unresolvable source resolves nobody).
     """

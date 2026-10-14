@@ -15,7 +15,7 @@
 | `de-channel-gateway` | **未部署**（chart `channelGateway.enabled=false`） |
 | 飞书通道配置 | 来自 ConfigMap `deerflow-gov-config`：`channels.feishu{enabled:true, app_id:cli_gov, domain:http://<wsl-host-ip>:18086}` |
 | 身份源 | `governance.identitySource=gov-feishu`（占位符已实值化） |
-| 平台替身 | `mockfeishu`（picoclaw `tests/aep-e2e/mockfeishu`，协议级替身：真 WS + REST + `_test/*` 面） |
+| 平台替身 | `mockfeishu`（本仓 `tests/e2e-mocks/mockfeishu`，协议级替身：真 WS + REST + `_test/*` 面） |
 
 ## 2. 方法
 
@@ -43,7 +43,7 @@ mockfeishu 提供与真实飞书 SDK 不可区分的 WS/卡片协议，测试面
 
 V6/V8 细节：
 
-- **V6（群聊未 @ 应答）根因已定**：DeerFlow fork `backend/app/channels/` 中**只有 discord 有 `mention_only`**；`feishu.py` 无任何群聊 @ 门控（`group_trigger.mention_only` 是 picoclaw 侧字段，DeerFlow 无对应）。即文档 FR-CH-02 的 @ 策略在 DeerFlow 迁移中丢失。
+- **V6（群聊未 @ 应答）根因已定**：DeerFlow fork `backend/app/channels/` 中**只有 discord 有 `mention_only`**；`feishu.py` 无任何群聊 @ 门控（`group_trigger.mention_only` 是已退役运行时侧字段，DeerFlow 无对应）。即文档 FR-CH-02 的 @ 策略在 DeerFlow 迁移中丢失。
 - **V8（模型调用失败）**：错误文本为历史坑「plain http request sent to https port」——模型网关链路（Higress 80 listener 400）问题，**与通道无关**。通道的失败兜底是正确的（错误作为最终答案下发，未丢消息）。
 
 ### 企微 leg（mockwecom）
@@ -100,10 +100,9 @@ DeerFlow 的 wecom 通道默认连官方 `openws.work.weixin.qq.com`；本次通
 ## 6. 复现
 
 ```bash
-# 1) 构建替身（一次性）
-git clone --depth 1 https://github.com/rongxinzy/picoclaw.git
-cd picoclaw && GOOS=linux GOARCH=amd64 go build -tags 'goolm,stdjson' \
-  -o /tmp/mockfeishu ./tests/aep-e2e/mockfeishu
+# 1) 构建替身（一次性；mock 在 aep-deerflow-governance 仓内）
+cd tests/e2e-mocks && GOOS=linux GOARCH=amd64 go build -tags 'goolm,stdjson' \
+  -o /tmp/mockfeishu ./mockfeishu
 
 # 2) 起 mock 并冒烟（在 k3s 宿主上执行；WSL 的 /mnt 为 noexec，须拷进本地盘）
 MOCK_FEISHU_BIN=/tmp/mockfeishu bash scripts/im-mock-smoke.sh
@@ -113,7 +112,7 @@ MOCK_FEISHU_BIN=/tmp/mockfeishu bash scripts/im-mock-smoke.sh
 
 ```bash
 # 1) 构建 mockwecom（Windows 侧产出 linux 二进制）
-GOOS=linux GOARCH=amd64 go build -o D:/tmp/mockwecom ./tests/aep-e2e/mockwecom
+cd tests/e2e-mocks && GOOS=linux GOARCH=amd64 go build -o D:/tmp/mockwecom ./mockwecom
 # 2) 在 k3s 宿主执行：WSL 的 /mnt 是 noexec，必须把二进制拷进本地盘再跑
 cp /mnt/d/tmp/mockwecom /tmp/mockwecom && chmod +x /tmp/mockwecom
 nohup /tmp/mockwecom -addr 0.0.0.0:18088 -bot-id mockbot -secret mock-secret >/tmp/mockwecom.log 2>&1 &
