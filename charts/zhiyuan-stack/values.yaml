@@ -324,6 +324,9 @@ workspaceAgent:
   templateImage:
     repository: rongxinzy/pw-rootfs
     tag: 0.5.0
+  # Additional immutable versions available for per-workspace templateTag.
+  # Keep pinned versions here during upgrades; never replace content under a tag.
+  additionalTemplates: []
   nodeSelector:
     zhiyuan.io/kvm: "true"
   tolerations:

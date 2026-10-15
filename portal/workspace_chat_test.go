@@ -45,6 +45,22 @@ func workspaceChatFixture(t *testing.T, ws *dev1alpha1.PersonalWorkspace, secret
 
 func TestWorkspaceChatProxy(t *testing.T) {
 	ws := runningWorkspace("ws-mine", "u-owner", "assistant", "researcher")
+	t.Run("uses the roster managed credential instead of the conventional secret", func(t *testing.T) {
+		custom := ws.DeepCopy()
+		custom.Spec.Companions[0].Memory = &dev1alpha1.CompanionMemory{UserKeySecret: "external-assistant"}
+		secret := workspaceMemkey("ws-mine", "assistant")
+		secret.Name = "external-assistant"
+		h, _, paths := workspaceChatFixture(t, custom, secret)
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.SetPathValue("name", "ws-mine")
+		req.SetPathValue("companion", "assistant")
+		req.SetPathValue("rest", "api/tasks")
+		w := httptest.NewRecorder()
+		h.handleWorkspaceChat(w, req, ownerIdentity())
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Len(t, *paths, 1)
+		assert.Contains(t, (*paths)[0], "tok=wstok")
+	})
 
 	t.Run("rewrites to the companion prefix with the internal token", func(t *testing.T) {
 		h, _, paths := workspaceChatFixture(t, ws, workspaceMemkey("ws-mine", "assistant"))
