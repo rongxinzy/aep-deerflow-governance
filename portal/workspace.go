@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,7 +29,6 @@ type workspaceCompanionRequest struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName,omitempty"`
 	Model       string `json:"model,omitempty"`
-	Persona     string `json:"persona,omitempty"`
 }
 
 type workspaceConfiguration struct {
@@ -97,16 +95,10 @@ func (p *portal) validateWorkspaceCompanions(companions []workspaceCompanionRequ
 		if model == "" {
 			model = p.cfg.workspaceModel
 		}
-		persona := strings.TrimSpace(c.Persona)
-		// Matches the CRD MaxLength on CompanionSpec.persona.
-		if utf8.RuneCountInString(persona) > 2000 {
-			return nil, "companion persona exceeds the maximum of 2000 characters"
-		}
 		out = append(out, dev1alpha1.CompanionSpec{
 			Name:        name,
 			DisplayName: strings.TrimSpace(c.DisplayName),
 			Model:       model,
-			Persona:     persona,
 		})
 	}
 	return out, ""
@@ -289,9 +281,6 @@ func summarizeWorkspace(item *dev1alpha1.PersonalWorkspace) map[string]any {
 		entry := map[string]any{"name": c.Name, "model": c.Model}
 		if c.DisplayName != "" {
 			entry["displayName"] = c.DisplayName
-		}
-		if c.Persona != "" {
-			entry["persona"] = c.Persona
 		}
 		companions = append(companions, entry)
 	}

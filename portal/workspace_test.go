@@ -134,69 +134,6 @@ func TestWorkspaceListAndGet(t *testing.T) {
 	})
 }
 
-func TestWorkspacePersona(t *testing.T) {
-	t.Run("create stores the persona on the CR", func(t *testing.T) {
-		h := newWorkspaceHarness(t)
-		w := postWorkspace(t, h, `{"companions":[{"name":"assistant","persona":"你是工作助手"}]}`, ownerIdentity())
-		require.Equal(t, http.StatusCreated, w.Code)
-		var out struct {
-			Workspace map[string]any
-		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
-
-		var created dev1alpha1.PersonalWorkspace
-		require.NoError(t, h.k8s.Get(t.Context(), client.ObjectKey{Namespace: "digital-employees", Name: out.Workspace["name"].(string)}, &created))
-		assert.Equal(t, "你是工作助手", created.Spec.Companions[0].Persona)
-	})
-
-	t.Run("patch updates the persona (roster replacement semantics)", func(t *testing.T) {
-		h := newWorkspaceHarness(t, runningWorkspace("ws-mine", "u-owner", "assistant"))
-		req := httptest.NewRequest(http.MethodPatch, "/api/v1/workspaces/ws-mine",
-			strings.NewReader(`{"companions":[{"name":"assistant","persona":"改成调研员人格"}]}`))
-		req.SetPathValue("name", "ws-mine")
-		w := httptest.NewRecorder()
-		h.updateWorkspace(w, req, ownerIdentity())
-		require.Equal(t, http.StatusOK, w.Code)
-
-		var updated dev1alpha1.PersonalWorkspace
-		require.NoError(t, h.k8s.Get(t.Context(), client.ObjectKey{Namespace: "digital-employees", Name: "ws-mine"}, &updated))
-		assert.Equal(t, "改成调研员人格", updated.Spec.Companions[0].Persona)
-	})
-
-	t.Run("rejects a persona beyond 2000 characters", func(t *testing.T) {
-		h := newWorkspaceHarness(t)
-		body := `{"companions":[{"name":"assistant","persona":"` + strings.Repeat("格", 2001) + `"}]}`
-		w := postWorkspace(t, h, body, ownerIdentity())
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-
-		ok := `{"companions":[{"name":"assistant","persona":"` + strings.Repeat("格", 2000) + `"}]}`
-		w = postWorkspace(t, h, ok, ownerIdentity())
-		assert.Equal(t, http.StatusCreated, w.Code, "exactly 2000 runes is the CRD MaxLength boundary")
-	})
-
-	t.Run("summary echoes persona and omits it when empty", func(t *testing.T) {
-		ws := runningWorkspace("ws-mine", "u-owner", "assistant", "researcher")
-		ws.Spec.Companions[0].Persona = "你是工作助手"
-		h := newWorkspaceHarness(t, ws)
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/ws-mine", nil)
-		req.SetPathValue("name", "ws-mine")
-		w := httptest.NewRecorder()
-		h.getWorkspace(w, req, ownerIdentity())
-		require.Equal(t, http.StatusOK, w.Code)
-
-		var out struct {
-			Workspace struct {
-				Companions []map[string]any
-			}
-		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
-		require.Len(t, out.Workspace.Companions, 2)
-		assert.Equal(t, "你是工作助手", out.Workspace.Companions[0]["persona"])
-		_, present := out.Workspace.Companions[1]["persona"]
-		assert.False(t, present, "an empty persona must not appear in the summary")
-	})
-}
-
 func TestWorkspacePatchAndDelete(t *testing.T) {
 	t.Run("patch replaces the roster and rolls via operator", func(t *testing.T) {
 		h := newWorkspaceHarness(t, runningWorkspace("ws-mine", "u-owner", "assistant"))
