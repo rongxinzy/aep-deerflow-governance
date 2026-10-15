@@ -41,3 +41,28 @@ PostgreSQL 保存协作、来信、搭档回复、待本人处理的问题、本
 Portal 已提供的 Persona 字段补齐到 CompanionSpec、生成的三处 CRD 和 companions.json。字段可选、最多 2000 个 Unicode 字符；旧对象不填保持原行为。配置变更沿现有清单 checksum 更新网关，清空后省略该字段。CRD 文件只提交代码，没有 apply 到集群。
 
 Operator 回归验证 Persona 持久化、清单传递、配置变更与清空；Portal 保留 Unicode 长度、创建与摘要回显测试。覆盖率比较固定 head SHA，并选取主线上最近成功 push CI 的祖先作为可编译基线；找不到基线即失败，当前提交全量测试及 80% 门槛仍强制执行。这样已损坏的主线不会阻塞自身修复。
+
+## 前后端隔离联调（2026-10-15）
+
+联调使用真实 BotUI 浏览器页面与 BFF、Portal HTTP 路由与 cookie/CSRF 校验、PostgreSQL 16、两个工作区 gateway、真实 pi-durable harness 和独立 SQLite。AEP 人员目录、Kubernetes client 和模型输出为测试替身；不连接现有集群、不调用真实模型、不部署。测试用会话由 fixture 铸造，未覆盖真实 AEP 登录。
+
+本仓 `portal/collaboration_integration_test.go` 是仅测试可用的显式 opt-in fixture，未配置时跳过，不增加生产路由或开关。只允许回环地址 PostgreSQL，每次使用独立 schema，退出删除；四个 worker 运行真实投递逻辑。配套 `zhiyuanBotUI/verify/collaboration-integration.mjs` 启动临时工作区和 BFF，通过两个独立浏览器用户上下文操作，不拦截业务 API 返回值。
+
+复跑（先准备本地一次性 PostgreSQL、三仓依赖与 Chrome；所有路径可自行指定）：
+
+```bash
+# 本仓 portal 目录
+ go test -c -o /tmp/collaboration-portal.test
+# zhiyuanBotUI 目录
+ npm --prefix web run build
+ COLLABORATION_RUNTIME_DIR=/absolute/path/pi-durable-bench/companion \
+ COLLABORATION_PORTAL_BINARY=/tmp/collaboration-portal.test \
+ PORTAL_TEST_POSTGRES_URL='postgres://testuser@127.0.0.1:19432/postgres?sslmode=disable' \
+ node verify/collaboration-integration.mjs
+```
+
+`CHROME_PATH` 可指定浏览器可执行文件；`COLLABORATION_QA_OUT` 可指定输出父目录，默认系统临时目录。输出包含截图、进程日志和 result.json；含测试会话数据，不应发布或提交输出目录。脚本清理自身子进程，PostgreSQL 由启动者负责关闭。
+
+实际通过：同事详情直接聊天、按钮传话、自然语言查找/传话工具、主人待回复入口、被动回执实时返回原对话、返回链接与刷新恢复、断线期间回执恢复、重复重连无重复回执、迟到 REST 不覆盖 SSE、接待模型与主人私有会话隔离、浅色桌面和深色移动端。
+
+联调发现并修复的前端断点：原页面忽略 SSE 的 snapshot；连接断开期间回复已持久化，重连却不补齐。前端现在从原子快照恢复会话和运行状态，同时阻止更早发起的 REST 请求覆盖快照。传输故障由测试网络转发层主动切断 SSE，业务请求仍由真实服务处理。此结果是隔离验收，不代表生产集群、真实 AEP、真实模型端到端验收。
