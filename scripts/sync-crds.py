@@ -12,7 +12,8 @@ Two other files ship a copy of that output:
 
 Both are generated from the same source here so they cannot drift apart.
 
-Usage:
+Usage (repo-root relative; the script resolves its own repo, so the cwd does
+not matter as long as the path to the script is correct):
   python3 scripts/sync-crds.py           # rewrite every copy
   python3 scripts/sync-crds.py --check   # exit 1 when a copy drifted (CI)
 """
