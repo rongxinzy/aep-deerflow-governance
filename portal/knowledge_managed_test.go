@@ -1433,6 +1433,9 @@ func TestManagedKBWireCountersTolerateUpstreamShapes(t *testing.T) {
 	}{
 		{name: "numbers are kept", raw: `{"id":"kb-1","knowledge_count":8,"chunk_count":3,"processing_count":2,"updated_at":"2026-10-15T06:18:30Z"}`, knowledge: ptrInt64(8), chunks: ptrInt64(3), processing: ptrInt64(2), updatedAt: "2026-10-15T06:18:30Z"},
 		{name: "quoted numbers are kept", raw: `{"id":"kb-1","knowledge_count":"8"}`, knowledge: ptrInt64(8)},
+		{name: "whole float counters are kept", raw: `{"id":"kb-1","knowledge_count":8.0}`, knowledge: ptrInt64(8)},
+		{name: "quoted whole float is kept", raw: `{"id":"kb-1","knowledge_count":"8.0"}`, knowledge: ptrInt64(8)},
+		{name: "fractional counters stay absent", raw: `{"id":"kb-1","knowledge_count":8.5}`},
 		{name: "absent counters stay absent", raw: `{"id":"kb-1"}`},
 		{name: "unreadable counters stay absent", raw: `{"id":"kb-1","knowledge_count":"many","chunk_count":{},"processing_count":-1}`},
 		{name: "fractional offset timestamp is normalized", raw: `{"id":"kb-1","updated_at":"2026-10-15T14:18:30.123456789+08:00"}`, updatedAt: "2026-10-15T06:18:30Z"},
@@ -1526,5 +1529,51 @@ func TestManagedKnowledgeListSurvivesUnavailableGrantScope(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), `"id":"kb-owned"`)
 	assert.NotContains(t, w.Body.String(), `"scope"`)
+	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+// 一个新库或从未被授权过的库，授权行是 0 行。查询成功时这就是 0 个用户 / 0 个团队，
+// 不是「未知」：控制台必须能在使用范围列显示 0，而不是永远显示「暂未统计」。
+func TestManagedKnowledgeListReportsZeroScopeWhenNoGrantRowsExist(t *testing.T) {
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	configureManagedTest(t, h, "10000")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		case "/api/v1/knowledge-bases/kb-fresh":
+			_, _ = w.Write([]byte(`{"data":{"id":"kb-fresh","name":"Fresh","tenant_id":10000,"embedding_model_id":"emb-1","knowledge_count":0,"updated_at":"2026-10-15T06:18:30Z"}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h.cfg.knowledgeAPIURL = server.URL
+	h.dbmock.ExpectQuery(`SELECT knowledge_base_id,name_snapshot,created_by,created_at,updated_at FROM knowledge_base_registry`).WithArgs("demo", "10000").
+		WillReturnRows(sqlmock.NewRows([]string{"knowledge_base_id", "name_snapshot", "created_by", "created_at", "updated_at"}).
+			AddRow("kb-fresh", "Fresh", "u1", time.Now(), time.Now()))
+	h.dbmock.ExpectQuery(`COUNT\(\*\) FILTER .*knowledge_base_grants`).WithArgs("demo", "10000").
+		WillReturnRows(sqlmock.NewRows([]string{"knowledge_base_id", "users", "teams"}))
+	w := httptest.NewRecorder()
+	h.handleManagedKnowledgeBases(w, httptest.NewRequest(http.MethodGet, "/", nil), identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body struct {
+		Data []struct {
+			KnowledgeCount *int64 `json:"knowledge_count"`
+			Scope          *struct {
+				Users int64 `json:"users"`
+				Teams int64 `json:"teams"`
+			} `json:"scope"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Len(t, body.Data, 1)
+	require.NotNil(t, body.Data[0].KnowledgeCount)
+	assert.Equal(t, int64(0), *body.Data[0].KnowledgeCount)
+	require.NotNil(t, body.Data[0].Scope, "零授权必须以 scope 的形式下发，而不是缺字段")
+	assert.Equal(t, int64(0), body.Data[0].Scope.Users)
+	assert.Equal(t, int64(0), body.Data[0].Scope.Teams)
+	assert.Contains(t, w.Body.String(), `"scope":{"users":0,"teams":0}`)
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }

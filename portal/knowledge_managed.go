@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -105,11 +106,21 @@ func decodeOptionalCount(raw json.RawMessage) *int64 {
 	if text == "" || text == "null" {
 		return nil
 	}
-	value, err := strconv.ParseInt(text, 10, 64)
-	if err != nil || value < 0 {
+	if value, err := strconv.ParseInt(text, 10, 64); err == nil {
+		if value < 0 {
+			return nil
+		}
+		return &value
+	}
+	// Upstream may serialize a counter as a JSON float (8.0). Keep it only when
+	// it is a whole number, so a fractional counter is dropped rather than
+	// silently rounded into a wrong statistic.
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil || value < 0 || value != math.Trunc(value) || value > float64(math.MaxInt64) {
 		return nil
 	}
-	return &value
+	whole := int64(value)
+	return &whole
 }
 
 // decodeOptionalTimestamp keeps only a parseable upstream timestamp, normalized
@@ -615,17 +626,18 @@ func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Requ
 		result[i].ProcessingCount = live.ProcessingCount
 		result[i].UpdatedAt = live.UpdatedAt
 	}
-	// Usage range is display metadata owned by Portal itself. It degrades to an
-	// absent field instead of failing the page: every entry above was already
-	// validated against upstream and the registry, and the console renders a
-	// missing scope as "not counted".
+	// Usage range is display metadata owned by Portal itself. A successful
+	// query answers for every listed base, including the zero-grant case: a
+	// freshly created or never-authorized base has 0 users and 0 teams, which is
+	// a fact, not a missing value. Only a failed query leaves the field absent,
+	// and it degrades instead of failing the page because every entry above was
+	// already validated against upstream and the registry.
 	if scopes, err := p.managedGrantScopes(r.Context(), ident.DeploymentID, tenant, ""); err != nil {
 		p.logger.Warn("managed knowledge list: grant scope unavailable", "error", err)
 	} else {
 		for i := range result {
-			if scope, ok := scopes[result[i].ID]; ok {
-				result[i].Scope = &scope
-			}
+			scope := scopes[result[i].ID]
+			result[i].Scope = &scope
 		}
 	}
 	writeJSON(w, 200, map[string]any{"data": result})
@@ -647,7 +659,8 @@ func (p *portal) handleManagedKnowledgeGetBase(w http.ResponseWriter, r *http.Re
 	}
 	if scopes, err := p.managedGrantScopes(r.Context(), ident.DeploymentID, tenant, kb.ID); err != nil {
 		p.logger.Warn("managed knowledge read: grant scope unavailable", "error", err)
-	} else if scope, ok := scopes[kb.ID]; ok {
+	} else {
+		scope := scopes[kb.ID]
 		kb.Scope = &scope
 	}
 	writeJSON(w, 200, map[string]any{"data": kb})
