@@ -43,6 +43,21 @@ Existing bases cannot change type through the update endpoint.
 Existing routes include readiness; registered base listing/detail/update/delete;
 paginated document listing; and multipart file upload. Upload accepts exactly
 one field named `file`, capped at 64 MiB; upstream deployment limits may be lower.
+
+Registered base listing and detail also carry the statistics the console list
+needs: `knowledge_count`, `chunk_count`, `processing_count`, and `updated_at`
+come from the upstream base read that already runs for every listed entry (the
+counters are pointers, so a counter upstream omits or reports unreadably is left
+out of the response rather than sent as `0`). `updated_at` is normalized to a
+UTC RFC 3339 timestamp and dropped when it is not parseable. `scope` is Portal's
+own summary of `knowledge_base_grants` for that base (`{"users":n,"teams":m}`)
+and is computed in one grouped query per request; a failure to read it omits
+`scope` from the response and is logged, because the listing itself is already
+validated against the registry and upstream and must not fail for a
+display-only aggregate. The console renders any absent field as "not counted"
+instead of a zero. `POST` responses (creation) carry whatever the upstream
+create call returned for the same fields.
+
 Before each mutation, Portal stores a `pending` audit intent with the real actor
 and known resource/parent ID. Failure to persist intent prevents the upstream
 write. Network errors are `uncertain`. Outcome persistence failures return the
