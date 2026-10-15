@@ -62,6 +62,9 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("/api/v1/rooms", p.auth(p.handleRooms))
 	mux.HandleFunc("/api/v1/workplace/{rest...}", p.auth(p.handleWorkplace))
 	mux.HandleFunc("/api/v1/workplace", p.auth(p.handleWorkplace))
+	// 邮箱底层（一人多箱）：配置/测试/状态/收件/发件直达本人工作区网关。
+	mux.HandleFunc("/api/v1/email/{rest...}", p.auth(p.handleEmail))
+	mux.HandleFunc("/api/v1/email", p.auth(p.handleEmail))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
