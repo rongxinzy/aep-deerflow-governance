@@ -219,6 +219,15 @@ func (p *portal) handleWorkplace(w http.ResponseWriter, r *http.Request, ident i
 	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/workplace")
 }
 
+// handleEmail exposes the caller's mailbox configuration and use surface (multi-
+// mailbox: list/configure/test/status/messages/send) from their own gateway. Same
+// trust boundary as rooms/workplace: the session identity is the owner the gateway
+// sees, and the agent-token surface (companion tools) can never be impersonated
+// through the browser.
+func (p *portal) handleEmail(w http.ResponseWriter, r *http.Request, ident identity) {
+	p.handleOwnerWorkspaceGateway(w, r, ident, "/api/email")
+}
+
 func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Request, ident identity, gatewayRoot string) {
 	item, code, errMsg := p.ownerWorkspace(r.Context(), ident)
 	if code != 0 {

@@ -335,3 +335,61 @@ func TestRoomsOwnerHeaderSpoof(t *testing.T) {
 		assert.Equal(t, "u-owner", forwarded["owner"])
 	})
 }
+
+func TestEmailProxy(t *testing.T) {
+	ws := runningWorkspace("ws-mine", "u-owner", "assistant")
+
+	t.Run("rewrites to the gateway email path with the owner identity", func(t *testing.T) {
+		var mu sync.Mutex
+		forwarded := map[string]string{}
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			mu.Lock()
+			forwarded["path"] = r.URL.Path
+			forwarded["owner"] = r.Header.Get(workspaceOwnerHeaderName)
+			forwarded["agentToken"] = r.Header.Get("X-Workspace-Agent-Token")
+			forwarded["botuiUser"] = r.Header.Get("X-BotUI-User")
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		t.Cleanup(upstream.Close)
+		h := newWorkspaceHarness(t, ws)
+		h.workspaceChatOverride = upstream.URL
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/email/mailboxes", strings.NewReader(`{}`))
+		req.SetPathValue("rest", "mailboxes")
+		req.Header.Set("Content-Type", "application/json")
+		// 浏览器冒充两条身份面都必须被剥：owner 头是 portal 盖章，agent-token
+		// 面只属于网关注入给搭档的 token
+		req.Header.Set("X-BotUI-User", "u-victim")
+		req.Header.Set("X-Workspace-Agent-Token", "stolen")
+		w := httptest.NewRecorder()
+		h.handleEmail(w, req, ownerIdentity())
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "/api/email/mailboxes", forwarded["path"])
+		assert.Equal(t, "u-owner", forwarded["owner"])
+		assert.Empty(t, forwarded["botuiUser"], "spoofed owner header must not reach the gateway")
+		assert.Empty(t, forwarded["agentToken"], "companion tool token must not be impersonable from the browser")
+	})
+
+	t.Run("stranger without a workspace gets 404", func(t *testing.T) {
+		h, _ := workspaceRoomsFixture(t, ws)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/email/status", nil)
+		req.SetPathValue("rest", "status")
+		w := httptest.NewRecorder()
+		h.handleEmail(w, req, identity{UserID: "u-stranger"})
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("gateway path traversal is rejected", func(t *testing.T) {
+		h, _ := workspaceRoomsFixture(t, ws)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/email/../../api/rooms", nil)
+		req.SetPathValue("rest", "../../api/rooms")
+		w := httptest.NewRecorder()
+		h.handleEmail(w, req, ownerIdentity())
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
