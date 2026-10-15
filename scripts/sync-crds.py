@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Sync the operator's generated DigitalEmployee CRDs into the Helm chart.
+"""Sync the operator's generated CRDs into every place that ships a copy.
 
 `operator/Makefile` only writes `operator/config/crd/bases/` (controller-gen).
-The chart ships its own copies under `charts/zhiyuan-stack/crds/` and Helm
-applies those, so any regenerated CRD must be copied over — otherwise Helm
-applies a stale schema and the Kubernetes structural schema **silently prunes**
-fields the schema does not declare.
+Two other files ship a copy of that output:
 
-`operator/deploy/crd.yaml` is regenerated separately by the release target, so
-it is intentionally not covered here.
+  * `charts/zhiyuan-stack/crds/*.yaml` — Helm applies these; a stale copy makes
+    the Kubernetes structural schema **silently prune** fields the schema does
+    not declare, so the CR the operator reconciles loses them.
+  * `operator/deploy/crd.yaml` — the bundle `k3s/cicd` and the local deploy
+    apply. Same failure mode.
+
+Both are generated from the same source here so they cannot drift apart.
 
 Usage:
-  python3 scripts/sync-crds.py           # rewrite the chart copies
+  python3 scripts/sync-crds.py           # rewrite every copy
   python3 scripts/sync-crds.py --check   # exit 1 when a copy drifted (CI)
 """
 
@@ -24,6 +26,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BASE_DIR = REPO / "operator" / "config" / "crd" / "bases"
 CHART_CRD_DIR = REPO / "charts" / "zhiyuan-stack" / "crds"
+DEPLOY_BUNDLE = REPO / "operator" / "deploy" / "crd.yaml"
 
 # operator/config/crd/bases/<key> -> charts/zhiyuan-stack/crds/<value>
 # Deliberately explicit: adding a CRD without listing it here is a mistake the
@@ -39,7 +42,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="do not write; fail if a chart copy differs from the operator source",
+        help="do not write; fail if a copy differs from the operator source",
     )
     args = parser.parse_args(argv)
 
@@ -48,7 +51,19 @@ def main(argv: list[str]) -> int:
         print(f"no CRDs found under {BASE_DIR}", file=sys.stderr)
         return 1
 
-    drifted: list[str] = []
+    drift: list[tuple[str, str]] = []  # (path, description)
+
+    def sync(path: Path, wanted: str, description: str) -> None:
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if wanted == current:
+            return
+        drift.append((str(path.relative_to(REPO)), description))
+        if not args.check:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(wanted, encoding="utf-8", newline="\n")
+            print(f"synced {path.relative_to(REPO)} <- {description}")
+
+    # One file per CRD, alongside the chart.
     for source in sources:
         target_name = CRD_TARGETS.get(source.name)
         if target_name is None:
@@ -59,26 +74,28 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 1
+        sync(
+            CHART_CRD_DIR / target_name,
+            source.read_text(encoding="utf-8"),
+            source.name,
+        )
 
-        target = CHART_CRD_DIR / target_name
-        wanted = source.read_text(encoding="utf-8")
-        current = target.read_text(encoding="utf-8") if target.exists() else ""
+    # Every document in one bundle, in the same order, separated by `---`.
+    # The base files already open with `---`, so the separator appears twice
+    # between documents — that is the established shape of this file.
+    bundle = "".join(
+        ("---\n" if index else "") + source.read_text(encoding="utf-8")
+        for index, source in enumerate(sources)
+    )
+    sync(DEPLOY_BUNDLE, bundle, "operator/config/crd/bases/*")
 
-        if wanted == current:
-            continue
-
-        drifted.append(f"{target_name} (from {source.name})")
-        if not args.check:
-            target.write_text(wanted, encoding="utf-8", newline="\n")
-            print(f"synced {target_name} <- {source.name}")
-
-    if not drifted:
-        print("chart CRDs are in sync with the operator sources")
+    if not drift:
+        print("CRD copies are in sync with the operator sources")
         return 0
 
     if args.check:
-        for name in drifted:
-            print(f"error: {name} is out of date", file=sys.stderr)
+        for path, description in drift:
+            print(f"error: {path} is out of date (from {description})", file=sys.stderr)
         print(
             "\nrun `python3 scripts/sync-crds.py` and commit the result",
             file=sys.stderr,
