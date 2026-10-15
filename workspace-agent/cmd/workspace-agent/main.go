@@ -12,6 +12,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -47,6 +48,7 @@ func main() {
 	flag.StringVar(&cfg.ModelBaseURL, "model-base-url", envOr("MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"), "model gateway route")
 	flag.StringVar(&cfg.MemoryBaseURL, "memory-base-url", envOr("MEMORY_BASE_URL", "http://openviking.memory-system.svc.cluster.local:1933"), "OpenViking service the companions dial directly")
 	hostRoot := flag.String("host-root", envOr("HOST_ROOT", "/host"), "mounted host filesystem root")
+	metricsAddr := flag.String("metrics-addr", envOr("METRICS_ADDR", ":9091"), "Prometheus /metrics listen address")
 	serialMB := flag.Int("serial-log-mb", 5, "serial log rotation threshold (MiB)")
 	interval := flag.Duration("resync", 10*time.Second, "resync interval")
 	flag.Parse()
@@ -100,9 +102,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", m.MetricsHandler())
+	metricsSrv := &http.Server{Addr: *metricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error(err, "metrics server", "addr", *metricsAddr)
+		}
+	}()
+	defer func() { _ = metricsSrv.Close() }()
+
 	logger.Info("workspace agent starting",
 		"node", cfg.NodeName, "hostIP", cfg.HostIP, "namespace", cfg.Namespace,
-		"workdir", cfg.Workdir, "template", cfg.TemplateTag, "ports", portRange)
+		"workdir", cfg.Workdir, "template", cfg.TemplateTag, "ports", portRange,
+		"metricsAddr", *metricsAddr)
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()

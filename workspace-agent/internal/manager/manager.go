@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +40,18 @@ import (
 
 // AgentFinalizer guards node-side teardown (VM, tap, chains, disks, dir).
 const AgentFinalizer = "digitalemployee.zhiyuan.io/workspace-node-agent"
+
+// Boot-failure policy. Vars (not consts) so tests can shrink the windows.
+var (
+	// maxBootFails is the give-up threshold for consecutive boot failures.
+	maxBootFails = 5
+	// giveUpRetryInterval is how long a given-up supervisor waits before one
+	// retry attempt (self-heal: no human spec change required).
+	giveUpRetryInterval = time.Hour
+	// stableResetDuration is how long a VM must stay continuously Running
+	// before bootFails is forgiven.
+	stableResetDuration = time.Hour
+)
 
 // Config wires the manager.
 type Config struct {
@@ -65,6 +78,8 @@ type Manager struct {
 	mu        sync.Mutex
 	supers    map[string]*Supervisor
 	usedPorts func() []int32 // extra occupied ports (proxies of live supervisors)
+
+	resyncErrors atomic.Int64 // rounds that returned an error (metrics)
 }
 
 // New builds the manager.
@@ -96,16 +111,30 @@ type Supervisor struct {
 	configHash string // hash the running VM was booted with
 	bootFails  int
 	lastBoot   time.Time
+	// runningSince marks the start of the current uninterrupted healthy
+	// stretch; zeroed whenever the guest fails healthz. After
+	// stableResetDuration of stability, bootFails is forgiven.
+	runningSince time.Time
+	phase        string // last CR status.phase seen by Resync (metrics only)
 }
 
 // Resync lists workspaces, reconciles assigned ones, tears down orphans.
-func (m *Manager) Resync(ctx context.Context) error {
+func (m *Manager) Resync(ctx context.Context) (firstErr error) {
+	// Every finished round heartbeats, error or not: the heartbeat feeds the
+	// DaemonSet liveness probe, whose blast radius is every VM on the node.
+	// A workspace stuck in give-up makes Resync return an error indefinitely;
+	// gating the heartbeat on success would misread a healthy loop as wedged.
+	defer func() {
+		m.writeHeartbeat()
+		if firstErr != nil {
+			m.resyncErrors.Add(1)
+		}
+	}()
 	var list v1alpha1.PersonalWorkspaceList
 	if err := m.client.List(ctx, &list, client.InNamespace(m.cfg.Namespace)); err != nil {
 		return err
 	}
 	assigned := map[string]bool{}
-	var firstErr error
 	for i := range list.Items {
 		ws := &list.Items[i]
 		if ws.Spec.Runtime != "microvm" || ws.Status.NodeName != m.cfg.NodeName {
@@ -123,6 +152,7 @@ func (m *Manager) Resync(ctx context.Context) error {
 				})
 			}
 		}
+		m.notePhase(ws)
 	}
 	// Orphan teardown: supervisor exists but CR no longer ours.
 	m.mu.Lock()
@@ -139,6 +169,27 @@ func (m *Manager) Resync(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// notePhase snapshots the CR phase onto the supervisor for /metrics.
+func (m *Manager) notePhase(ws *v1alpha1.PersonalWorkspace) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sup := m.supers[ws.Name]; sup != nil {
+		sup.phase = string(ws.Status.Phase)
+	}
+}
+
+// writeHeartbeat stamps the resync loop's liveness file under the run dir.
+// Best-effort: a persistently unwritable workdir stales the heartbeat and
+// surfaces through the liveness probe instead of a log line nobody reads.
+func (m *Manager) writeHeartbeat() {
+	dir := filepath.Join(m.cfg.Workdir, "run")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, "agent.heartbeat"),
+		[]byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
 }
 
 // manifestEntry mirrors companionManifestEntry (wire contract of
@@ -315,6 +366,7 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	if !probeHealthz(guestIP, 2*time.Second) {
 		sup.bootFails++
 		sup.lastBoot = time.Now()
+		sup.runningSince = time.Time{}
 		if err := sup.driver.Stop(15 * time.Second); err != nil {
 			return err
 		}
@@ -324,6 +376,14 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 				s.Message = "guest gateway healthz failing; reboot scheduled with backoff"
 			}
 		})
+	}
+	// Healthy stretch: forgive bootFails once the guest has been stable past
+	// the reset window (transient flaps must not march the counter to give-up).
+	if sup.runningSince.IsZero() {
+		sup.runningSince = time.Now()
+	}
+	if sup.bootFails > 0 && time.Since(sup.runningSince) >= stableResetDuration {
+		sup.bootFails = 0
 	}
 	return m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
 		s.Phase = v1alpha1.WorkspacePhaseRunning
@@ -336,9 +396,11 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 func (m *Manager) boot(ctx context.Context, ws *v1alpha1.PersonalWorkspace, sup *Supervisor,
 	payload *render.ConfigPayload, assets *template.Assets, dev *tap.Device,
 	diskDir, runDir, guestIP string, port int32) error {
-	// Backoff after repeated boot failures.
-	if sup.bootFails >= 5 {
-		return fmt.Errorf("boot failed %d consecutive times; giving up until spec change (serial log: %s)", sup.bootFails, filepath.Join(runDir, "serial.log"))
+	// Backoff after repeated boot failures. Past the give-up threshold the
+	// supervisor still self-heals: one retry per giveUpRetryInterval (a spec
+	// change is no longer the only way out).
+	if sup.bootFails >= maxBootFails && time.Since(sup.lastBoot) < giveUpRetryInterval {
+		return fmt.Errorf("boot failed %d consecutive times; giving up (hourly self-heal retry armed, serial log: %s)", sup.bootFails, filepath.Join(runDir, "serial.log"))
 	}
 	if delay := backoff(sup.bootFails); delay > 0 && time.Since(sup.lastBoot) < delay {
 		return fmt.Errorf("boot backoff (%s)", delay)
@@ -387,6 +449,7 @@ func (m *Manager) boot(ctx context.Context, ws *v1alpha1.PersonalWorkspace, sup 
 	}
 	sup.bootFails = 0
 	sup.lastBoot = time.Now()
+	sup.runningSince = time.Now()
 	sup.configHash = payload.Hash
 	if err := m.startProxy(sup, port, guestIP); err != nil {
 		return err
