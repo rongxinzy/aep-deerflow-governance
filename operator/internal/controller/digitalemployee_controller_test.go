@@ -218,6 +218,38 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring("bot_name"))
 		})
 
+		It("renders channel endpoint overrides so a mock or self-hosted gateway can be used", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{
+				Feishu:       true,
+				FeishuDomain: "http://mock-feishu:18086",
+				Wecom:        true,
+				WecomWSURL:   "wss://channel-gateway:8899",
+			}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			rendered := config.Data["config.yaml"]
+			Expect(rendered).To(ContainSubstring(`"domain": "http://mock-feishu:18086"`))
+			Expect(rendered).To(ContainSubstring(`"ws_url": "wss://channel-gateway:8899"`))
+			// The endpoints are declarative only; `enabled` and the credentials
+			// still come from the runtime store.
+			Expect(rendered).NotTo(ContainSubstring(`"app_id"`))
+		})
+
+		It("omits channel endpoint overrides when the CR does not set them", func(ctx context.Context) {
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Feishu: true, Wecom: true}
+			Expect(fx.client.Update(ctx, employee)).To(Succeed())
+			reconcile(ctx)
+
+			config := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
+			rendered := config.Data["config.yaml"]
+			Expect(rendered).NotTo(ContainSubstring(`"domain"`))
+			Expect(rendered).NotTo(ContainSubstring(`"ws_url"`))
+		})
+
 		It("keeps the spec.owner field intact across reconciles", func(ctx context.Context) {
 			reconcile(ctx)
 			markDeploymentReady(ctx)

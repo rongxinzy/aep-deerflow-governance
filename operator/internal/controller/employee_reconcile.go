@@ -362,23 +362,28 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			}
 		}
 	}
-	// Feishu group gate: the channel answers a fresh group message only when
-	// the bot is @-mentioned, and it matches that mention by display name, so
-	// the runtime needs the name itself. Only bot_name is rendered here —
-	// `enabled` and the credentials still come from the runtime store, so a CR
-	// without injected credentials does not make the channel try to start.
-	if spec.Channels != nil && spec.Channels.Feishu && spec.Channels.FeishuName != "" {
-		channels, ok := config["channels"].(map[string]any)
-		if !ok {
-			channels = map[string]any{}
-			config["channels"] = channels
+	// Declarative channel keys the runtime cannot take from the runtime store:
+	// the Feishu group-gate display name, and endpoint overrides that point a
+	// channel at a protocol-level mock or a self-hosted gateway instead of the
+	// public platform. Only these keys are rendered — `enabled` and the
+	// credentials still come from the runtime store, so a CR without injected
+	// credentials does not make the channel try to start.
+	if spec.Channels != nil {
+		if spec.Channels.Feishu {
+			feishuKeys := map[string]any{}
+			if spec.Channels.FeishuName != "" {
+				feishuKeys["bot_name"] = spec.Channels.FeishuName
+			}
+			if spec.Channels.FeishuDomain != "" {
+				feishuKeys["domain"] = spec.Channels.FeishuDomain
+			}
+			if len(feishuKeys) > 0 {
+				mergeChannelConfig(config, "feishu", feishuKeys)
+			}
 		}
-		feishu, ok := channels["feishu"].(map[string]any)
-		if !ok {
-			feishu = map[string]any{}
-			channels["feishu"] = feishu
+		if spec.Channels.Wecom && spec.Channels.WecomWSURL != "" {
+			mergeChannelConfig(config, "wecom", map[string]any{"ws_url": spec.Channels.WecomWSURL})
 		}
-		feishu["bot_name"] = spec.Channels.FeishuName
 	}
 	if spec.Memory != nil {
 		retrieval := map[string]any{}
@@ -589,6 +594,25 @@ func renderService(employee *v1alpha1.DigitalEmployee) *corev1.Service {
 func deploymentName(employee *v1alpha1.DigitalEmployee) string { return "de-" + employee.Name }
 func serviceName(employee *v1alpha1.DigitalEmployee) string    { return "de-" + employee.Name }
 func configName(employee *v1alpha1.DigitalEmployee) string     { return "de-" + employee.Name + "-config" }
+
+// mergeChannelConfig merges declarative keys into config["channels"][provider],
+// creating the maps when the config has none yet.
+func mergeChannelConfig(config map[string]any, provider string, values map[string]any) {
+	channels, ok := config["channels"].(map[string]any)
+	if !ok {
+		channels = map[string]any{}
+		config["channels"] = channels
+	}
+	entry, ok := channels[provider].(map[string]any)
+	if !ok {
+		entry = map[string]any{}
+		channels[provider] = entry
+	}
+	for key, value := range values {
+		entry[key] = value
+	}
+}
+
 func extensionsName(employee *v1alpha1.DigitalEmployee) string {
 	return "de-" + employee.Name + "-extensions"
 }

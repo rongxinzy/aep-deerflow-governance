@@ -303,6 +303,18 @@ type ChannelsSpec struct {
 	// mention is never treated as addressing the bot.
 	// +optional
 	FeishuName string `json:"feishuName,omitempty"`
+	// FeishuDomain overrides the Feishu open-platform endpoint the channel
+	// talks to. Empty keeps the channel default (https://open.feishu.cn).
+	// Point it at a protocol-level mock or a self-hosted gateway to exercise
+	// the channel without real credentials.
+	// +optional
+	FeishuDomain string `json:"feishuDomain,omitempty"`
+	// WecomWSURL overrides the WeCom bot websocket endpoint. Empty keeps the
+	// SDK default (wss://openws.work.weixin.qq.com). The aibot client always
+	// passes a TLS context, so only wss:// endpoints connect; a plain ws://
+	// mock needs a TLS front end in front of it.
+	// +optional
+	WecomWSURL string `json:"wecomWsUrl,omitempty"`
 }
 
 // PersistenceSpec controls durable runtime storage. The runtime home
