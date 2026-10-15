@@ -50,7 +50,7 @@ jobs:
         working-directory: portal
         env:
           PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
-        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)' -v ./...
+        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)|TestCollaborationPostgres' -v ./...
       - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:

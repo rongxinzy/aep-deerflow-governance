@@ -87,6 +87,7 @@ type companionManifestEntry struct {
 }
 
 type companionsManifest struct {
+	PortalURL  string                   `json:"portalURL"`
 	Owner      string                   `json:"owner"`
 	Workspace  string                   `json:"workspace"`
 	Companions []companionManifestEntry `json:"companions"`
@@ -97,6 +98,7 @@ type companionsManifest struct {
 // rolls the Deployment — the manifest is the single source of truth.
 func renderCompanionsManifest(workspace *v1alpha1.PersonalWorkspace) string {
 	manifest := companionsManifest{
+		PortalURL:  "http://de-portal." + workspace.Namespace + ".svc:8090",
 		Owner:      workspace.Spec.Owner,
 		Workspace:  workspace.Name,
 		Companions: make([]companionManifestEntry, 0, len(workspace.Spec.Companions)),
