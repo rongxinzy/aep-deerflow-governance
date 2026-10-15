@@ -33,8 +33,9 @@ func NewChrootRunner(hostRoot string) *ChrootRunner {
 	return &ChrootRunner{HostRoot: hostRoot, Timeout: 30 * time.Second}
 }
 
-// Run changes root only in the child process, then executes a host binary.
-// Static ko images do not contain a chroot executable or host userland.
+// Run changes root only in the child process, then executes a host binary
+// from the node itself (same iptables backend as kube-proxy; the busybox
+// base's own tooling may differ from the node's).
 func (r *ChrootRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	if r.Timeout > 0 {
 		var cancel context.CancelFunc
