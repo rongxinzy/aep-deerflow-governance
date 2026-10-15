@@ -17,6 +17,9 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	dev "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,7 +31,10 @@ func TestCollaborationIntegrationFixture(t *testing.T) {
 	if file == "" {
 		t.Skip("requires the local cross-repository integration runner")
 	}
-	var config struct{ Address, SourceGateway, TargetGateway, Output string }
+	var config struct {
+		Address, SourceGateway, TargetGateway, Output string
+		ProvisionCompanions                           bool
+	}
 	raw, err := os.ReadFile(file)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &config))
@@ -48,6 +54,7 @@ func TestCollaborationIntegrationFixture(t *testing.T) {
 	require.NoError(t, migrate(db))
 	h := collaborationHarness(t)
 	h.db = db
+	h.cfg.workspaceModel = "test"
 	for name, endpoint := range map[string]string{"ws-source": config.SourceGateway, "ws-target": config.TargetGateway} {
 		var ws dev.PersonalWorkspace
 		require.NoError(t, h.k8s.Get(t.Context(), client.ObjectKey{Namespace: h.cfg.namespace, Name: name}, &ws))
@@ -96,6 +103,19 @@ func TestCollaborationIntegrationFixture(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(config.Output, "stop")); err == nil {
 			return
+		}
+		if config.ProvisionCompanions {
+			var list dev.PersonalWorkspaceList
+			require.NoError(t, h.k8s.List(t.Context(), &list))
+			for _, ws := range list.Items {
+				for _, companion := range ws.Spec.Companions {
+					// Simulate only the operator's secret provisioning; the runner
+					// separately updates the real gateway roster and restarts it.
+					secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: workspaceMemkeySecretName(ws.Name, companion.Name), Namespace: h.cfg.namespace}, Data: map[string][]byte{"WORKSPACE_INTERNAL_TOKEN": []byte("wstok")}}
+					err := h.k8s.Create(t.Context(), secret)
+					require.True(t, err == nil || apierrors.IsAlreadyExists(err))
+				}
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
