@@ -19,7 +19,7 @@ microVM。架构与 runbook 见 zhiyuan-docs `guides/microvm-runtime.md`（随 E
 | `cmd/workspace-agent` | 入口：flags+Downward env（NODE_NAME/HOST_IP）、模板校验、10s resync 循环、`--metrics-addr`（默认 :9091，env METRICS_ADDR）上的 promhttp /metrics；直连 client（无 informer cache，对象个位数） |
 | `internal/render` | config 盘 payload（companions.json 逐字节取自 ConfigMap + env（含 memkey 逐搭档投递，0600）+ resolv.conf→kube-dns）与 hash（config 滚动身份）；/30 端点与 GuestMAC 派生 |
 | `internal/alloc` | host port 分配（8800-8899，CR 记录 + bind 探测） |
-| `internal/hostcmd` | `chroot /host` 执行节点自身的 ip/iptables/mkfs.ext4（ko 静态镜像不带用户land；与 kube-proxy 同一 iptables 后端） |
+| `internal/hostcmd` | `chroot /host` 执行节点自身的 ip/iptables/mkfs.ext4（基座 busybox 自带 chroot/sh；走宿主是为了与 kube-proxy 同一 iptables 后端） |
 | `internal/tap` | tap-pw-<ws> 生命周期 + per-subnet MASQUERADE |
 | `internal/iptables` | E3b 白名单链 FC_WL_<ws>：scratch 链先建后换（部分渲染不会临时放宽）、FORWARD 跳入、端点变更 resync 跟随 |
 | `internal/disk` | data 盘（建一次永不重建）与 config 盘（`mkfs.ext4 -d` 免挂载、tmp+rename 原子写；**仅 VM 停机时写**——PoC 热写损坏教训，状态机 guard） |
