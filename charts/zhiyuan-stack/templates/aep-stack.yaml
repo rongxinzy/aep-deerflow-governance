@@ -10,6 +10,8 @@
 {{- $ns := "aep-system" }}
 {{/* 占位符守卫：敏感/环境相关值未回填时直接 fail，不落集群。 */}}
 {{- include "zhiyuan.assertRealValue" (dict "name" "bootstrapAdminPassword" "value" .Values.aepStack.bootstrapAdminPassword) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "minioAccessKey" "value" .Values.aepStack.minioAccessKey) }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "minioSecretKey" "value" .Values.aepStack.minioSecretKey) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "credentialMasterKeyBase64" "value" .Values.aepStack.credentialMasterKeyBase64) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "signingKeyBase64" "value" .Values.aepStack.signingKeyBase64) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "databaseUrl" "value" .Values.aepStack.databaseUrl) }}

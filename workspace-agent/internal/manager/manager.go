@@ -181,8 +181,14 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	if err != nil {
 		return err
 	}
+	runDir := filepath.Join(m.cfg.Workdir, "run", ws.Name)
+	lifecycleToken, err := guestLifecycleToken(runDir)
+	if err != nil {
+		return err
+	}
 	payload, err := render.BuildPayload(render.Inputs{
-		Workspace: ws, Manifest: manifestJSON, Memkeys: memkeys, Credentials: creds,
+		LifecycleToken: lifecycleToken,
+		Workspace:      ws, Manifest: manifestJSON, Memkeys: memkeys, Credentials: creds,
 		ModelBaseURL: m.cfg.ModelBaseURL, DNSIP: dnsIP,
 		DNSSearch: m.cfg.Namespace + ".svc.cluster.local svc.cluster.local",
 	})
@@ -197,7 +203,6 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	}
 
 	diskDir := filepath.Join(m.cfg.Workdir, "disks", ws.Name)
-	runDir := filepath.Join(m.cfg.Workdir, "run", ws.Name)
 	tag := ws.Spec.TemplateTag
 	if tag == "" {
 		tag = m.cfg.TemplateTag
@@ -274,6 +279,7 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	// Config rollout: VM must be stopped while the config disk is written
 	// (hot-write corruption guard) — reboot when the desired hash differs.
 	if sup.driver.Alive() && sup.configHash != "" && sup.configHash != payload.Hash {
+		prepareGuestStop(guestIP, lifecycleToken)
 		if err := sup.driver.Stop(15 * time.Second); err != nil {
 			return err
 		}
