@@ -42,7 +42,9 @@ spec:
   type: NodePort
   selector: {app: de-admin-console}
   ports:
+    # 多端口 Service 端口必须全命名（k8s 校验）；console 是既有名字，线上已存在
     - port: 80
+      name: console
       targetPort: 5173
       nodePort: {{ .Values.adminConsole.nodePort }}
     # WeKnora management UI: the console container proxies the WeKnora

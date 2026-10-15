@@ -163,6 +163,14 @@ spec:
   selector: {app: aep-gateway-reconciler}
   ports: [{name: health, port: 8091, targetPort: health}]
 ---
+{{- $existing := lookup "v1" "PersistentVolumeClaim" $ns "postgres-data-lh" }}
+{{- if $existing }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: postgres-data-lh, namespace: {{ $ns }} }
+spec:
+{{ $existing.spec | toYaml | nindent 2 }}
+{{- else }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: postgres-data-lh, namespace: {{ $ns }}}
@@ -170,7 +178,16 @@ spec:
   accessModes: [ReadWriteOnce]
   storageClassName: {{ .Values.aepStack.postgres.storageClass }}
   resources: {requests: {storage: {{ .Values.aepStack.postgres.storage }}}}
+{{- end }}
 ---
+{{- $existing := lookup "v1" "PersistentVolumeClaim" $ns "rustfs-data-lh" }}
+{{- if $existing }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: rustfs-data-lh, namespace: {{ $ns }} }
+spec:
+{{ $existing.spec | toYaml | nindent 2 }}
+{{- else }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: rustfs-data-lh, namespace: {{ $ns }}}
@@ -178,6 +195,7 @@ spec:
   accessModes: [ReadWriteOnce]
   storageClassName: {{ .Values.aepStack.rustfs.storageClass }}
   resources: {requests: {storage: {{ .Values.aepStack.rustfs.storage }}}}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

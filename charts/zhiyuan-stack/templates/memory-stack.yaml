@@ -33,6 +33,15 @@ spec:
   selector: {app: embed-server}
   ports: [{port: 8080, targetPort: 8080}]
 ---
+
+{{- $existing := lookup "v1" "PersistentVolumeClaim" (include "zhiyuan.nsMemory" .) "openviking-data-lh" }}
+{{- if $existing }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: openviking-data-lh, namespace: {{ (include "zhiyuan.nsMemory" .) }} }
+spec:
+{{ $existing.spec | toYaml | nindent 2 }}
+{{- else }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -42,9 +51,12 @@ metadata:
   namespace: {{ include "zhiyuan.nsMemory" . }}
 spec:
   accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.memory.openviking.storageClass | default "longhorn" }}
   resources:
     requests:
       storage: {{ .Values.memory.openviking.storage }}
+{{- end }}
+
 ---
 apiVersion: v1
 kind: ConfigMap
