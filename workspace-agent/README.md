@@ -16,7 +16,7 @@ microVM。架构与 runbook 见 zhiyuan-docs `guides/microvm-runtime.md`（随 E
 
 | 包 | 职责 |
 |---|---|
-| `cmd/workspace-agent` | 入口：flags+Downward env（NODE_NAME/HOST_IP）、模板校验、10s resync 循环；直连 client（无 informer cache，对象个位数） |
+| `cmd/workspace-agent` | 入口：flags+Downward env（NODE_NAME/HOST_IP）、模板校验、10s resync 循环、`--metrics-addr`（默认 :9091，env METRICS_ADDR）上的 promhttp /metrics；直连 client（无 informer cache，对象个位数） |
 | `internal/render` | config 盘 payload（companions.json 逐字节取自 ConfigMap + env（含 memkey 逐搭档投递，0600）+ resolv.conf→kube-dns）与 hash（config 滚动身份）；/30 端点与 GuestMAC 派生 |
 | `internal/alloc` | host port 分配（8800-8899，CR 记录 + bind 探测） |
 | `internal/hostcmd` | `chroot /host` 执行节点自身的 ip/iptables/mkfs.ext4（ko 静态镜像不带用户land；与 kube-proxy 同一 iptables 后端） |
@@ -26,7 +26,7 @@ microVM。架构与 runbook 见 zhiyuan-docs `guides/microvm-runtime.md`（随 E
 | `internal/template` | 模板 SHA256SUMS 校验 + keep-2 GC |
 | `internal/vm` | Firecracker v1.17 UDS 驱动（golden PUT 序列、CtrlAltDel→SIGKILL 停机、serial rotate） |
 | `internal/proxy` | userspace TCP proxy（host port → guest:8080；SSE 透明；零 iptables 入站态） |
-| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 Failed） |
+| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 give-up）；give-up 后每小时自愈重试 1 次、Running 稳定 1 小时清零 bootFails；每轮 Resync（无论成败）刷新 `<workdir>/run/agent.heartbeat` 供 liveness 探针；私有 registry 的 /metrics（phase/bootFails/resync 错误/VM 数） |
 
 ## 测试纪律
 
