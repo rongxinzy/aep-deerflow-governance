@@ -16,7 +16,9 @@ After changing `api/v1alpha1/digitalemployee_types.go`:
 
 1. `make manifests generate` (CRD + deepcopy; float fields need
    `crd:allowDangerousTypes=true`, already set in the Makefile target)
-2. Copy `config/crd/bases/*.yaml` → `deploy/crd.yaml`
+2. `python3 scripts/sync-crds.py` — regenerates `deploy/crd.yaml` and the
+   `charts/zhiyuan-stack/crds/` copies from `config/crd/bases/*.yaml`. Do not
+   hand-copy: CI runs the same script with `--check` and fails on drift.
 3. Rebuild + redeploy the operator image — a typed client drops unknown
    fields, so CRD and operator must ship together.
 
