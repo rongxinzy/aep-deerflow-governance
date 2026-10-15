@@ -228,6 +228,19 @@ func (p *portal) collaborationAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	case "read":
 		if r.Method == "GET" {
+			if r.URL.Query().Get("id") == "" {
+				query := r.URL.Query()
+				if query.Get("conversationId") == "" {
+					writeJSON(w, 400, map[string]string{"error": "需要原会话编号"})
+					return
+				}
+				query.Set("sourceWorkspace", name)
+				query.Set("sourceCompanion", companion)
+				query.Set("sourceConversationId", query.Get("conversationId"))
+				r.URL.RawQuery = query.Encode()
+				p.listCollaborations(w, r, ident)
+				return
+			}
 			r.SetPathValue("id", r.URL.Query().Get("id"))
 			p.getCollaboration(w, r, ident)
 			return

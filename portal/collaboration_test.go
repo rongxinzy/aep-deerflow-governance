@@ -321,3 +321,28 @@ func TestCollaborationAgentCredentialAndListing(t *testing.T) {
 	cancel()
 	h.runCollaborations(ctx)
 }
+
+func TestCollaborationAgentReadsCurrentConversation(t *testing.T) {
+	h := collaborationHarness(t)
+	request := func(query string) *http.Request {
+		r := collaborationRequest("GET", "/?"+query, "")
+		r.Header.Set("X-Collaboration-Workspace", "ws-source")
+		r.Header.Set("X-Collaboration-Companion", "assistant")
+		r.Header.Set(collaborationTokenHeader, "wstok")
+		r.SetPathValue("action", "read")
+		return r
+	}
+	h.dbmock.ExpectQuery("SELECT c.id").WithArgs("u-x", "ws-source", "assistant", "23").WillReturnRows(sqlmock.NewRows([]string{"id", "requester", "owner_id", "target", "source", "created_at", "waiting"}))
+	w := httptest.NewRecorder()
+	h.collaborationAgent(w, request("conversationId=23&sourceWorkspace=forged"))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	expectThread(h, collaborationSource{Workspace: "ws-source", Companion: "assistant", ConversationID: 23})
+	h.dbmock.ExpectQuery("SELECT id,text").WillReturnRows(messageRows("replied"))
+	w = httptest.NewRecorder()
+	h.collaborationAgent(w, request("id=thread"))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	w = httptest.NewRecorder()
+	h.collaborationAgent(w, request(""))
+	require.Equal(t, 400, w.Code)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
+}

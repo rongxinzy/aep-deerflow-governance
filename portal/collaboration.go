@@ -111,7 +111,7 @@ func (p *portal) getCollaboration(w http.ResponseWriter, r *http.Request, ident 
 func (p *portal) listCollaborations(w http.ResponseWriter, r *http.Request, ident identity) {
 	rows, err := p.db.QueryContext(r.Context(), `SELECT c.id,c.requester,c.owner_id,c.target,c.source,c.created_at,
  EXISTS(SELECT 1 FROM companion_collaboration_messages m WHERE m.thread_id=c.id AND m.state='waiting_owner')
- FROM companion_collaborations c WHERE c.requester=$1 OR c.owner_id=$1 ORDER BY COALESCE((SELECT max(created_at) FROM companion_collaboration_messages WHERE thread_id=c.id),c.created_at) DESC LIMIT 100`, ident.UserID)
+ FROM companion_collaborations c WHERE (c.requester=$1 OR c.owner_id=$1) AND ($2='' OR (c.requester=$1 AND c.source::jsonb->>'workspace'=$2 AND c.source::jsonb->>'companion'=$3 AND c.source::jsonb->>'conversationId'=$4)) ORDER BY COALESCE((SELECT max(created_at) FROM companion_collaboration_messages WHERE thread_id=c.id),c.created_at) DESC LIMIT 100`, ident.UserID, r.URL.Query().Get("sourceWorkspace"), r.URL.Query().Get("sourceCompanion"), r.URL.Query().Get("sourceConversationId"))
 	if err != nil {
 		writeJSON(w, 503, map[string]string{"error": "协作列表暂不可用"})
 		return
