@@ -80,7 +80,7 @@ func (p *portal) collaborationMessages(ctx context.Context, id string) ([]collab
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []collaborationMessage{}
 	for rows.Next() {
 		var m collaborationMessage
@@ -116,7 +116,7 @@ func (p *portal) listCollaborations(w http.ResponseWriter, r *http.Request, iden
 		writeJSON(w, 503, map[string]string{"error": "协作列表暂不可用"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := []map[string]any{}
 	for rows.Next() {
 		var t collaborationThread
@@ -194,7 +194,7 @@ func (p *portal) sendCollaboration(w http.ResponseWriter, r *http.Request, ident
 		writeJSON(w, 503, map[string]string{"error": "消息尚未接收"})
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(r.Context(), `INSERT INTO companion_collaborations(id,requester,owner_id,target,source) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, id, ident.UserID, target.OwnerID, string(targetJSON), string(sourceJSON))
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO companion_collaboration_messages(id,thread_id,request_id,text) VALUES($1,$2,$3,$4) ON CONFLICT(thread_id,request_id) DO NOTHING`, mid, id, input.RequestID, input.Message)
@@ -286,7 +286,7 @@ func (p *portal) collaborationCall(ctx context.Context, ws *dev.PersonalWorkspac
 	if err != nil {
 		return nil, errors.New("搭档暂时未能回复")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("搭档服务暂不可用（%d）", resp.StatusCode)
 	}

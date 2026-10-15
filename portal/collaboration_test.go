@@ -126,11 +126,12 @@ func TestCollaborationSendAndIdempotency(t *testing.T) {
 					text = "different"
 				}
 				h.dbmock.ExpectQuery("SELECT text").WillReturnRows(sqlmock.NewRows([]string{"text"}).AddRow(text))
-				if scenario == "duplicate-conflict" {
+				switch scenario {
+				case "duplicate-conflict":
 					h.dbmock.ExpectRollback()
-				} else if scenario == "commit-error" {
+				case "commit-error":
 					h.dbmock.ExpectCommit().WillReturnError(errors.New("db"))
-				} else {
+				default:
 					h.dbmock.ExpectCommit()
 				}
 			}

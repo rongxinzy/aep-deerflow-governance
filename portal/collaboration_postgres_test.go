@@ -95,7 +95,7 @@ func TestCollaborationPostgresRelayRoundTrip(t *testing.T) {
 	require.Equal(t, 200, w.Code, w.Body.String())
 	// A newly opened pool/portal observes the answer and returns it once.
 	restarted := stdlib.OpenDB(*cfg)
-	defer restarted.Close()
+	defer func() { require.NoError(t, restarted.Close()) }()
 	h.db = restarted
 	require.True(t, h.processCollaboration(t.Context()))
 	require.False(t, h.processCollaboration(t.Context()))

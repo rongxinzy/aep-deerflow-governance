@@ -18,8 +18,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type traceContextKey struct{}
-
 var w3cPropagator = propagation.TraceContext{}
 
 // currentTraceParent renders the W3C header for the span context in ctx, or ""
@@ -32,11 +30,6 @@ func currentTraceParent(ctx context.Context) string {
 	carrier := propagation.HeaderCarrier(http.Header{})
 	w3cPropagator.Inject(trace.ContextWithSpanContext(ctx, sc), carrier)
 	return carrier.Get("traceparent")
-}
-
-// traceIDOf returns the hex trace id from ctx ("" when absent) — for logs.
-func traceIDOf(ctx context.Context) string {
-	return trace.SpanContextFromContext(ctx).TraceID().String()
 }
 
 func newSpanContext() (trace.SpanContext, error) {
@@ -57,7 +50,7 @@ func newSpanContext() (trace.SpanContext, error) {
 
 // withRequestTrace extracts the inbound traceparent (W3C) or mints a fresh
 // trace when absent/malformed, and stashes it in the context. Downstream code
-// reads it via currentTraceParent / traceIDOf.
+// reads it via currentTraceParent.
 func withRequestTrace(ctx context.Context, header http.Header) (context.Context, string, error) {
 	extracted := w3cPropagator.Extract(ctx, propagation.HeaderCarrier(header))
 	if sc := trace.SpanContextFromContext(extracted); sc.IsValid() {
