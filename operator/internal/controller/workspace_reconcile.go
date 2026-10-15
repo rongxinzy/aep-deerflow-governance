@@ -79,6 +79,7 @@ type companionManifestEntry struct {
 	Name         string   `json:"name"`
 	DisplayName  string   `json:"displayName,omitempty"`
 	Model        string   `json:"model"`
+	Persona      string   `json:"persona,omitempty"`
 	Tools        []string `json:"tools,omitempty"`
 	MemkeySecret string   `json:"memkeySecret,omitempty"`
 	MemoryScopes []string `json:"memoryScopes,omitempty"`
@@ -87,6 +88,7 @@ type companionManifestEntry struct {
 }
 
 type companionsManifest struct {
+	PortalURL  string                   `json:"portalURL"`
 	Owner      string                   `json:"owner"`
 	Workspace  string                   `json:"workspace"`
 	Companions []companionManifestEntry `json:"companions"`
@@ -97,6 +99,7 @@ type companionsManifest struct {
 // rolls the Deployment — the manifest is the single source of truth.
 func renderCompanionsManifest(workspace *v1alpha1.PersonalWorkspace) string {
 	manifest := companionsManifest{
+		PortalURL:  "http://de-portal." + workspace.Namespace + ".svc:8090",
 		Owner:      workspace.Spec.Owner,
 		Workspace:  workspace.Name,
 		Companions: make([]companionManifestEntry, 0, len(workspace.Spec.Companions)),
@@ -107,6 +110,7 @@ func renderCompanionsManifest(workspace *v1alpha1.PersonalWorkspace) string {
 			Name:         c.Name,
 			DisplayName:  c.DisplayName,
 			Model:        c.Model,
+			Persona:      c.Persona,
 			Tools:        c.Tools,
 			MemkeySecret: companionMemkeySecretName(workspace, c.Name),
 			MemoryLimit:  c.Resources.Memory,

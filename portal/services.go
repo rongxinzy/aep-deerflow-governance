@@ -18,7 +18,9 @@ import (
 // browser-only and must never hold the OpenViking root key, so the portal
 // probes both services server-side and reports a summary.
 
-var serviceProbeClient = &http.Client{Timeout: 5 * time.Second}
+// 出站统一走 tracedTransport：AEP 控制面调用自动携带 traceparent，
+// 逐调用点零改动（63 处 NewRequestWithContext 一处包圆）。
+var serviceProbeClient = &http.Client{Timeout: 5 * time.Second, Transport: tracedTransport{}}
 
 func (p *portal) platformSecretKey(ctx context.Context, key string) (string, error) {
 	var secret corev1.Secret

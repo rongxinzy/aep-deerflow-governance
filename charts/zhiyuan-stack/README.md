@@ -75,9 +75,21 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 - **日志**（ns `logging`）：单节点 ES + Kibana（NodePort 30160）+ fluent-bit
   （SA/RBAC 齐备的 kubernetes filter → ES 文档带 pod/namespace 元数据）。采集
   范围 = `observability.logging.fluentBit.namespaces`（共享集群纪律：不列不采）。
-- **审计**：audit-shipper CronJob（AEP 事件/用户 + portal 员工/申请快照 + 模型
-  健康快照与 model_failover 字段）。管理员口令来自一次性 Secret
-  `observability.auditShipper.credentialsSecret`（不入 chart，同 de-platform-creds 纪律）。
+- **审计**：audit-shipper CronJob。脚本本体只有一份：
+  `charts/zhiyuan-stack/files/ship.py`（模板用 `.Files.Get` 装载；收编前的
+  参考实例 `k3s/audit-shipper.yaml` 由 `scripts/test_audit_shipper.py` 守住
+  逐字符一致）。按各自接口的 schema 分别采集：管理审计
+  `/aep/v1/admin/audit/operations`、认证日志 `/aep/v1/admin/audit/authentication`、
+  控制事件 `/aep/v1/admin/control-events`、遥测 `/aep/v1/admin/events`，加 AEP
+  用户/模型健康与 portal 员工/申请快照。每个分页源都消费 `nextCursor` 直到取完；
+  一页入库确认后才把游标写进 `zhiyuan-shipper-state` 索引，失败的那页下轮
+  重读（事件带稳定文档 id，重读是 upsert 不是重复）。bulk 逐项判定：429/5xx
+  只重试被拒文档，永久拒绝会打印文档 id 并以非零退出，同时触发
+  `AuditShipperFailed` 告警——**CronJob 成功不再等同于归档完整**。
+  管理员口令来自一次性 Secret `observability.auditShipper.credentialsSecret`
+  （不入 chart，同 de-platform-creds 纪律）；该账号需具备 `audit.read`（管理
+  审计/认证日志）、`events.read`（事件/控制事件）、`users.read`、`models.read`
+  ——缺哪个权限，日志就报哪个源失败，不会静默少采。
 - **节点日志上限**：node-log-cap DaemonSet（清 >200MiB 轮转档案、活跃文件超 1GiB
   截留尾部）。journald 的 SystemMaxUse 是主机单元，维持
   `k3s/node-log-cap/README.md` 的手工步骤。

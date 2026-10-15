@@ -64,6 +64,8 @@ spec:
             - --template-tag={{ .Values.workspaceAgent.templateImage.tag }}
             - --port-range={{ .Values.workspaceAgent.portRange }}
             - --model-base-url={{ .Values.workspaceAgent.modelBaseURL }}
+            - --memory-base-url={{ .Values.workspaceAgent.memoryBaseURL }}
+            - --metrics-addr=:{{ .Values.workspaceAgent.metricsPort }}
             - --host-root=/host
           env:
             - name: NODE_NAME
@@ -74,6 +76,22 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.workspaceAgent.metricsPort }}
+              hostPort: {{ .Values.workspaceAgent.metricsPort }}
+          # 存活性 = resync 循环仍在跳动（心跳文件每轮 Resync 结束刷新，与单轮
+          # 成败无关）。误判的代价是全节点 VM 随容器断电，因此参数刻意保守：
+          # 60s 起等 + 连续 5 次（约 2.5 分钟心跳停滞）才重启。
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -n "$(find {{ .Values.workspaceAgent.workdirRoot }}/run/agent.heartbeat -mmin -3 2>/dev/null)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
           securityContext:
             privileged: true
             runAsUser: 0

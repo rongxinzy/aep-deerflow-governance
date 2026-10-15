@@ -118,6 +118,11 @@ spec:
                         (DNS-label rules; unique inside the workspace).
                       pattern: ^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$
                       type: string
+                    persona:
+                      description: Persona describes the owner-configured companion
+                        behavior.
+                      maxLength: 2000
+                      type: string
                     resources:
                       description: Resources bounds this companion inside the workspace
                         budget.

@@ -44,6 +44,14 @@ const applyNoteAnnotation = "digitalemployee.zhiyuan.io/apply-note"
 
 func (p *portal) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/colleague-companions", p.auth(p.colleagueDirectory))
+	mux.HandleFunc("PUT /api/v1/colleague-companions/{workspace}/{companion}", p.auth(p.updateCompanionContact))
+	mux.HandleFunc("GET /api/v1/collaborations", p.auth(p.listCollaborations))
+	mux.HandleFunc("POST /api/v1/collaborations", p.auth(func(w http.ResponseWriter, r *http.Request, i identity) { p.sendCollaboration(w, r, i, nil) }))
+	mux.HandleFunc("GET /api/v1/collaborations/{id}", p.auth(p.getCollaboration))
+	mux.HandleFunc("POST /api/v1/collaborations/{id}/reply", p.auth(p.replyCollaboration))
+	mux.HandleFunc("POST /api/v1/collaborations/{id}/retry", p.auth(p.retryCollaboration))
+	mux.HandleFunc("/api/v1/collaboration-agent/{action}", p.collaborationAgent)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /api/v1/employees", p.auth(p.applyForEmployee))
 	// Personal workspaces (个人搭档): self-service, one per user, owner/admin
