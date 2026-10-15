@@ -15,6 +15,9 @@ spec:
     type: openviking
     serverURL: http://openviking.memory-system.svc.cluster.local:1933
     accountID: zhiyuan
+    # instance (default): every user of this employee shares one memory space.
+    # requester: partition per requesting user (FR-ME-02).
+    memoryScope: instance
     singleTenantInstance: true  # per-employee memory user (auth-disabled runtime)
   knowledge:
     type: weknora

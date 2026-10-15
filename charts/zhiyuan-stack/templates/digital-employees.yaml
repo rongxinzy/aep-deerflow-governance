@@ -18,6 +18,10 @@ spec:
     type: openviking
     serverURL: http://openviking.{{ $.Values.global.namespaces.memory }}.svc.cluster.local:1933
     accountID: {{ $.Values.memory.openviking.account }}
+    memoryScope: {{ $.Values.memory.openviking.scope | default "instance" }}
+{{- if $.Values.memory.openviking.sharedPeerID }}
+    sharedPeerID: {{ $.Values.memory.openviking.sharedPeerID | quote }}
+{{- end }}
     singleTenantInstance: true
   governance:
     aepBaseURL: {{ $.Values.aep.baseURL }}

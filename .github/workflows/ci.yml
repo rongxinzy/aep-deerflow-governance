@@ -41,6 +41,11 @@ jobs:
           fi
       - name: go vet
         run: (cd operator && go vet ./...) && (cd portal && go vet ./...)
+      # The chart ships its own CRD copies; a regenerated base CRD that is not
+      # synced here ships a stale schema, and the structural schema then prunes
+      # the new fields silently.
+      - name: chart CRD sync
+        run: python scripts/sync-crds.py --check
       - name: PostgreSQL knowledge deletion and binding concurrency
         working-directory: portal
         env:

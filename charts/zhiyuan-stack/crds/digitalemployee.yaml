@@ -253,11 +253,31 @@ spec:
                     maximum: 100000
                     minimum: 256
                     type: integer
+                  memoryScope:
+                    default: instance
+                    description: |-
+                      MemoryScope selects how OpenViking memory is partitioned inside this
+                      employee. "instance" (default) keeps the shipped behavior: memory
+                      belongs to the employee instance, so every requester shares one space.
+                      "requester" partitions memory per requesting user (DeerFlow's
+                      memory_scope knob), so several humans on one instance stop sharing one
+                      memory space. Instance-to-instance isolation is unchanged either way.
+                    enum:
+                    - instance
+                    - requester
+                    type: string
                   scoreThreshold:
                     maximum: 1
                     type: number
                   serverURL:
                     description: ServerURL of the OpenViking service.
+                    type: string
+                  sharedPeerID:
+                    description: |-
+                      SharedPeerID is an optional curated shared memory bucket, read in
+                      addition to the requester's own memory when MemoryScope is "requester".
+                      It must use the backend-reserved "df-shared-" prefix. Empty means
+                      personal memory only. Ignored when MemoryScope is "instance".
                     type: string
                   singleTenantInstance:
                     default: false
@@ -381,6 +401,34 @@ spec:
                           - openai
                           - anthropic
                           type: string
+                        reasoning:
+                          description: |-
+                            Reasoning declares the model's thinking behavior so the runtime does
+                            not have to infer it (DeerFlow turns thinking off for undeclared
+                            models even when the upstream emits reasoning_content). Derived from
+                            the AEP catalog's reasoningCompatibility.
+                          properties:
+                            history:
+                              description: |-
+                                History policy for reasoning across turns: preserve keeps
+                                reasoning_content on assistant messages (required by
+                                requiresReasoningContentOnAssistantMessages upstreams), clear drops
+                                it. Empty leaves the runtime default.
+                              enum:
+                              - preserve
+                              - clear
+                              type: string
+                            thinking:
+                              description: |-
+                                Thinking policy: unsupported (never), optional (caller toggles,
+                                default on), required (always on). Mapped from a declared
+                                thinkingFormat.
+                              enum:
+                              - unsupported
+                              - optional
+                              - required
+                              type: string
+                          type: object
                       required:
                       - name
                       - provider
