@@ -41,7 +41,7 @@ AEP 栈本体自 2026-10-07 起由 `charts/zhiyuan-stack` 纳管
 2. AEP 栈 → readyz 200 → postgres 建 `deportal` 库 → `seed-aep.sh`
 3. Higress → `bigmodel-anthropic-route.yaml`（VLM 转换子路由）→ AEP 注册
    anthropic 模型并 `data-plane/publish`（`aepctl model create --protocol
-   anthropic`，凭证走 AEP credential + `aep-credential-<id>` Secret），员工 CR
+   anthropic`，凭证走 AEP credential + `aep-credential-<id>` Secret（**2026-10-15 起投放于专用 ns `aep-credentials`**——reconciler 0.6.0/#285 强制从该 ns 读取、RBAC 仅授该处 secrets:get；存量三个已迁移，higress-system 旧副本留作回滚参考勿再更新）），员工 CR
    的 `modelBaseURL` 加 `/<模型ID>` 前缀。已注册模型：
    - `bench-anthropic` → 在线 BigModel（glm-5.3-flash，凭证走 AEP）
    - `bench-qwen` → l20 节点 llama.cpp（`http://172.18.5.123:8000`，
