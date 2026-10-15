@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +26,21 @@ import (
 // secret the workspace reuses (same key the standalone pi-companion
 // deployment consumes; the AEP data-plane JWT path replaces it later).
 const modelAPIKeySecretKey = "BIGMODEL_API_KEY"
+
+// defaultOpenVikingBaseURL is the in-cluster shared OpenViking service. The
+// rendered OPENVIKING_BASE_URL prefers the CR's spec.memory.serverURL (the
+// portal always sets it); this constant covers hand-written CRs without a
+// memory block.
+const defaultOpenVikingBaseURL = "http://openviking.memory-system.svc.cluster.local:1933"
+
+// companionEnvName renders PW_<UPPER_SNAKE(name)>_<KEY>: the same rule the
+// workspace-agent config disk applies (workspace-agent/internal/render/
+// config.go envName), so pod and microvm forms deliver identical
+// per-companion env names.
+func companionEnvName(companion, key string) string {
+	up := strings.ToUpper(strings.ReplaceAll(companion, "-", "_"))
+	return "PW_" + up + "_" + key
+}
 
 func (r *PersonalWorkspaceReconciler) ensureWorkspaceChildren(ctx context.Context, workspace *v1alpha1.PersonalWorkspace) error {
 	// The manifest ConfigMap is shared by both runtimes: the pod form rolls
@@ -146,6 +162,10 @@ func (r *PersonalWorkspaceReconciler) renderWorkspaceDeployment(workspace *v1alp
 	replicas := int32(1)
 
 	var envFrom []corev1.EnvFromSource
+	// companions[0]'s memkey keeps riding envFrom unprefixed: the existing
+	// single-companion runtime reads OPENVIKING_API_KEY directly, and the
+	// per-companion env below is additive (the gateway maps PW_<NAME>_* down
+	// to each child process).
 	if name := companionMemkeySecretName(workspace, primary.Name); name != "" {
 		envFrom = append(envFrom, corev1.EnvFromSource{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}})
 	}
@@ -164,6 +184,35 @@ func (r *PersonalWorkspaceReconciler) renderWorkspaceDeployment(workspace *v1alp
 			}},
 		})
 	}
+	// Per-companion secrets: one PW_<NAME>_OPENVIKING_API_KEY and one
+	// PW_<NAME>_WORKSPACE_INTERNAL_TOKEN per roster entry, each pointing at
+	// that companion's memkey secret — the same delivery contract as the
+	// microvm config disk. The token authenticates collaboration/chat calls
+	// (companion server reads WORKSPACE_INTERNAL_TOKEN via the gateway's
+	// PW_<NAME>_* mapping); without it non-primary companions collaborate
+	// under no identity while the primary's unprefixed token leaks to every
+	// child through process.env.
+	for i := range spec.Companions {
+		c := &spec.Companions[i]
+		if name := companionMemkeySecretName(workspace, c.Name); name != "" {
+			for _, key := range []string{workspaceMemkeyKey, workspaceTokenKey} {
+				env = append(env, corev1.EnvVar{
+					Name: companionEnvName(c.Name, key),
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: name},
+						Key:                  key,
+					}},
+				})
+			}
+		}
+	}
+	// OPENVIKING_BASE_URL: companions dial OpenViking directly. Prefers the
+	// CR's spec.memory.serverURL; falls back to the shared in-cluster service.
+	memoryBaseURL := defaultOpenVikingBaseURL
+	if spec.Memory != nil && spec.Memory.ServerURL != "" {
+		memoryBaseURL = spec.Memory.ServerURL
+	}
+	env = append(env, corev1.EnvVar{Name: "OPENVIKING_BASE_URL", Value: memoryBaseURL})
 	if r.RoomsAEPBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "AEP_BASE_URL", Value: r.RoomsAEPBaseURL})
 	}

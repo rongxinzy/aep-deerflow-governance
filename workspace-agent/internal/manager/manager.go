@@ -49,6 +49,7 @@ type Config struct {
 	TemplateTag    string
 	PortLo, PortHi int32
 	ModelBaseURL   string
+	MemoryBaseURL  string // OpenViking service; rendered as OPENVIKING_BASE_URL on the config disk
 	SerialLogMB    int
 }
 
@@ -197,7 +198,7 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	payload, err := render.BuildPayload(render.Inputs{
 		LifecycleToken: lifecycleToken,
 		Workspace:      ws, Manifest: manifestJSON, Memkeys: memkeys, Credentials: creds,
-		ModelBaseURL: m.cfg.ModelBaseURL, DNSIP: dnsIP,
+		ModelBaseURL: m.cfg.ModelBaseURL, MemoryBaseURL: m.cfg.MemoryBaseURL, DNSIP: dnsIP,
 		DNSSearch: m.cfg.Namespace + ".svc.cluster.local svc.cluster.local",
 	})
 	if err != nil {

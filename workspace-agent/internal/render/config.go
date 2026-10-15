@@ -53,15 +53,19 @@ type Inputs struct {
 	Credentials *corev1.Secret
 	// ModelBaseURL is the model gateway route (service DNS form).
 	ModelBaseURL string
+	// MemoryBaseURL is the OpenViking service the companions dial directly
+	// (rendered as global OPENVIKING_BASE_URL; empty skips the line).
+	MemoryBaseURL string
 	// DNSIP is the kube-dns service ClusterIP.
 	DNSIP string
 	// DNSSearch is the resolv.conf search line (optional).
 	DNSSearch string
 }
 
-// envVarNames are the memkey secret keys delivered per companion. The
-// runtime does not consume them yet (known gap) — they are delivered for
-// forward compatibility and audit parity with the pod form.
+// envVarNames are the memkey secret keys delivered per companion as
+// PW_<UPPER_SNAKE(name)>_<KEY>. Consumption contract: the gateway maps
+// PW_<NAME>_OPENVIKING_API_KEY to the child process's OPENVIKING_API_KEY, and
+// the companion process dials OpenViking directly at OPENVIKING_BASE_URL.
 const (
 	memkeyKey     = "OPENVIKING_API_KEY"
 	memkeyToken   = "WORKSPACE_INTERNAL_TOKEN"
@@ -114,6 +118,9 @@ func BuildPayload(in Inputs) (*ConfigPayload, error) {
 	}
 	if in.LifecycleToken != "" {
 		lines = append(lines, "WORKSPACE_LIFECYCLE_TOKEN="+in.LifecycleToken)
+	}
+	if in.MemoryBaseURL != "" {
+		lines = append(lines, "OPENVIKING_BASE_URL="+in.MemoryBaseURL)
 	}
 	if in.Credentials != nil {
 		if key := in.Credentials.Data[apiKeyDataKey]; len(key) > 0 {

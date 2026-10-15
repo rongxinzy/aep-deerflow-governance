@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -232,6 +233,72 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			deployment := &appsv1.Deployment{}
 			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: ws.Namespace, Name: workspaceDeploymentName(ws)}, deployment)).To(Succeed())
 			Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(Equal("reg/pi-companion:0.2.1"))
+		})
+
+		It("passes the companion persona through to the manifest, omitting empty ones", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Companions[0].Persona = "你是用户的工作助手，语气简洁专业。"
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+
+			manifest := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceConfigName(workspace)}, manifest)).To(Succeed())
+			Expect(manifest.Data["companions.json"]).To(ContainSubstring(`"persona": "你是用户的工作助手，语气简洁专业。"`))
+			Expect(strings.Count(manifest.Data["companions.json"], `"persona":`)).To(Equal(1),
+				"an empty persona must not appear as a key (researcher carries none)")
+		})
+
+		It("injects per-companion OpenViking env from each memkey secret plus the global base URL", func(ctx context.Context) {
+			reconcile(ctx)
+
+			deployment := getDeployment(ctx)
+			env := map[string]corev1.EnvVar{}
+			for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+				env[item.Name] = item
+			}
+			assistantKey := env["PW_ASSISTANT_OPENVIKING_API_KEY"]
+			Expect(assistantKey.ValueFrom).NotTo(BeNil(), "per-companion key must come from the memkey secret")
+			Expect(assistantKey.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-assistant-memkey"))
+			Expect(assistantKey.ValueFrom.SecretKeyRef.Key).To(Equal("OPENVIKING_API_KEY"))
+			researcherKey := env["PW_RESEARCHER_OPENVIKING_API_KEY"]
+			Expect(researcherKey.ValueFrom).NotTo(BeNil(), "every roster entry gets its own env, not just companions[0]")
+			Expect(researcherKey.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-researcher-memkey"))
+			Expect(researcherKey.ValueFrom.SecretKeyRef.Key).To(Equal("OPENVIKING_API_KEY"))
+
+			assistantToken := env["PW_ASSISTANT_WORKSPACE_INTERNAL_TOKEN"]
+			Expect(assistantToken.ValueFrom).NotTo(BeNil(), "per-companion internal token rides the same delivery contract")
+			Expect(assistantToken.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-assistant-memkey"))
+			Expect(assistantToken.ValueFrom.SecretKeyRef.Key).To(Equal("WORKSPACE_INTERNAL_TOKEN"))
+			researcherToken := env["PW_RESEARCHER_WORKSPACE_INTERNAL_TOKEN"]
+			Expect(researcherToken.ValueFrom).NotTo(BeNil(), "every roster entry gets its own token env")
+			Expect(researcherToken.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-researcher-memkey"))
+			Expect(researcherToken.ValueFrom.SecretKeyRef.Key).To(Equal("WORKSPACE_INTERNAL_TOKEN"))
+
+			Expect(env["OPENVIKING_BASE_URL"].Value).To(Equal(fx.server.URL), "spec.memory.serverURL wins")
+
+			var unprefixed bool
+			for _, source := range deployment.Spec.Template.Spec.Containers[0].EnvFrom {
+				if source.SecretRef != nil && source.SecretRef.Name == "pw-zhangsan-assistant-memkey" {
+					unprefixed = true
+				}
+			}
+			Expect(unprefixed).To(BeTrue(), "companions[0]'s unprefixed envFrom stays for the single-companion runtime")
+		})
+
+		It("falls back to the shared OpenViking service URL when spec.memory is absent", func(ctx context.Context) {
+			updated := getWorkspace(ctx)
+			updated.Spec.Memory = nil
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+
+			deployment := getDeployment(ctx)
+			var baseURL string
+			for _, item := range deployment.Spec.Template.Spec.Containers[0].Env {
+				if item.Name == "OPENVIKING_BASE_URL" {
+					baseURL = item.Value
+				}
+			}
+			Expect(baseURL).To(Equal(defaultOpenVikingBaseURL))
 		})
 
 		It("assigns the microvm runtime to a pool node without rendering pod children", func(ctx context.Context) {
