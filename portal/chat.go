@@ -233,6 +233,9 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 			// carry no api/ segment and pass through untouched.
 			stripped := strings.TrimPrefix(rest, "api/")
 			pr.Out.URL.Path = "/api/" + stripped
+			if tp := currentTraceParent(pr.In.Context()); tp != "" {
+				pr.Out.Header.Set("traceparent", tp)
+			}
 			pr.Out.Header.Set("X-DeerFlow-Internal-Token", token)
 			pr.Out.Header.Set(ownerHeaderName, ident.UserID)
 			pr.Out.Header.Del(knowledgeContextHeader)
