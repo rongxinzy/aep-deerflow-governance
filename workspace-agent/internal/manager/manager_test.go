@@ -390,6 +390,31 @@ func TestHeartbeatWrittenEveryResyncRound(t *testing.T) {
 	assert.FileExists(t, hb)
 }
 
+func TestHeartbeatAndPhaseRecordedPerWorkspace(t *testing.T) {
+	objects := baseObjects(manifestV1)
+	// No manifest CM: reconcile fails before a supervisor exists.
+	e := newEnv(t, append(objects[:1:1], objects[2:]...)...)
+	ws := getWS(t, e.client)
+	// Direct call: the Resync defer backstop is not involved, so a heartbeat
+	// here proves the per-workspace write (the probe window must bound a
+	// single workspace's processing time, not a whole round's).
+	require.Error(t, e.m.reconcileAssigned(context.Background(), ws))
+	hb := filepath.Join(e.m.cfg.Workdir, "run", "agent.heartbeat")
+	raw, err := os.ReadFile(hb)
+	require.NoError(t, err)
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), stamp, time.Minute)
+	// The phase map recorded the failStatus result even though no
+	// supervisor was ever created.
+	e.m.mu.Lock()
+	_, hasSup := e.m.supers["ws1"]
+	phase := e.m.phases["ws1"]
+	e.m.mu.Unlock()
+	assert.False(t, hasSup)
+	assert.Equal(t, string(v1alpha1.WorkspacePhaseFailed), phase)
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	e := newEnv(t, baseObjects(manifestV1)...)
 	require.NoError(t, e.m.Resync(context.Background()))
@@ -413,4 +438,32 @@ func TestMetricsEndpoint(t *testing.T) {
 	require.Error(t, e.m.Resync(context.Background()))
 	body = scrape()
 	assert.Contains(t, body, "pw_node_agent_resync_errors_total 1")
+}
+
+func TestPhaseMetricVisibleBeforeSupervisorCreation(t *testing.T) {
+	objects := baseObjects(manifestV1)
+	// Manifest CM absent: reconcile fails before a supervisor exists (the
+	// early-provisioning blind spot that left WorkspacePhaseStuck unfireable).
+	e := newEnv(t, append(objects[:1:1], objects[2:]...)...)
+	require.Error(t, e.m.Resync(context.Background()))
+	e.m.mu.Lock()
+	assert.Empty(t, e.m.supers, "failure happened before supervisor creation")
+	e.m.mu.Unlock()
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		e.m.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		return rec.Body.String()
+	}
+	body := scrape()
+	assert.Contains(t, body, `pw_node_agent_workspace_phase{phase="Failed",workspace="ws1"} 1`,
+		"phase metric comes from the CR List, not the supervisor set")
+	assert.Contains(t, body, "pw_node_agent_workspaces 0")
+	// Once the CR is gone for good, the series is pruned: finalize removes
+	// the CR, the next round drops the map entry.
+	ws := getWS(t, e.client)
+	require.NoError(t, e.client.Delete(context.Background(), ws))
+	require.NoError(t, e.m.Resync(context.Background()))
+	require.NoError(t, e.m.Resync(context.Background()))
+	assert.NotContains(t, scrape(), `workspace="ws1"`)
 }
