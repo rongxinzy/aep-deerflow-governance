@@ -213,6 +213,15 @@ memory:
   enabled: true
   openviking:
     account: zhiyuan
+    # memoryScope on the DigitalEmployee CR. "instance" (default) keeps the
+    # shipped behaviour: memory belongs to the employee instance, so everyone
+    # using it shares one space. "requester" partitions memory per requesting
+    # user (FR-ME-02) — requires an operator that renders memory_scope.
+    scope: instance
+    # Optional curated shared bucket read in addition to a requester's own
+    # memory when scope=requester. Must start with "df-shared-"; empty means
+    # personal memory only. Ignored when scope=instance.
+    sharedPeerID: ""
     rootAPIKey: ""        # credential — local values file only
     storage: 10Gi
     vlm:
