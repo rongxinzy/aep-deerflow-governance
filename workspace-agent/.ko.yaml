@@ -1,0 +1,3 @@
+# ko 基座：busybox（含 chroot/sh 工具）——agent 经 chroot /host 执行节点侧
+# ip/iptables/mkfs.ext4，distroless/static 无 chroot 不可用。
+defaultBaseImage: harbor.zhiyuan.local:30443/zhiyuan/busybox:1.37

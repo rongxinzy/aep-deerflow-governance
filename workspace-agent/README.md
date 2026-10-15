@@ -16,17 +16,17 @@ microVM。架构与 runbook 见 zhiyuan-docs `guides/microvm-runtime.md`（随 E
 
 | 包 | 职责 |
 |---|---|
-| `cmd/workspace-agent` | 入口：flags+Downward env（NODE_NAME/HOST_IP）、模板校验、10s resync 循环；直连 client（无 informer cache，对象个位数） |
+| `cmd/workspace-agent` | 入口：flags+Downward env（NODE_NAME/HOST_IP）、模板校验、10s resync 循环、`--metrics-addr`（默认 :9091，env METRICS_ADDR）上的 promhttp /metrics；直连 client（无 informer cache，对象个位数） |
 | `internal/render` | config 盘 payload（companions.json 逐字节取自 ConfigMap + env（含 memkey 逐搭档投递，0600）+ resolv.conf→kube-dns）与 hash（config 滚动身份）；/30 端点与 GuestMAC 派生 |
 | `internal/alloc` | host port 分配（8800-8899，CR 记录 + bind 探测） |
-| `internal/hostcmd` | `chroot /host` 执行节点自身的 ip/iptables/mkfs.ext4（ko 静态镜像不带用户land；与 kube-proxy 同一 iptables 后端） |
+| `internal/hostcmd` | `chroot /host` 执行节点自身的 ip/iptables/mkfs.ext4（基座 busybox 自带 chroot/sh；走宿主是为了与 kube-proxy 同一 iptables 后端） |
 | `internal/tap` | tap-pw-<ws> 生命周期 + per-subnet MASQUERADE |
 | `internal/iptables` | E3b 白名单链 FC_WL_<ws>：scratch 链先建后换（部分渲染不会临时放宽）、FORWARD 跳入、端点变更 resync 跟随 |
 | `internal/disk` | data 盘（建一次永不重建）与 config 盘（`mkfs.ext4 -d` 免挂载、tmp+rename 原子写；**仅 VM 停机时写**——PoC 热写损坏教训，状态机 guard） |
 | `internal/template` | 模板 SHA256SUMS 校验 + keep-2 GC |
 | `internal/vm` | Firecracker v1.17 UDS 驱动（golden PUT 序列、CtrlAltDel→SIGKILL 停机、serial rotate） |
 | `internal/proxy` | userspace TCP proxy（host port → guest:8080；SSE 透明；零 iptables 入站态） |
-| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 Failed） |
+| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 give-up）；give-up 后每小时自愈重试 1 次、Running 稳定 1 小时清零 bootFails；心跳 `<workdir>/run/agent.heartbeat` 在每个 workspace 处理完后刷新（每轮结束兜底，与成败无关）供 liveness 探针（最迟发现时延 ≈ 3min 陈旧窗 + 2.5min 失败累计 ≈ 5.5 分钟）；私有 registry 的 /metrics（phase 以 CR List 为准——sup 创建前的失败也有序列；bootFails/VM 数取 supervisor 快照；另有 resync 错误计数）；metrics 端口 bind 失败即退出（fail-fast，不让告警静默失明） |
 
 ## 测试纪律
 

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +40,18 @@ import (
 
 // AgentFinalizer guards node-side teardown (VM, tap, chains, disks, dir).
 const AgentFinalizer = "digitalemployee.zhiyuan.io/workspace-node-agent"
+
+// Boot-failure policy. Vars (not consts) so tests can shrink the windows.
+var (
+	// maxBootFails is the give-up threshold for consecutive boot failures.
+	maxBootFails = 5
+	// giveUpRetryInterval is how long a given-up supervisor waits before one
+	// retry attempt (self-heal: no human spec change required).
+	giveUpRetryInterval = time.Hour
+	// stableResetDuration is how long a VM must stay continuously Running
+	// before bootFails is forgiven.
+	stableResetDuration = time.Hour
+)
 
 // Config wires the manager.
 type Config struct {
@@ -62,14 +75,24 @@ type Manager struct {
 	// NewDriver builds a driver per run dir (tests swap fakes in).
 	NewDriver func(runDir string) vm.Driver
 
-	mu        sync.Mutex
-	supers    map[string]*Supervisor
+	mu     sync.Mutex
+	supers map[string]*Supervisor
+	// phases is the /metrics source for pw_node_agent_workspace_phase, keyed by
+	// workspace name and refreshed from every CR List — including workspaces
+	// whose reconcile fails before a supervisor exists (early provisioning
+	// failures would otherwise emit no series at all and WorkspacePhaseStuck
+	// could never fire). Entries are pruned when the CR leaves the assigned
+	// set (Resync orphan sweep) and on teardown.
+	phases    map[string]string
 	usedPorts func() []int32 // extra occupied ports (proxies of live supervisors)
+
+	resyncErrors atomic.Int64 // rounds that returned an error (metrics)
 }
 
 // New builds the manager.
 func New(cfg Config, c client.Client, runner hostcmd.Runner, disks disk.DiskIO, newDriver func(string) vm.Driver) *Manager {
-	m := &Manager{cfg: cfg, client: c, runner: runner, disks: disks, NewDriver: newDriver, supers: map[string]*Supervisor{}}
+	m := &Manager{cfg: cfg, client: c, runner: runner, disks: disks, NewDriver: newDriver,
+		supers: map[string]*Supervisor{}, phases: map[string]string{}}
 	m.usedPorts = func() []int32 { return m.livePorts() }
 	return m
 }
@@ -87,6 +110,15 @@ func (m *Manager) livePorts() []int32 {
 }
 
 // Supervisor is one workspace's runtime handle.
+//
+// Concurrency: /metrics scrapes (collector) run concurrently with the resync
+// loop. The scalar fields below (hostPort, configHash, bootFails, lastBoot,
+// runningSince) are read/written only under Manager.mu — short critical
+// sections around the value copy; long operations (driver.Start/Stop, HTTP
+// healthz, disk writes, API patches) stay outside the lock. driver and proxy
+// carry their own synchronization: vm.Driver implementations are required to
+// be safe for concurrent use (the scrape's Alive races reconcile's Stop), and
+// proxy swaps follow stop-outside-lock + publish-under-lock.
 type Supervisor struct {
 	name       string
 	subnet     string // assigned /30 (full teardown incl. NAT rule)
@@ -96,32 +128,39 @@ type Supervisor struct {
 	configHash string // hash the running VM was booted with
 	bootFails  int
 	lastBoot   time.Time
+	// runningSince marks the start of the current uninterrupted healthy
+	// stretch; zeroed whenever the guest fails healthz. After
+	// stableResetDuration of stability, bootFails is forgiven.
+	runningSince time.Time
 }
 
 // Resync lists workspaces, reconciles assigned ones, tears down orphans.
-func (m *Manager) Resync(ctx context.Context) error {
+func (m *Manager) Resync(ctx context.Context) (firstErr error) {
+	// Every finished round heartbeats, error or not (backstop for the
+	// per-workspace heartbeats inside the loop below): the heartbeat feeds
+	// the DaemonSet liveness probe, whose blast radius is every VM on the
+	// node. A workspace stuck in give-up makes Resync return an error
+	// indefinitely; gating the heartbeat on success would misread a healthy
+	// loop as wedged.
+	defer func() {
+		m.writeHeartbeat()
+		if firstErr != nil {
+			m.resyncErrors.Add(1)
+		}
+	}()
 	var list v1alpha1.PersonalWorkspaceList
 	if err := m.client.List(ctx, &list, client.InNamespace(m.cfg.Namespace)); err != nil {
 		return err
 	}
 	assigned := map[string]bool{}
-	var firstErr error
 	for i := range list.Items {
 		ws := &list.Items[i]
 		if ws.Spec.Runtime != "microvm" || ws.Status.NodeName != m.cfg.NodeName {
 			continue
 		}
 		assigned[ws.Name] = true
-		if err := m.reconcile(ctx, ws); err != nil {
+		if err := m.reconcileAssigned(ctx, ws); err != nil {
 			firstErr = fmt.Errorf("%s: %w", ws.Name, err)
-			// Startup failures before VM supervision must be visible to the
-			// owner too. Keep detailed host errors in logs, not the user UI.
-			if ws.DeletionTimestamp.IsZero() && ws.Status.Phase != v1alpha1.WorkspacePhaseRunning && ws.Status.Phase != v1alpha1.WorkspacePhaseFailed {
-				_ = m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
-					s.Phase = v1alpha1.WorkspacePhaseFailed
-					s.Message = "云电脑准备失败，系统将自动重试。请稍后重新检查，或联系管理员。"
-				})
-			}
 		}
 	}
 	// Orphan teardown: supervisor exists but CR no longer ours.
@@ -132,6 +171,13 @@ func (m *Manager) Resync(ctx context.Context) error {
 			orphans = append(orphans, name)
 		}
 	}
+	// Phase entries track assigned CRs; a CR force-deleted past its finalizer
+	// would otherwise leak its series forever.
+	for name := range m.phases {
+		if !assigned[name] {
+			delete(m.phases, name)
+		}
+	}
 	m.mu.Unlock()
 	for _, name := range orphans {
 		if err := m.teardownWorkspace(ctx, name); err != nil && firstErr == nil {
@@ -139,6 +185,56 @@ func (m *Manager) Resync(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// setPhase records the CR phase of an assigned workspace for /metrics. The
+// map (not the supervisor set) is the gauge's source, so failures before
+// supervisor creation still emit a series.
+func (m *Manager) setPhase(name, phase string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.phases[name] = phase
+}
+
+// reconcileAssigned reconciles one assigned workspace, records its phase
+// (even when reconcile fails before a supervisor exists — failStatus writes
+// Failed to the ws copy we hold, and the /metrics phase gauge reads the map,
+// not the supervisor set), and heartbeats right after.
+//
+// Heartbeat per workspace, not only per round: one round's duration grows
+// linearly with broken VMs (healthz 2s + stop 15s + boot 30s each), and ~20
+// wedged guests would exceed the liveness probe's staleness window and power
+// off every VM on the node. Worst-case interval is now a single workspace's
+// processing time; the Resync defer remains as the empty-list backstop.
+func (m *Manager) reconcileAssigned(ctx context.Context, ws *v1alpha1.PersonalWorkspace) error {
+	err := m.reconcile(ctx, ws)
+	m.setPhase(ws.Name, string(ws.Status.Phase))
+	if err != nil {
+		// Startup failures before VM supervision must be visible to the
+		// owner too. Keep detailed host errors in logs, not the user UI.
+		if ws.DeletionTimestamp.IsZero() && ws.Status.Phase != v1alpha1.WorkspacePhaseRunning && ws.Status.Phase != v1alpha1.WorkspacePhaseFailed {
+			if perr := m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
+				s.Phase = v1alpha1.WorkspacePhaseFailed
+				s.Message = "云电脑准备失败，系统将自动重试。请稍后重新检查，或联系管理员。"
+			}); perr == nil {
+				m.setPhase(ws.Name, string(v1alpha1.WorkspacePhaseFailed))
+			}
+		}
+	}
+	m.writeHeartbeat()
+	return err
+}
+
+// writeHeartbeat stamps the resync loop's liveness file under the run dir.
+// Best-effort: a persistently unwritable workdir stales the heartbeat and
+// surfaces through the liveness probe instead of a log line nobody reads.
+func (m *Manager) writeHeartbeat() {
+	dir := filepath.Join(m.cfg.Workdir, "run")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, "agent.heartbeat"),
+		[]byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
 }
 
 // manifestEntry mirrors companionManifestEntry (wire contract of
@@ -284,10 +380,11 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	}
 	m.mu.Unlock()
 
+	state := m.supSnapshot(sup)
 	needsBoot := !sup.driver.Alive()
 	// Config rollout: VM must be stopped while the config disk is written
 	// (hot-write corruption guard) — reboot when the desired hash differs.
-	if sup.driver.Alive() && sup.configHash != "" && sup.configHash != payload.Hash {
+	if sup.driver.Alive() && state.configHash != "" && state.configHash != payload.Hash {
 		prepareGuestStop(guestIP, lifecycleToken)
 		if err := sup.driver.Stop(15 * time.Second); err != nil {
 			return err
@@ -298,14 +395,17 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 		if err := m.boot(ctx, ws, sup, payload, assets, dev, diskDir, runDir, guestIP, port); err != nil {
 			return m.failStatus(ctx, ws, err)
 		}
-	} else if sup.hostPort != port || sup.proxy == nil {
-		// Driver alive from a previous process life (adoption path rebuilds
-		// the proxy): rebind.
-		if sup.proxy != nil {
-			sup.proxy.Stop()
-		}
-		if err := m.startProxy(sup, port, guestIP); err != nil {
-			return m.failStatus(ctx, ws, err)
+	} else {
+		state = m.supSnapshot(sup)
+		if state.hostPort != port || !state.hasProxy {
+			// Driver alive from a previous process life (adoption path rebuilds
+			// the proxy): rebind.
+			if p := m.takeProxy(sup); p != nil {
+				p.Stop()
+			}
+			if err := m.startProxy(sup, port, guestIP); err != nil {
+				return m.failStatus(ctx, ws, err)
+			}
 		}
 	}
 
@@ -313,8 +413,7 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	// hung gateway (process alive, healthz failing) gets the same reboot
 	// semantics: stop now, count the failure, next resync backs off.
 	if !probeHealthz(guestIP, 2*time.Second) {
-		sup.bootFails++
-		sup.lastBoot = time.Now()
+		m.noteHealthzFailure(sup)
 		if err := sup.driver.Stop(15 * time.Second); err != nil {
 			return err
 		}
@@ -325,6 +424,9 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 			}
 		})
 	}
+	// Healthy stretch: forgive bootFails once the guest has been stable past
+	// the reset window (transient flaps must not march the counter to give-up).
+	m.noteHealthy(sup)
 	return m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
 		s.Phase = v1alpha1.WorkspacePhaseRunning
 		s.Message = ""
@@ -333,19 +435,92 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	})
 }
 
+// supState is a locked snapshot of the supervisor scalars reconcile reads
+// (see the Supervisor concurrency doc); runningSince is only mutated via
+// noteHealthy/noteHealthzFailure and never read directly.
+type supState struct {
+	hostPort   int32
+	configHash string
+	hasProxy   bool
+	bootFails  int
+	lastBoot   time.Time
+}
+
+func (m *Manager) supSnapshot(sup *Supervisor) supState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return supState{
+		hostPort: sup.hostPort, configHash: sup.configHash, hasProxy: sup.proxy != nil,
+		bootFails: sup.bootFails, lastBoot: sup.lastBoot,
+	}
+}
+
+// noteBootFailure counts a failed boot attempt.
+func (m *Manager) noteBootFailure(sup *Supervisor) {
+	m.mu.Lock()
+	sup.bootFails++
+	sup.lastBoot = time.Now()
+	m.mu.Unlock()
+}
+
+// noteBootSuccess resets the failure bookkeeping after a healthy boot.
+func (m *Manager) noteBootSuccess(sup *Supervisor, configHash string) {
+	m.mu.Lock()
+	sup.bootFails = 0
+	sup.lastBoot = time.Now()
+	sup.runningSince = time.Now()
+	sup.configHash = configHash
+	m.mu.Unlock()
+}
+
+// noteHealthzFailure counts a steady-state healthz failure and ends the
+// healthy stretch.
+func (m *Manager) noteHealthzFailure(sup *Supervisor) {
+	m.mu.Lock()
+	sup.bootFails++
+	sup.lastBoot = time.Now()
+	sup.runningSince = time.Time{}
+	m.mu.Unlock()
+}
+
+// noteHealthy advances the healthy stretch and forgives bootFails once it has
+// lasted past the reset window.
+func (m *Manager) noteHealthy(sup *Supervisor) {
+	m.mu.Lock()
+	if sup.runningSince.IsZero() {
+		sup.runningSince = time.Now()
+	}
+	if sup.bootFails > 0 && time.Since(sup.runningSince) >= stableResetDuration {
+		sup.bootFails = 0
+	}
+	m.mu.Unlock()
+}
+
+// takeProxy detaches the current proxy under the lock so the caller can stop
+// it outside the critical section.
+func (m *Manager) takeProxy(sup *Supervisor) *proxy.TCPProxy {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := sup.proxy
+	sup.proxy = nil
+	return p
+}
+
 func (m *Manager) boot(ctx context.Context, ws *v1alpha1.PersonalWorkspace, sup *Supervisor,
 	payload *render.ConfigPayload, assets *template.Assets, dev *tap.Device,
 	diskDir, runDir, guestIP string, port int32) error {
-	// Backoff after repeated boot failures.
-	if sup.bootFails >= 5 {
-		return fmt.Errorf("boot failed %d consecutive times; giving up until spec change (serial log: %s)", sup.bootFails, filepath.Join(runDir, "serial.log"))
+	// Backoff after repeated boot failures. Past the give-up threshold the
+	// supervisor still self-heals: one retry per giveUpRetryInterval (a spec
+	// change is no longer the only way out).
+	state := m.supSnapshot(sup)
+	if state.bootFails >= maxBootFails && time.Since(state.lastBoot) < giveUpRetryInterval {
+		return fmt.Errorf("boot failed %d consecutive times; giving up (hourly self-heal retry armed, serial log: %s)", state.bootFails, filepath.Join(runDir, "serial.log"))
 	}
-	if delay := backoff(sup.bootFails); delay > 0 && time.Since(sup.lastBoot) < delay {
+	if delay := backoff(state.bootFails); delay > 0 && time.Since(state.lastBoot) < delay {
 		return fmt.Errorf("boot backoff (%s)", delay)
 	}
-	if sup.proxy != nil {
-		sup.proxy.Stop()
-		sup.proxy = nil
+	if p := m.takeProxy(sup); p != nil {
+		p.Stop()
 	}
 	if err := m.disks.EnsureDataDisk(ctx, filepath.Join(diskDir, "data.ext4"), diskSizeBytes(ws)); err != nil {
 		return err
@@ -375,19 +550,15 @@ func (m *Manager) boot(ctx context.Context, ws *v1alpha1.PersonalWorkspace, sup 
 		GuestMAC: render.GuestMAC(ws.Status.VMSubnet), VCPUs: vcpus, MemMib: memMib,
 		RunDir: runDir, SerialLogMB: m.cfg.SerialLogMB, BootTimeout: 30 * time.Second,
 	}); err != nil {
-		sup.bootFails++
-		sup.lastBoot = time.Now()
+		m.noteBootFailure(sup)
 		return err
 	}
 	// Wait for the in-VM gateway.
 	if !waitForHealthz(guestIP, 30*time.Second) {
-		sup.bootFails++
-		sup.lastBoot = time.Now()
+		m.noteBootFailure(sup)
 		return fmt.Errorf("guest gateway did not become healthy in 30s")
 	}
-	sup.bootFails = 0
-	sup.lastBoot = time.Now()
-	sup.configHash = payload.Hash
+	m.noteBootSuccess(sup, payload.Hash)
 	if err := m.startProxy(sup, port, guestIP); err != nil {
 		return err
 	}
@@ -399,8 +570,10 @@ func (m *Manager) startProxy(sup *Supervisor, port int32, guestIP string) error 
 	if err := p.Start(); err != nil {
 		return fmt.Errorf("proxy bind :%d: %w", port, err)
 	}
+	m.mu.Lock()
 	sup.proxy = p
 	sup.hostPort = port
+	m.mu.Unlock()
 	return nil
 }
 
@@ -423,6 +596,12 @@ func (m *Manager) teardownWorkspace(ctx context.Context, name string) error {
 	if sup != nil {
 		delete(m.supers, name)
 	}
+	delete(m.phases, name) // the phase map tracks assigned CRs; teardown drops both
+	var p *proxy.TCPProxy
+	if sup != nil {
+		p = sup.proxy
+		sup.proxy = nil
+	}
 	m.mu.Unlock()
 	// Orphaned node state (crash before supervisor creation, or agent
 	// restart with the CR since reassigned): teardown by name.
@@ -431,8 +610,8 @@ func (m *Manager) teardownWorkspace(ctx context.Context, name string) error {
 			return err
 		}
 	}
-	if sup != nil && sup.proxy != nil {
-		sup.proxy.Stop()
+	if p != nil {
+		p.Stop()
 	}
 	if err := iptables.TeardownEgress(ctx, m.runner, name); err != nil {
 		return err

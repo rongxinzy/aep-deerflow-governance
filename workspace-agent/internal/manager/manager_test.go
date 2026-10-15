@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,4 +304,166 @@ func TestEarlyProvisioningFailureIsVisibleAndRecovers(t *testing.T) {
 	ws = getWS(t, e.client)
 	assert.Equal(t, v1alpha1.WorkspacePhaseRunning, ws.Status.Phase)
 	assert.Empty(t, ws.Status.Message)
+}
+
+func TestGiveUpSelfHealsWithIntervalRetry(t *testing.T) {
+	e := newEnv(t, baseObjects(manifestV1)...)
+	e.startErr = assert.AnError
+	// First reconcile records failure #1 (starts only counts successes).
+	_ = e.m.Resync(context.Background())
+	// Force the counter past the give-up edge, with the retry window elapsed.
+	e.m.mu.Lock()
+	s := e.m.supers["ws1"]
+	require.NotNil(t, s)
+	s.bootFails = 5
+	s.lastBoot = time.Now().Add(-giveUpRetryInterval - time.Minute)
+	e.m.mu.Unlock()
+	// The given-up supervisor self-heals: one retry per interval, no spec change.
+	err := e.m.Resync(context.Background())
+	require.Error(t, err)
+	e.m.mu.Lock()
+	assert.Equal(t, 6, e.m.supers["ws1"].bootFails, "retry attempted once the give-up retry interval elapsed")
+	e.m.mu.Unlock()
+	// The failed retry re-arms the window: the next round refuses again.
+	err = e.m.Resync(context.Background())
+	require.ErrorContains(t, err, "giving up")
+	e.m.mu.Lock()
+	assert.Equal(t, 6, e.m.supers["ws1"].bootFails, "no second retry until the interval elapses again")
+	e.m.mu.Unlock()
+	// A retry that succeeds clears the give-up entirely.
+	e.startErr = nil
+	e.m.mu.Lock()
+	s = e.m.supers["ws1"]
+	s.lastBoot = time.Now().Add(-giveUpRetryInterval - time.Minute)
+	e.m.mu.Unlock()
+	require.NoError(t, e.m.Resync(context.Background()))
+	assert.Equal(t, 1, e.starts)
+	assert.Equal(t, v1alpha1.WorkspacePhaseRunning, getWS(t, e.client).Status.Phase)
+	e.m.mu.Lock()
+	assert.Equal(t, 0, e.m.supers["ws1"].bootFails)
+	e.m.mu.Unlock()
+}
+
+func TestBootFailsForgivenAfterStableRunning(t *testing.T) {
+	e := newEnv(t, baseObjects(manifestV1)...)
+	require.NoError(t, e.m.Resync(context.Background()))
+	// A failure counted earlier (e.g. a transient healthz flap) is forgiven
+	// once the VM has stayed Running past the reset window.
+	e.m.mu.Lock()
+	s := e.m.supers["ws1"]
+	require.NotNil(t, s)
+	s.bootFails = 2
+	s.runningSince = time.Now().Add(-stableResetDuration - time.Minute)
+	e.m.mu.Unlock()
+	require.NoError(t, e.m.Resync(context.Background()))
+	e.m.mu.Lock()
+	assert.Equal(t, 0, e.m.supers["ws1"].bootFails, "stable Running past the window forgives bootFails")
+	e.m.mu.Unlock()
+	// Within the window the counter is preserved.
+	e.m.mu.Lock()
+	s = e.m.supers["ws1"]
+	s.bootFails = 2
+	s.runningSince = time.Now()
+	e.m.mu.Unlock()
+	require.NoError(t, e.m.Resync(context.Background()))
+	e.m.mu.Lock()
+	assert.Equal(t, 2, e.m.supers["ws1"].bootFails, "counter preserved inside the stability window")
+	e.m.mu.Unlock()
+}
+
+func TestHeartbeatWrittenEveryResyncRound(t *testing.T) {
+	e := newEnv(t, baseObjects(manifestV1)...)
+	hb := filepath.Join(e.m.cfg.Workdir, "run", "agent.heartbeat")
+	require.NoError(t, e.m.Resync(context.Background()))
+	raw, err := os.ReadFile(hb)
+	require.NoError(t, err)
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), stamp, time.Minute)
+	// Error rounds heartbeat too: a failing workspace must not trip the
+	// node-wide liveness probe (its blast radius is every VM on the node).
+	roster := &corev1.ConfigMap{}
+	require.NoError(t, e.client.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "pw-ws1-companions"}, roster))
+	require.NoError(t, e.client.Delete(context.Background(), roster))
+	require.NoError(t, os.Remove(hb))
+	require.Error(t, e.m.Resync(context.Background()))
+	assert.FileExists(t, hb)
+}
+
+func TestHeartbeatAndPhaseRecordedPerWorkspace(t *testing.T) {
+	objects := baseObjects(manifestV1)
+	// No manifest CM: reconcile fails before a supervisor exists.
+	e := newEnv(t, append(objects[:1:1], objects[2:]...)...)
+	ws := getWS(t, e.client)
+	// Direct call: the Resync defer backstop is not involved, so a heartbeat
+	// here proves the per-workspace write (the probe window must bound a
+	// single workspace's processing time, not a whole round's).
+	require.Error(t, e.m.reconcileAssigned(context.Background(), ws))
+	hb := filepath.Join(e.m.cfg.Workdir, "run", "agent.heartbeat")
+	raw, err := os.ReadFile(hb)
+	require.NoError(t, err)
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), stamp, time.Minute)
+	// The phase map recorded the failStatus result even though no
+	// supervisor was ever created.
+	e.m.mu.Lock()
+	_, hasSup := e.m.supers["ws1"]
+	phase := e.m.phases["ws1"]
+	e.m.mu.Unlock()
+	assert.False(t, hasSup)
+	assert.Equal(t, string(v1alpha1.WorkspacePhaseFailed), phase)
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	e := newEnv(t, baseObjects(manifestV1)...)
+	require.NoError(t, e.m.Resync(context.Background()))
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		e.m.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		return rec.Body.String()
+	}
+	body := scrape()
+	assert.Contains(t, body, "pw_node_agent_workspaces 1")
+	assert.Contains(t, body, "pw_node_agent_vms 1")
+	assert.Contains(t, body, `pw_node_agent_workspace_phase{phase="Running",workspace="ws1"} 1`)
+	assert.Contains(t, body, `pw_node_agent_workspace_phase{phase="Failed",workspace="ws1"} 0`)
+	assert.Contains(t, body, `pw_node_agent_workspace_boot_fails{workspace="ws1"} 0`)
+	assert.Contains(t, body, "pw_node_agent_resync_errors_total 0")
+	// A failing round bumps the resync error counter.
+	roster := &corev1.ConfigMap{}
+	require.NoError(t, e.client.Get(context.Background(), client.ObjectKey{Namespace: "digital-employees", Name: "pw-ws1-companions"}, roster))
+	require.NoError(t, e.client.Delete(context.Background(), roster))
+	require.Error(t, e.m.Resync(context.Background()))
+	body = scrape()
+	assert.Contains(t, body, "pw_node_agent_resync_errors_total 1")
+}
+
+func TestPhaseMetricVisibleBeforeSupervisorCreation(t *testing.T) {
+	objects := baseObjects(manifestV1)
+	// Manifest CM absent: reconcile fails before a supervisor exists (the
+	// early-provisioning blind spot that left WorkspacePhaseStuck unfireable).
+	e := newEnv(t, append(objects[:1:1], objects[2:]...)...)
+	require.Error(t, e.m.Resync(context.Background()))
+	e.m.mu.Lock()
+	assert.Empty(t, e.m.supers, "failure happened before supervisor creation")
+	e.m.mu.Unlock()
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		e.m.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		return rec.Body.String()
+	}
+	body := scrape()
+	assert.Contains(t, body, `pw_node_agent_workspace_phase{phase="Failed",workspace="ws1"} 1`,
+		"phase metric comes from the CR List, not the supervisor set")
+	assert.Contains(t, body, "pw_node_agent_workspaces 0")
+	// Once the CR is gone for good, the series is pruned: finalize removes
+	// the CR, the next round drops the map entry.
+	ws := getWS(t, e.client)
+	require.NoError(t, e.client.Delete(context.Background(), ws))
+	require.NoError(t, e.m.Resync(context.Background()))
+	require.NoError(t, e.m.Resync(context.Background()))
+	assert.NotContains(t, scrape(), `workspace="ws1"`)
 }
