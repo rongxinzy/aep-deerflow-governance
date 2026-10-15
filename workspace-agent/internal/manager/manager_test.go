@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,16 +33,17 @@ const manifestV1 = `{"owner":"u1","workspace":"ws1","companions":[{"name":"assis
 const manifestV2 = `{"owner":"u1","workspace":"ws1","companions":[{"name":"assistant","displayName":"助手","model":"glm-4.6","memkeySecret":"pw-ws1-assistant-memkey"},{"name":"researcher","model":"glm-4.6","memkeySecret":"pw-ws1-researcher-memkey"}]}`
 
 type env struct {
-	m      *Manager
-	ctrl   *gomock.Controller
-	driver *vm_mocks.MockDriver
-	client client.Client
+	lastConfig vm.Config
+	m          *Manager
+	ctrl       *gomock.Controller
+	driver     *vm_mocks.MockDriver
+	client     client.Client
 	// mutable driver/healthz state
-	alive   bool
-	healthy bool
+	alive    bool
+	healthy  bool
 	startErr error
-	starts  int
-	stops   int
+	starts   int
+	stops    int
 }
 
 func newEnv(t *testing.T, objects ...client.Object) *env {
@@ -62,7 +64,8 @@ func newEnv(t *testing.T, objects ...client.Object) *env {
 	e := &env{client: c, ctrl: ctrl, healthy: true}
 	e.driver = vm_mocks.NewMockDriver(ctrl)
 	e.driver.EXPECT().Alive().DoAndReturn(func() bool { return e.alive }).AnyTimes()
-	e.driver.EXPECT().Start(gomock.Any()).DoAndReturn(func(vm.Config) error {
+	e.driver.EXPECT().Start(gomock.Any()).DoAndReturn(func(config vm.Config) error {
+		e.lastConfig = config
 		if e.startErr != nil {
 			return e.startErr
 		}
@@ -100,17 +103,21 @@ func writeFakeTemplate(t *testing.T, dir string) {
 		sum := sha256.Sum256(content)
 		sums += hex.EncodeToString(sum[:]) + "  " + name + "\n"
 	}
+	metadata, err := json.Marshal(map[string]any{"tag": filepath.Base(dir), "desktop": true})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "template.json"), metadata, 0644))
+	sum := sha256.Sum256(metadata)
+	sums += hex.EncodeToString(sum[:]) + "  template.json\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums), 0o644))
 }
-
 
 func workspaceCR() *v1alpha1.PersonalWorkspace {
 	return &v1alpha1.PersonalWorkspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ws1", Namespace: "digital-employees"},
 		Spec: v1alpha1.PersonalWorkspaceSpec{
 			Owner: "u1", Runtime: "microvm",
-			Resources: v1alpha1.WorkspaceResources{Memory: "1Gi", Disk: "5Gi", VCPUs: 2},
-			Companions: []v1alpha1.CompanionSpec{{Name: "assistant", Model: "glm-4.6"}},
+			Resources:   v1alpha1.WorkspaceResources{Memory: "1Gi", Disk: "5Gi", VCPUs: 2},
+			Companions:  []v1alpha1.CompanionSpec{{Name: "assistant", Model: "glm-4.6"}},
 			Credentials: v1alpha1.CredentialsRef{Name: "creds"},
 		},
 		Status: v1alpha1.PersonalWorkspaceStatus{
@@ -243,4 +250,38 @@ func TestIgnoresForeignAndUnassigned(t *testing.T) {
 	e := newEnv(t, objects...)
 	require.NoError(t, e.m.Resync(context.Background()))
 	assert.Equal(t, 0, e.starts, "neither a foreign-assigned microvm nor a pod-runtime workspace boots")
+}
+
+func TestDesktopResourcesAndTemplateRolloutKeepsData(t *testing.T) {
+	e := newEnv(t, baseObjects(manifestV1)...)
+	require.NoError(t, e.m.Resync(context.Background()))
+	data := filepath.Join(e.m.cfg.Workdir, "disks", "ws1", "data.ext4")
+	require.NoError(t, os.WriteFile(data, []byte("persistent-user-content"), 0600))
+	ws := getWS(t, e.client)
+	ws.Spec.Desktop.Enabled = true
+	ws.Spec.Resources.Memory = "4Gi"
+	ws.Spec.Resources.VCPUs = 4
+	ws.Spec.TemplateTag = "desktop-v1"
+	writeFakeTemplate(t, filepath.Join(e.m.cfg.Workdir, "templates", "desktop-v1"))
+	require.NoError(t, e.client.Update(context.Background(), ws))
+	require.NoError(t, e.m.Resync(context.Background()))
+	require.Equal(t, 2, e.starts)
+	require.Equal(t, int32(4096), e.lastConfig.MemMib)
+	require.Equal(t, int32(4), e.lastConfig.VCPUs)
+	require.Contains(t, e.lastConfig.Rootfs, "desktop-v1")
+	got := getWS(t, e.client)
+	require.Equal(t, "desktop-v1", got.Status.VM.TemplateTag)
+	require.True(t, got.Status.VM.DesktopEnabled)
+	require.Equal(t, int32(4), got.Status.VM.Resources.VCPUs)
+	content, err := os.ReadFile(data)
+	require.NoError(t, err)
+	require.Equal(t, "persistent-user-content", string(content))
+	require.NoError(t, e.m.Resync(context.Background()))
+	require.Equal(t, 2, e.starts)
+	// Missing template is rejected before stopping the healthy guest.
+	ws = getWS(t, e.client)
+	ws.Spec.TemplateTag = "missing"
+	require.NoError(t, e.client.Update(context.Background(), ws))
+	require.Error(t, e.m.Resync(context.Background()))
+	require.Equal(t, 1, e.stops)
 }

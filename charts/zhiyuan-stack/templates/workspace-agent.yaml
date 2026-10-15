@@ -45,6 +45,7 @@ spec:
               for f in rootfs.ext4 vmlinux firecracker SHA256SUMS; do
                 if [ ! -f "$DEST/$f" ]; then cp "$f" "$DEST/$f"; fi
               done
+              if [ -f template.json ] && [ ! -f "$DEST/template.json" ]; then cp template.json "$DEST/template.json"; fi
               chmod 755 "$DEST/firecracker"
           volumeMounts:
             - name: workdir

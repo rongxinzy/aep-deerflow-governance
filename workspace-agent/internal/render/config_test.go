@@ -16,7 +16,7 @@ func testWorkspace() *v1alpha1.PersonalWorkspace {
 	return &v1alpha1.PersonalWorkspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "zhangsan", Namespace: "digital-employees"},
 		Spec: v1alpha1.PersonalWorkspaceSpec{
-			Runtime: "microvm",
+			Runtime:   "microvm",
 			Resources: v1alpha1.WorkspaceResources{Memory: "1Gi", Disk: "5Gi", VCPUs: 2},
 			Companions: []v1alpha1.CompanionSpec{
 				{Name: "assistant", Model: "glm-4.6"},
@@ -41,7 +41,7 @@ func TestBuildPayloadBasics(t *testing.T) {
 		Manifest:  `{"companions":[{"name":"assistant","memkeySecret":"pw-zhangsan-assistant-memkey"}]}`,
 		Memkeys: map[string]*corev1.Secret{
 			"assistant": secret("pw-zhangsan-assistant-memkey", map[string][]byte{
-				"OPENVIKING_API_KEY":     []byte("ov-key"),
+				"OPENVIKING_API_KEY":       []byte("ov-key"),
 				"WORKSPACE_INTERNAL_TOKEN": []byte("tok"),
 			}),
 		},
@@ -74,10 +74,10 @@ func TestBuildPayloadBasics(t *testing.T) {
 
 func TestBuildPayloadHashSensitivity(t *testing.T) {
 	base := Inputs{
-		Workspace:   testWorkspace(),
-		Manifest:    `{"companions":[{"name":"assistant"}]}`,
+		Workspace:    testWorkspace(),
+		Manifest:     `{"companions":[{"name":"assistant"}]}`,
 		ModelBaseURL: "http://gw/v1",
-		DNSIP:       "10.43.0.10",
+		DNSIP:        "10.43.0.10",
 	}
 	a, err := BuildPayload(base)
 	require.NoError(t, err)
@@ -122,4 +122,17 @@ func TestGuestMACStable(t *testing.T) {
 	assert.Equal(t, m1, m2)
 	assert.NotEqual(t, m1, GuestMAC("192.168.77.4/30"))
 	assert.True(t, strings.HasPrefix(m1, "06:00:AC:"), "locally administered unicast prefix")
+}
+
+func TestDesktopFlagChangesGuestPayload(t *testing.T) {
+	ws := testWorkspace()
+	input := Inputs{Workspace: ws, Manifest: `{"companions":[]}`, DNSIP: "10.43.0.10"}
+	disabled, err := BuildPayload(input)
+	require.NoError(t, err)
+	require.Contains(t, string(disabled.EnvFile), "WORKSPACE_DESKTOP_ENABLED=0")
+	ws.Spec.Desktop.Enabled = true
+	enabled, err := BuildPayload(input)
+	require.NoError(t, err)
+	require.Contains(t, string(enabled.EnvFile), "WORKSPACE_DESKTOP_ENABLED=1")
+	require.NotEqual(t, disabled.Hash, enabled.Hash)
 }
