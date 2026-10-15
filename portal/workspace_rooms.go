@@ -283,6 +283,9 @@ func (p *portal) handleOwnerWorkspaceGateway(w http.ResponseWriter, r *http.Requ
 			if gatewayRoot == "/api/workplace" {
 				pr.Out.Header.Set(workspaceSessionHeader, workspaceSessionID(pr.In))
 			}
+			if tp := currentTraceParent(pr.In.Context()); tp != "" {
+				pr.Out.Header.Set("traceparent", tp)
+			}
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
 			pr.Out.Header.Del(workspaceTokenHeader)
 			pr.Out.Header.Del("Authorization")
