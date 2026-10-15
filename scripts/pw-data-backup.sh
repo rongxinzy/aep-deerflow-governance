@@ -16,8 +16,9 @@
 #          clearing status.nodeName afterwards is a manual runbook step.
 #
 # Neither subcommand stops a VM, patches the CR, or deletes anything. Confirm
-# the VM is stopped before backup; restore refuses to overwrite an existing
-# disk unless --force is given.
+# the VM is stopped before backup; restore refuses a node whose VM looks
+# running (fc.sock present) and refuses to overwrite an existing disk unless
+# --force is given.
 set -euo pipefail
 
 WORKDIR=/var/lib/zhiyuan/workspace-agent
@@ -127,6 +128,12 @@ cmd_restore() {
   log "to the FIRST ready node in workspaceAgent.microvmNodes pool order. Make"
   log "sure '$node' is that node (or restore onto every candidate)."
   if [ "$DRY_RUN" != 1 ]; then
+    # A live VM keeps the old disk inode open after mv; every guest write
+    # after the swap lands in the unlinked inode and is lost. Unlike the
+    # backup advisory check there is no acceptable "proceed anyway" here.
+    if ssh "$node" "test -S '$WORKDIR/run/$ws/fc.sock'"; then
+      die "$WORKDIR/run/$ws/fc.sock exists on $node — the VM looks RUNNING. Stop it before restoring over its disk."
+    fi
     if ssh "$node" "test -e '$dst'"; then
       [ "$FORCE" = 1 ] || die "$dst already exists on $node (agent-created empty disk?); use --force to overwrite"
       log "WARNING: overwriting existing $dst on $node"
@@ -136,16 +143,19 @@ cmd_restore() {
   log "== restore: $file -> $node:$dst (sparse) =="
   confirm
   if [ "$DRY_RUN" = 1 ]; then
-    log "dry-run: ssh $node mkdir -p $dst_dir; cp --sparse=always $file /dev/stdout | ssh $node 'cat > $dst.tmp && mv $dst.tmp $dst'"
+    log "dry-run: ssh $node mkdir -p $dst_dir; cat $file | ssh $node 'cp --sparse=always /dev/stdin $dst.tmp && mv $dst.tmp $dst'"
   else
     ssh "$node" "mkdir -p '$dst_dir'"
-    cp --sparse=always "$file" /dev/stdout | ssh "$node" "cat > '$dst.tmp' && mv '$dst.tmp' '$dst'"
+    # Re-sparsify on the RECEIVING side (remote cp reading /dev/stdin): the
+    # local --sparse=always only affects a regular-file destination, so piping
+    # through cat would materialize the full apparent size on the node.
+    cat "$file" | ssh "$node" "cp --sparse=always /dev/stdin '$dst.tmp' && mv '$dst.tmp' '$dst'"
     local local_size remote_size
     local_size=$(stat -c %s "$file")
     remote_size=$(ssh "$node" "stat -c %s '$dst'")
     [ "$local_size" = "$remote_size" ] \
       || die "size mismatch: local $local_size vs remote $remote_size"
-    log "ok: $node:$dst (apparent ${remote_size} bytes)"
+    log "ok: $node:$dst (apparent ${remote_size} bytes, actual $(ssh "$node" "du -h '$dst'" | cut -f1))"
   fi
 
   cat <<EOF
