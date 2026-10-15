@@ -184,19 +184,26 @@ func (r *PersonalWorkspaceReconciler) renderWorkspaceDeployment(workspace *v1alp
 			}},
 		})
 	}
-	// Per-companion OpenViking keys: one PW_<NAME>_OPENVIKING_API_KEY per
-	// roster entry, each pointing at that companion's memkey secret — the
-	// same delivery contract as the microvm config disk.
+	// Per-companion secrets: one PW_<NAME>_OPENVIKING_API_KEY and one
+	// PW_<NAME>_WORKSPACE_INTERNAL_TOKEN per roster entry, each pointing at
+	// that companion's memkey secret — the same delivery contract as the
+	// microvm config disk. The token authenticates collaboration/chat calls
+	// (companion server reads WORKSPACE_INTERNAL_TOKEN via the gateway's
+	// PW_<NAME>_* mapping); without it non-primary companions collaborate
+	// under no identity while the primary's unprefixed token leaks to every
+	// child through process.env.
 	for i := range spec.Companions {
 		c := &spec.Companions[i]
 		if name := companionMemkeySecretName(workspace, c.Name); name != "" {
-			env = append(env, corev1.EnvVar{
-				Name: companionEnvName(c.Name, workspaceMemkeyKey),
-				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: name},
-					Key:                  workspaceMemkeyKey,
-				}},
-			})
+			for _, key := range []string{workspaceMemkeyKey, workspaceTokenKey} {
+				env = append(env, corev1.EnvVar{
+					Name: companionEnvName(c.Name, key),
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: name},
+						Key:                  key,
+					}},
+				})
+			}
 		}
 	}
 	// OPENVIKING_BASE_URL: companions dial OpenViking directly. Prefers the

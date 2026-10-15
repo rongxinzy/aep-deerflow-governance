@@ -265,6 +265,15 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 			Expect(researcherKey.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-researcher-memkey"))
 			Expect(researcherKey.ValueFrom.SecretKeyRef.Key).To(Equal("OPENVIKING_API_KEY"))
 
+			assistantToken := env["PW_ASSISTANT_WORKSPACE_INTERNAL_TOKEN"]
+			Expect(assistantToken.ValueFrom).NotTo(BeNil(), "per-companion internal token rides the same delivery contract")
+			Expect(assistantToken.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-assistant-memkey"))
+			Expect(assistantToken.ValueFrom.SecretKeyRef.Key).To(Equal("WORKSPACE_INTERNAL_TOKEN"))
+			researcherToken := env["PW_RESEARCHER_WORKSPACE_INTERNAL_TOKEN"]
+			Expect(researcherToken.ValueFrom).NotTo(BeNil(), "every roster entry gets its own token env")
+			Expect(researcherToken.ValueFrom.SecretKeyRef.Name).To(Equal("pw-zhangsan-researcher-memkey"))
+			Expect(researcherToken.ValueFrom.SecretKeyRef.Key).To(Equal("WORKSPACE_INTERNAL_TOKEN"))
+
 			Expect(env["OPENVIKING_BASE_URL"].Value).To(Equal(fx.server.URL), "spec.memory.serverURL wins")
 
 			var unprefixed bool
