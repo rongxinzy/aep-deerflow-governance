@@ -143,18 +143,21 @@ cmd_restore() {
   log "== restore: $file -> $node:$dst (sparse) =="
   confirm
   if [ "$DRY_RUN" = 1 ]; then
-    log "dry-run: ssh $node mkdir -p $dst_dir; cat $file | ssh $node 'cp --sparse=always /dev/stdin $dst.tmp && mv $dst.tmp $dst'"
+    log "dry-run: ssh $node mkdir -p $dst_dir; cat $file | ssh $node 'cp --sparse=always /dev/stdin $dst.tmp'; verify size; ssh $node 'mv $dst.tmp $dst'"
   else
     ssh "$node" "mkdir -p '$dst_dir'"
     # Re-sparsify on the RECEIVING side (remote cp reading /dev/stdin): the
     # local --sparse=always only affects a regular-file destination, so piping
     # through cat would materialize the full apparent size on the node.
-    cat "$file" | ssh "$node" "cp --sparse=always /dev/stdin '$dst.tmp' && mv '$dst.tmp' '$dst'"
+    # Verify-then-mv: a dropped ssh connection makes the remote cp exit cleanly
+    # on EOF, so a truncated .tmp must never be promoted over a good disk.
+    cat "$file" | ssh "$node" "cp --sparse=always /dev/stdin '$dst.tmp'"
     local local_size remote_size
     local_size=$(stat -c %s "$file")
-    remote_size=$(ssh "$node" "stat -c %s '$dst'")
+    remote_size=$(ssh "$node" "stat -c %s '$dst.tmp'")
     [ "$local_size" = "$remote_size" ] \
-      || die "size mismatch: local $local_size vs remote $remote_size"
+      || die "size mismatch: local $local_size vs remote $remote_size (.tmp left on $node for inspection; $dst untouched)"
+    ssh "$node" "mv '$dst.tmp' '$dst'"
     log "ok: $node:$dst (apparent ${remote_size} bytes, actual $(ssh "$node" "du -h '$dst'" | cut -f1))"
   fi
 
