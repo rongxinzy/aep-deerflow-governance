@@ -16,6 +16,11 @@ spec:
       containers:
         - name: operator
           image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.operator.repository "tag" .Values.images.operator.tag) }}
+          # 渲染 per-员工对话库 DSN 需要 CONVERSATION_ADMIN_DB_URL（平台凭据）。
+          # 此前线上是手工 kubectl patch 补的 envFrom——chart 版本一旦接管即被
+          # 覆盖丢失（2026-10-15 事故：全体员工 reconcile 失败）。
+          envFrom:
+            - secretRef: {name: de-platform-creds}
           env:
             - {name: HIBERNATION_DB_URL_SECRET, value: de-portal-db}
             - {name: HIBERNATION_IDLE_TIMEOUT_SECONDS, value: "1800"}
