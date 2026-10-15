@@ -8,8 +8,15 @@ without printing OK, progress is checkpointed only after the page was
 acknowledged, and each data source is mapped with the field names of the
 interface that is actually requested.
 
+Covers the audit-trail review findings too: a document is indexed under the day
+of its own @timestamp, so the same event is indexed once no matter which run
+delivers it; a drained scan keeps an explainable checkpoint instead of blanking
+it; the watermark is never used to cut a scan short; and an unkeyed record keeps
+one id across runs.
+
 Run: python -m unittest scripts/test_audit_shipper.py
 """
+import calendar
 import contextlib
 import importlib.util
 import io
@@ -17,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -90,7 +98,7 @@ class FakeWorld:
         self.requests = []  # (method, path, query)
         self.batches = []  # [[(index, doc_id, doc), ...], ...] in bulk order
         self.stored = {}  # (index, doc_id) -> doc
-        self.checkpoints = {}  # source -> cursor
+        self.checkpoints = {}  # source -> checkpoint document (or a bare legacy cursor)
         self.pages = {}  # path -> [body, body, ...] (last body repeats)
         self.faults = {}  # path -> HTTP status raised for that route
         self.bulk_fault = fault  # (index, doc_id, doc) -> (status, error|None)
@@ -112,7 +120,11 @@ class FakeWorld:
             source = source.split(':', 1)[-1]  # <deployment>:<source>
             if source not in self.checkpoints:
                 return Response({'found': False})
-            return Response({'found': True, '_source': {'cursor': self.checkpoints[source]}})
+            stored = self.checkpoints[source]
+            # A bare string seeds a checkpoint written before the watermark and
+            # scan state existed: cursor only.
+            body = stored if isinstance(stored, dict) else {'cursor': stored}
+            return Response({'found': True, '_source': body})
         if parsed.path in self.faults:
             raise urllib.error.HTTPError(request.full_url, self.faults[parsed.path],
                                          'injected', None, None)
@@ -133,7 +145,7 @@ class FakeWorld:
             index, doc_id = meta['_index'], meta.get('_id')
             entries.append((index, doc_id, doc))
             if index == SHIP.CHECKPOINT_INDEX:
-                self.checkpoints[doc['source']] = doc['cursor']
+                self.checkpoints[doc['source']] = doc
                 status, error = self.checkpoint_status, None
             elif self.bulk_fault:
                 status, error = self.bulk_fault(index, doc_id, doc)
@@ -156,13 +168,39 @@ class FakeWorld:
         return [query for _, request_path, query in self.requests if request_path == path]
 
     def audit_batches(self):
-        return [[entry for entry in batch if entry[0] != SHIP.CHECKPOINT_INDEX] for batch in self.batches]
+        return [batch for batch in
+                ([entry for entry in batch if entry[0] != SHIP.CHECKPOINT_INDEX]
+                 for batch in self.batches) if batch]
+
+    def audit_stored_keys(self):
+        """(index, doc_id) of the stored audit documents, without the checkpoints."""
+        return [key for key in self.stored if key[0] != SHIP.CHECKPOINT_INDEX]
+
+
+class FrozenClock:
+    """Stands in for the `time` module so two runs can look a day apart."""
+
+    def __init__(self, run_at):
+        self.run_at = run_at
+
+    def gmtime(self):
+        return time.strptime(self.run_at, '%Y-%m-%dT%H:%M:%SZ')
+
+    def strftime(self, fmt, value=None):
+        return time.strftime(fmt, self.gmtime() if value is None else value)
+
+    def time(self):
+        return calendar.timegm(self.gmtime())
+
+    def sleep(self, _seconds):
+        pass
 
 
 class ShipperTestCase(unittest.TestCase):
-    def run_shipper(self, world):
+    def run_shipper(self, world, run_at=None):
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch('urllib.request.urlopen', side_effect=world.transport), \
+        clock = patch.object(SHIP, 'time', FrozenClock(run_at)) if run_at else contextlib.nullcontext()
+        with clock, patch('urllib.request.urlopen', side_effect=world.transport), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = SHIP.main()
         return code, stdout.getvalue() + stderr.getvalue()
@@ -186,6 +224,12 @@ class Pagination(ShipperTestCase):
         self.assertEqual(sorted(doc['event_id'] for doc in world.docs_of('telemetry_event')),
                          ['event-1', 'event-2', 'event-3'])
         self.assertIn('OK: 3/3 audit docs indexed', output)
+        # Drained: nothing left to resume, but the checkpoint keeps the boundary
+        # it archived up to plus a watermark instead of being blanked.
+        self.assertEqual(world.checkpoints['telemetry_events']['scan'], 'drained')
+        self.assertEqual(world.checkpoints['telemetry_events']['cursor'], 'page-3')
+        self.assertEqual(world.checkpoints['telemetry_events']['watermark'],
+                         'telemetry_event:demo:event-1')
 
     def test_every_paginated_source_consumes_its_cursor(self):
         world = FakeWorld()
@@ -229,7 +273,130 @@ class Pagination(ShipperTestCase):
         self.assertEqual(code, 0, output)
         queries = world.request_queries('/aep/v1/admin/events')
         self.assertIn('cursor=page-9', queries[0])
-        self.assertEqual(world.checkpoints['telemetry_events'], '')
+        # A checkpoint written before the watermark existed has none to keep, but
+        # the cursor it did carry survives the drain.
+        self.assertEqual(world.checkpoints['telemetry_events']['scan'], 'drained')
+        self.assertEqual(world.checkpoints['telemetry_events']['cursor'], 'page-9')
+
+
+class IndexAndCheckpoint(ShipperTestCase):
+    """Every event lands in its own day's index, and re-reading never double counts."""
+
+    def test_a_page_spanning_two_days_is_bulked_per_index(self):
+        world = FakeWorld()
+        world.pages['/aep/v1/admin/events'] = [{'items': [
+            telemetry_event('event-new', occurredAt='2026-10-01T00:00:00Z'),
+            telemetry_event('event-old', occurredAt='2026-09-30T23:59:59Z'),
+        ], 'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sorted(index for index, _ in world.audit_stored_keys()),
+                         ['zhiyuan-audit-2026.09.30', 'zhiyuan-audit-2026.10.01'])
+        self.assertEqual([[(index, doc['event_id']) for index, _, doc in batch]
+                          for batch in world.audit_batches()],
+                         [[('zhiyuan-audit-2026.09.30', 'event-old')],
+                          [('zhiyuan-audit-2026.10.01', 'event-new')]])
+
+    def test_snapshot_documents_fall_back_to_the_run_day(self):
+        world = FakeWorld()
+        world.pages['/aep/v1/admin/models'] = [
+            {'models': [{'id': 'model-1', 'displayName': 'M1', 'healthStatus': 'healthy'}],
+             'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(world.docs_of('model_health_snapshot')), 1)
+        self.assertIn(('zhiyuan-audit-2026.10.15',
+                       'model_health_snapshot:test-run:demo:model-1'), world.stored)
+
+    def test_the_same_event_scanned_twice_is_indexed_once(self):
+        world = FakeWorld()
+        world.pages['/aep/v1/admin/events'] = [
+            {'items': [telemetry_event('event-1')], 'nextCursor': None}]
+        first, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(first, 0, output)
+        # A drained scan keeps a watermark, so the next run is not blind; it
+        # still starts from the newest page (never from the watermark, which
+        # would skip everything newer).
+        self.assertEqual(world.checkpoints['telemetry_events']['scan'], 'drained')
+        self.assertNotIn('cursor=', world.request_queries('/aep/v1/admin/events')[-1])
+        second, output = self.run_shipper(world, run_at='2026-10-16T00:00:00Z')
+        self.assertEqual(second, 0, output)
+        self.assertNotIn('cursor=', world.request_queries('/aep/v1/admin/events')[-1])
+        # Shipped on two different days, indexed once: same index, same id.
+        self.assertEqual([[(index, doc_id) for index, doc_id, _ in batch]
+                          for batch in world.audit_batches()],
+                         [[('zhiyuan-audit-2026.10.01', 'telemetry_event:demo:event-1')],
+                          [('zhiyuan-audit-2026.10.01', 'telemetry_event:demo:event-1')]])
+        self.assertEqual(len(world.docs_of('telemetry_event')), 1)
+
+    def test_a_backdated_event_is_still_archived(self):
+        # Telemetry pages are ordered by the client-supplied occurredAt, so an
+        # event can arrive below the watermark: the watermark must not cut the
+        # scan short.
+        world = FakeWorld()
+        world.pages['/aep/v1/admin/events'] = [
+            {'items': [telemetry_event('event-1')], 'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        world.pages['/aep/v1/admin/events'] = [{'items': [
+            telemetry_event('late', occurredAt='2026-09-01T00:00:00Z'),
+            telemetry_event('event-1'),
+        ], 'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-16T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sorted(doc['event_id'] for doc in world.docs_of('telemetry_event')),
+                         ['event-1', 'late'])
+        self.assertIn(('zhiyuan-audit-2026.09.01', 'telemetry_event:demo:late'), world.stored)
+        self.assertEqual(world.checkpoints['telemetry_events']['watermark'],
+                         'telemetry_event:demo:late')
+
+    def test_a_resumed_scan_never_lowers_the_watermark(self):
+        world = FakeWorld()
+        world.checkpoints['telemetry_events'] = {
+            'scan': 'in_progress', 'cursor': 'page-9',
+            'watermark': 'telemetry_event:demo:event-100'}
+        world.pages['/aep/v1/admin/events'] = [
+            {'items': [telemetry_event('event-9')], 'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        self.assertIn('cursor=page-9', world.request_queries('/aep/v1/admin/events')[0])
+        checkpoint = world.checkpoints['telemetry_events']
+        self.assertEqual(checkpoint['scan'], 'drained')
+        # The scan resumed mid-list, so the cursor stays its boundary and the
+        # watermark keeps the newer position an earlier run had already archived.
+        self.assertEqual(checkpoint['cursor'], 'page-9')
+        self.assertEqual(checkpoint['watermark'], 'telemetry_event:demo:event-100')
+        self.assertEqual(checkpoint['source'], 'telemetry_events')
+        self.assertEqual(checkpoint['deployment'], 'demo')
+        self.assertEqual(checkpoint['updated_at'], '2026-10-15T00:00:00Z')
+
+    def test_a_checkpoint_written_before_the_watermark_is_still_honoured(self):
+        world = FakeWorld()
+        world.checkpoints['telemetry_events'] = ''  # legacy "start from the newest page"
+        world.pages['/aep/v1/admin/events'] = [
+            {'items': [telemetry_event('event-1')], 'nextCursor': None}]
+        code, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('cursor=', world.request_queries('/aep/v1/admin/events')[0])
+        self.assertEqual(len(world.docs_of('telemetry_event')), 1)
+        checkpoint = world.checkpoints['telemetry_events']
+        self.assertEqual(checkpoint['scan'], 'drained')
+        # A source that never returned a cursor has no boundary to keep, but the
+        # watermark still says how far it was archived.
+        self.assertEqual(checkpoint['cursor'], '')
+        self.assertEqual(checkpoint['watermark'], 'telemetry_event:demo:event-1')
+
+    def test_an_unkeyed_record_keeps_one_id_across_runs(self):
+        world = FakeWorld()
+        world.pages['/aep/v1/admin/events'] = [
+            {'items': [telemetry_event(None)], 'nextCursor': None}]  # no usable primary key
+        first, output = self.run_shipper(world, run_at='2026-10-15T00:00:00Z')
+        self.assertEqual(first, 0, output)
+        second, output = self.run_shipper(world, run_at='2026-10-16T00:00:00Z')
+        self.assertEqual(second, 0, output)
+        shipped = [[doc_id for _, doc_id, _ in batch] for batch in world.audit_batches()]
+        self.assertEqual(shipped[0], shipped[1])
+        self.assertEqual(len(world.docs_of('telemetry_event')), 1)
 
 
 class BulkHandling(ShipperTestCase):
@@ -285,7 +452,8 @@ class BulkHandling(ShipperTestCase):
         self.assertIn('mapper_parsing_exception', output)
         self.assertIn('telemetry_event:demo:bad-event', output)
         # The rejected page never became progress, and it was not retried blindly.
-        self.assertEqual(world.checkpoints.get('telemetry_events'), 'page-2')
+        self.assertEqual(world.checkpoints['telemetry_events']['cursor'], 'page-2')
+        self.assertEqual(world.checkpoints['telemetry_events']['scan'], 'in_progress')
         self.assertEqual(len([batch for batch in world.audit_batches()
                               if any(doc.get('event_id') == 'bad-event' for _, _, doc in batch)]), 1)
         # Other sources keep being archived; the run still fails loudly.
@@ -404,8 +572,10 @@ class FieldMapping(ShipperTestCase):
         self.assertEqual(doc['result'], 'success')
         self.assertEqual(doc['changes'], {'enabled': True})
         self.assertEqual(doc['@timestamp'], '2026-10-02T01:02:03Z')
-        self.assertTrue(any(index.startswith('zhiyuan-audit-') and doc_id == 'admin_audit:demo:42'
-                            for index, doc_id in self.world.stored))
+        # The event's own day picks the index — not the day the shipper ran
+        # (today), which would move every re-read into a new index and count the
+        # same audit event once per delivery day.
+        self.assertIn(('zhiyuan-audit-2026.10.02', 'admin_audit:demo:42'), self.world.stored)
 
     def test_authentication_audit_maps_the_authentication_interface(self):
         doc = self.world.docs_of('authentication_audit')[0]

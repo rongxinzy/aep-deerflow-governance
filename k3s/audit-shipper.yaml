@@ -35,8 +35,28 @@ data:
     page is shipped first and only then checkpointed in ES (index
     zhiyuan-shipper-state), so a page whose bulk failed is retried by the next
     run instead of being skipped: the cursor never advances past unprocessed
-    items. Documents carry a stable id (source primary key, or the document hash
-    when the key is absent), so a re-read upserts instead of duplicating.
+    items. Documents carry a stable id (source primary key, or the hash of the
+    record as the source returned it when the key is absent), so a re-read upserts
+    instead of duplicating.
+
+    Each document is indexed under the day of its own @timestamp
+    (zhiyuan-audit-YYYY.MM.DD). An event's own date never changes, so a re-read on a
+    later run lands in the same index under the same _id and ES upserts it. Cutting
+    the index by the delivery day instead copied every re-read event into the new
+    day's index, where a zhiyuan-audit-* query counted one audit event once per
+    day it was shipped.
+
+    Pagination progress is the checkpoint document
+    {"scan": in_progress|drained, "cursor": <archived boundary / resume point>,
+    "watermark": <id of the newest document the scan archived>}. `cursor` is a live
+    resume point only while `scan` is in_progress; a drained scan has nothing left
+    to resume, so it keeps the cursor as the boundary it archived up to and the next
+    run starts from the newest page again — the cursor is never blanked, and the
+    watermark is what a human reads to see how far the source has been archived.
+    Re-reading from the newest page is safe because ids are stable, and the
+    watermark is deliberately never used to cut a scan short: telemetry pages are
+    ordered by the client-supplied occurred_at, so an event that arrives late can
+    sort below the watermark and would then never be archived.
 
     Bulk responses are inspected item by item: transient rejections (HTTP 429/5xx,
     queue/backpressure error types) are retried with backoff for the affected
@@ -49,6 +69,7 @@ data:
     import hashlib
     import json
     import os
+    import re
     import sys
     import time
     import urllib.error
@@ -68,6 +89,10 @@ data:
     BULK_ATTEMPTS = 3
     RETRY_SLEEP = float(os.environ.get("AUDIT_SHIPPER_RETRY_SLEEP", "2"))
     CHECKPOINT_INDEX = "zhiyuan-shipper-state"
+    AUDIT_INDEX_PREFIX = "zhiyuan-audit-"
+    SCAN_IN_PROGRESS = "in_progress"
+    SCAN_DRAINED = "drained"
+    DAY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
     REQUEST_STATES = ("pending", "approved", "rejected", "deployed")
 
     RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
@@ -184,10 +209,30 @@ data:
         return f"{kind}:{DEPLOYMENT}:{str(key).strip()}"
 
 
-    def _content_id(kind, doc):
-        """Fallback dedup id for a record with no usable primary key."""
-        canonical = json.dumps(doc, ensure_ascii=False, sort_keys=True, default=str)
+    def _content_id(kind, record):
+        """Fallback dedup id for a record with no usable primary key.
+
+        Only fields the source itself returned are hashed: hashing the mapped
+        document instead would fold in `shipped_at`, so every re-read of an unkeyed
+        record would arrive under a fresh id and be counted again.
+        """
+        canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         return f"{kind}:{DEPLOYMENT}:{hashlib.sha1(canonical.encode('utf-8')).hexdigest()}"
+
+
+    def event_index(document, run_at):
+        """Index for one document: AUDIT_INDEX_PREFIX + the event's own day.
+
+        The day is read off the document's own @timestamp, which is the event's
+        creation/occurrence time, so an event is indexed under the day it happened
+        on no matter when it is shipped: a re-read reuses the same index and the
+        same _id, and ES upserts it. Documents that carry no time of their own (the
+        snapshot families map @timestamp to the run time) fall back to the run's day.
+        """
+        day = str(document.get("@timestamp") or "")[:10]
+        if not DAY_PATTERN.fullmatch(day):
+            day = run_at[:10]
+        return AUDIT_INDEX_PREFIX + day.replace("-", ".")
 
 
     def es_bulk(index, entries):
@@ -250,27 +295,54 @@ data:
         return acked
 
 
+    def index_page(entries, run_at):
+        """Index one page's documents, grouped by the index their own day selects.
+
+        A page can span two days, so each index gets its own bulk request and a
+        rejected document is reported against the index it belongs to.
+        """
+        groups = {}
+        for doc_id, document in entries:
+            groups.setdefault(event_index(document, run_at), []).append((doc_id, document))
+        return sum(es_bulk(index, group) for index, group in sorted(groups.items()))
+
+
     def _checkpoint_id(source):
         return f"{DEPLOYMENT}:{source}"
 
 
     def read_checkpoint(source):
-        """Last cursor confirmed for `source`; "" means 'start from the newest page'."""
+        """Progress persisted for `source` as {"scan", "cursor", "watermark"}.
+
+        `cursor` is a resume point only while `scan` is "in_progress": a drained scan
+        has nothing left to resume, so the next run starts from the newest page again
+        and the cursor it keeps is the boundary it archived up to (never blanked).
+        `watermark` is the stable id of the newest document the last scan archived,
+        which is the value to read when checking how far a source has been shipped.
+        Checkpoints written before those fields existed carry a cursor alone; a
+        non-empty one is a resume point, an empty one means "start from the newest
+        page".
+        """
         path = f"/{CHECKPOINT_INDEX}/_doc/{urllib.parse.quote(_checkpoint_id(source), safe='')}"
         document = _es("GET", path, missing_ok=True)
-        if not isinstance(document, dict) or document.get("found") is False:
-            return ""
-        body = document.get("_source")
+        body = document.get("_source") if isinstance(document, dict) else None
         if not isinstance(body, dict):
-            return ""
+            body = {}
         cursor = body.get("cursor")
-        return cursor if isinstance(cursor, str) else ""
+        cursor = cursor if isinstance(cursor, str) else ""
+        scan = body.get("scan")
+        if scan not in (SCAN_IN_PROGRESS, SCAN_DRAINED):
+            scan = SCAN_IN_PROGRESS if cursor else SCAN_DRAINED
+        watermark = body.get("watermark")
+        return {"scan": scan, "cursor": cursor,
+                "watermark": watermark if isinstance(watermark, str) else ""}
 
 
-    def write_checkpoint(source, cursor, run_at):
+    def write_checkpoint(source, cursor, scan, watermark, run_at):
         """Persist progress; only ever called after the page's documents were acknowledged."""
         es_bulk(CHECKPOINT_INDEX, [(_checkpoint_id(source), {
-            "source": source, "deployment": DEPLOYMENT, "cursor": cursor, "updated_at": run_at})])
+            "source": source, "deployment": DEPLOYMENT, "scan": scan, "cursor": cursor,
+            "watermark": watermark, "updated_at": run_at})])
 
 
     class Source:
@@ -295,11 +367,23 @@ data:
             return f"{self.path}{separator}{query}"
 
 
-    def ship(source, token, index, run_at, stats):
+    def ship(source, token, run_at, stats):
         """Read one source to the end, shipping and checkpointing page by page."""
         source_stats = stats.setdefault(source.name, {"acked": 0, "attempted": 0})
-        cursor = read_checkpoint(source.name) if source.paginated else ""
-        stored = cursor
+        state = read_checkpoint(source.name) if source.paginated else {
+            "scan": SCAN_DRAINED, "cursor": "", "watermark": ""}
+        persisted = dict(state)
+        cursor = state["cursor"] if state["scan"] == SCAN_IN_PROGRESS else ""
+        watermark = state["watermark"]
+        scanned = 0
+
+        def persist(scan, position):
+            """Checkpoint the new state; a run that learned nothing does not rewrite it."""
+            current = {"scan": scan, "cursor": position, "watermark": watermark}
+            if current != persisted:
+                write_checkpoint(source.name, position, scan, watermark, run_at)
+                persisted.update(current)
+
         for _ in range(MAX_PAGES):
             page = api(source.base, "GET", source.page_path(cursor), token)
             if source.list_key not in page:
@@ -311,17 +395,23 @@ data:
                                 f"{source.base}{source.path}")
             entries = [source.mapper(item) for item in items]
             source_stats["attempted"] += len(entries)
-            source_stats["acked"] += es_bulk(index, entries)
+            source_stats["acked"] += index_page(entries, run_at)
             if not source.paginated:
                 return
+            if scanned == 0 and entries and not cursor:
+                # This scan began at the newest page, so the document it started from
+                # is the newest one it has archived: keep it as the watermark. A scan
+                # that resumes mid-list never lowers the watermark.
+                watermark = entries[0][0] or watermark
+            scanned += len(entries)
             next_cursor = page.get("nextCursor") or ""
             if not next_cursor:
-                # Drained: the next run starts from the newest page again. Re-reads
-                # are upserts thanks to the stable document ids, and clearing the
-                # checkpoint must never be read as "skip everything newer".
-                if stored:
-                    write_checkpoint(source.name, "", run_at)
-                    stored = ""
+                # Drained: the cursor stays as the archived boundary instead of being
+                # cleared, so the checkpoint keeps an explainable position when there
+                # is nothing left to resume (the next run reads the newest page
+                # again). Re-reads are upserts, so a scan that overlaps the previous
+                # one cannot index the same event a second time.
+                persist(SCAN_DRAINED, cursor)
                 return
             if not isinstance(next_cursor, str):
                 raise ShipError(f"{source.name}: the API returned a non-string nextCursor "
@@ -331,9 +421,7 @@ data:
                 # silently hide every older one: fail instead of looping.
                 raise ShipError(f"{source.name}: the API answered with the same nextCursor "
                                 f"({cursor!r}) it was given; refusing to re-read the same page")
-            if next_cursor != stored:
-                write_checkpoint(source.name, next_cursor, run_at)
-                stored = next_cursor
+            persist(SCAN_IN_PROGRESS, next_cursor)
             cursor = next_cursor
         print(f"WARN: {source.name}: stopped after {MAX_PAGES} pages; the ES checkpoint resumes the rest",
               file=sys.stderr)
@@ -356,7 +444,7 @@ data:
                 "changes": item.get("changes"),
                 "shipped_at": now,
             }
-            return _dedup_id("admin_audit", item.get("cursor")) or _content_id("admin_audit", doc), doc
+            return _dedup_id("admin_audit", item.get("cursor")) or _content_id("admin_audit", item), doc
 
         def authentication_audit(item):
             doc = {
@@ -372,7 +460,7 @@ data:
                 "shipped_at": now,
             }
             return (_dedup_id("authentication_audit", item.get("cursor"))
-                    or _content_id("authentication_audit", doc)), doc
+                    or _content_id("authentication_audit", item)), doc
 
         def control_event(item):
             doc = {
@@ -390,7 +478,7 @@ data:
                 "delivery_summary": item.get("deliverySummary"),
                 "shipped_at": now,
             }
-            return _dedup_id("control_event", item.get("eventId")) or _content_id("control_event", doc), doc
+            return _dedup_id("control_event", item.get("eventId")) or _content_id("control_event", item), doc
 
         def telemetry_event(item):
             doc = {
@@ -408,7 +496,7 @@ data:
                 "received_at": item.get("receivedAt"),
                 "shipped_at": now,
             }
-            return _dedup_id("telemetry_event", item.get("eventId")) or _content_id("telemetry_event", doc), doc
+            return _dedup_id("telemetry_event", item.get("eventId")) or _content_id("telemetry_event", item), doc
 
         def user_snapshot(item):
             doc = {
@@ -420,7 +508,8 @@ data:
                 "display_name": item.get("displayName"),
                 "shipped_at": now,
             }
-            return _dedup_id(f"user_snapshot:{run_id}", item.get("id")) or _content_id("user_snapshot", doc), doc
+            return (_dedup_id(f"user_snapshot:{run_id}", item.get("id"))
+                    or _content_id(f"user_snapshot:{run_id}", item)), doc
 
         def employee_snapshot(item):
             doc = {
@@ -436,7 +525,8 @@ data:
                 "wecom": (item.get("channels") or {}).get("wecom", False),
                 "shipped_at": now,
             }
-            return _dedup_id(f"employee_snapshot:{run_id}", item.get("name")) or _content_id("employee_snapshot", doc), doc
+            return (_dedup_id(f"employee_snapshot:{run_id}", item.get("name"))
+                    or _content_id(f"employee_snapshot:{run_id}", item)), doc
 
         def employee_request(item):
             doc = {
@@ -451,7 +541,8 @@ data:
                 "reason": item.get("reason"),
                 "shipped_at": now,
             }
-            return _dedup_id(f"employee_request:{run_id}", item.get("id")) or _content_id("employee_request", doc), doc
+            return (_dedup_id(f"employee_request:{run_id}", item.get("id"))
+                    or _content_id(f"employee_request:{run_id}", item)), doc
 
         def model_health(item):
             doc = {
@@ -469,7 +560,8 @@ data:
                 "health_detail": item.get("healthDetail"),
                 "shipped_at": now,
             }
-            return _dedup_id(f"model_health_snapshot:{run_id}", item.get("id")) or _content_id("model_health_snapshot", doc), doc
+            return (_dedup_id(f"model_health_snapshot:{run_id}", item.get("id"))
+                    or _content_id(f"model_health_snapshot:{run_id}", item)), doc
 
         sources = [
             Source("admin_audit", AEP, "/aep/v1/admin/audit/operations", "items", admin_audit),
@@ -489,7 +581,6 @@ data:
     def main():
         run_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         run_id = os.environ.get("AUDIT_SHIPPER_RUN_ID") or time.strftime("%Y%m%dT%H%MZ", time.gmtime())
-        index = f"zhiyuan-audit-{time.strftime('%Y.%m.%d')}"
 
         try:
             login = api(AEP, "POST", "/aep/v1/auth/password/login", body={
@@ -510,7 +601,7 @@ data:
         failures = []
         for source in source_plan(run_at, run_id):
             try:
-                ship(source, token, index, run_at, stats)
+                ship(source, token, run_at, stats)
             except ShipError as error:
                 failures.append(f"{source.name}: {error}")
                 print(f"ERROR: {source.name}: {error}", file=sys.stderr)

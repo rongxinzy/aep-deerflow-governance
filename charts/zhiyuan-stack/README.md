@@ -82,10 +82,18 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
   `/aep/v1/admin/audit/operations`、认证日志 `/aep/v1/admin/audit/authentication`、
   控制事件 `/aep/v1/admin/control-events`、遥测 `/aep/v1/admin/events`，加 AEP
   用户/模型健康与 portal 员工/申请快照。每个分页源都消费 `nextCursor` 直到取完；
-  一页入库确认后才把游标写进 `zhiyuan-shipper-state` 索引，失败的那页下轮
-  重读（事件带稳定文档 id，重读是 upsert 不是重复）。bulk 逐项判定：429/5xx
-  只重试被拒文档，永久拒绝会打印文档 id 并以非零退出，同时触发
-  `AuditShipperFailed` 告警——**CronJob 成功不再等同于归档完整**。
+  一页入库确认后才把进度写进 `zhiyuan-shipper-state` 索引，失败的那页下轮
+  重读。文档落到**事件自己那天**的索引 `zhiyuan-audit-<事件的 @timestamp 日期>`
+  （快照类没有自己的时间，用本轮运行日）：同一事件迟早哪一轮投递都落在同一
+  索引、同一 `_id`，所以重读是 upsert；按投递日切索引会把重读的事件复制进当天
+  的索引，`zhiyuan-audit-*` 查询就会把同一条审计事件算多次。checkpoint 保留
+  进度、不清空：`scan: in_progress` 时 `cursor` 是续扫点；扫完置
+  `scan: drained` 并保留 `cursor`（已归档边界）与 `watermark`（最新已归档文档
+  id），下一轮仍从最新页开始。`watermark` 只作进度/对账，**不**作为提前停止
+  条件——遥测页按客户端给的 `occurredAt` 排序，迟到的旧事件会排在水位之后，
+  提前停会永久漏采。bulk 逐项判定：429/5xx 只重试被拒文档，永久拒绝会打印
+  文档 id 并以非零退出，同时触发 `AuditShipperFailed` 告警——**CronJob 成功
+  不再等同于归档完整**。
   管理员口令来自一次性 Secret `observability.auditShipper.credentialsSecret`
   （不入 chart，同 de-platform-creds 纪律）；该账号需具备 `audit.read`（管理
   审计/认证日志）、`events.read`（事件/控制事件）、`users.read`、`models.read`
