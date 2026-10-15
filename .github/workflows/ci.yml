@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify:
@@ -50,7 +51,7 @@ jobs:
         working-directory: portal
         env:
           PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
-        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)' -v ./...
+        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)|TestCollaborationPostgres' -v ./...
       - name: golangci-lint (operator)
         uses: golangci/golangci-lint-action@v8
         with:
@@ -81,7 +82,8 @@ jobs:
           helm lint charts/zhiyuan-stack
           python -m unittest scripts/test_managed_knowledge_chart.py scripts/test_audit_shipper.py
 
-  # Coverage ratchet: a PR may not lower coverage relative to main.
+  # Coverage ratchet: compare against the latest verified main ancestor.
+  # A broken main must not prevent its repair; head tests and floors remain mandatory.
   coverage-ratchet:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -97,7 +99,10 @@ jobs:
           cache-dependency-path: |
             operator/go.sum
             portal/go.sum
-      - name: Compare head vs base
+      - name: Compare head vs verified base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.base_ref }}
         run: |
           extract() {
             dir="$1"; rev="$2"
@@ -108,9 +113,26 @@ jobs:
             (cd "$dir" && go test ./... -coverprofile=/tmp/c.cov >/dev/null && \
              go tool cover -func=/tmp/c.cov | awk '/^total:/ {sub(/%/, "", $3); print $3}')
           }
-          base="$(git rev-parse origin/${{ github.base_ref }})"
+          head="$(git rev-parse HEAD)"
+          base_tip="$(git rev-parse "origin/$BASE_BRANCH")"
+          # Only successful push CI on this branch can establish a baseline.
+          candidates="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f branch="$BASE_BRANCH" -f event=push -f status=success -f per_page=100 \
+            --jq '.workflow_runs[].head_sha')"
+          base=""
+          while IFS= read -r candidate; do
+            if git merge-base --is-ancestor "$candidate" "$base_tip"; then
+              base="$candidate"
+              break
+            fi
+          done <<< "$candidates"
+          if [ -z "$base" ]; then
+            echo "::error::No verified ancestor found for $BASE_BRANCH; coverage comparison cannot proceed"
+            exit 1
+          fi
+          echo "Coverage baseline: $base (verified ancestor of $base_tip); head: $head"
           for dir in portal operator; do
-            head_pct=$(extract "$dir" HEAD)
+            head_pct=$(extract "$dir" "$head")
             base_pct=$(extract "$dir" "$base")
             echo "$dir: main=${base_pct}% PR=${head_pct}%"
             if awk "BEGIN{exit !($head_pct < $base_pct)}"; then

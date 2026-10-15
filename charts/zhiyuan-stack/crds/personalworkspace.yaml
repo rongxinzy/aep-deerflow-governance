@@ -119,8 +119,8 @@ spec:
                       pattern: ^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$
                       type: string
                     persona:
-                      description: Persona 是搭档的人格/角色提示词，经 gateway 注入 COMPANION_PERSONA；operator
-                        只透传。空 = 运行时内置默认。
+                      description: Persona describes the owner-configured companion
+                        behavior.
                       maxLength: 2000
                       type: string
                     resources:

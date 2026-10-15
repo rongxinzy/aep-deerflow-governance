@@ -178,6 +178,7 @@ func (p *portal) createWorkspace(w http.ResponseWriter, r *http.Request, ident i
 		return
 	}
 	spec := p.renderWorkspaceSpec(name, ident, companions, body.Image)
+	initializeContacts(&spec, nil)
 	if body.Runtime != "" {
 		spec.Spec.Runtime = body.Runtime
 	}
@@ -249,7 +250,9 @@ func (p *portal) updateWorkspace(w http.ResponseWriter, r *http.Request, ident i
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 			return
 		}
+		previous := item.Spec.Companions
 		item.Spec.Companions = companions
+		initializeContacts(item, previous)
 	}
 	if body.Image != nil {
 		item.Spec.Image = strings.TrimSpace(*body.Image)
@@ -286,7 +289,7 @@ func summarizeWorkspace(item *dev1alpha1.PersonalWorkspace) map[string]any {
 	companions := make([]map[string]any, 0, len(item.Spec.Companions))
 	for i := range item.Spec.Companions {
 		c := &item.Spec.Companions[i]
-		entry := map[string]any{"name": c.Name, "model": c.Model}
+		entry := map[string]any{"name": c.Name, "model": c.Model, "contactMode": contactSettings(item)[c.Name].Mode}
 		if c.DisplayName != "" {
 			entry["displayName"] = c.DisplayName
 		}
