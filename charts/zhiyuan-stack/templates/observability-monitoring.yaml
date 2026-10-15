@@ -58,6 +58,23 @@ data:
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
 
+      # pw-node-agent（workspace-agent）：hostNetwork DaemonSet，容器声明的
+      # metrics 端口即节点端口（与 node-exporter job 同型）。
+      - job_name: pw-node-agent
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: pw-node-agent
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: {{ .Values.workspaceAgent.metricsPort | quote }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_spec_node_name]
+            target_label: node
+
       - job_name: kube-state-metrics
         kubernetes_sd_configs:
           - role: pod
@@ -120,6 +137,12 @@ data:
             labels: {severity: warning}
             annotations:
               summary: "Pod restarted more than 5 times in 30m"
+          - alert: WorkspacePhaseStuck
+            expr: pw_node_agent_workspace_phase{phase=~"Failed|Pending"} == 1
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "Workspace stuck in Failed/Pending for 15m"
           - alert: AEP5xx
             expr: sum(rate(aep_control_service_http_requests_total{status=~"5.."}[5m])) > {{ $obs.alerts.aep5xxRate }}
             for: 10m
