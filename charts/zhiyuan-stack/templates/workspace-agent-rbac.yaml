@@ -47,7 +47,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pw-node-agent-endpoints-read
+  name: pw-node-agent-endpoints-read-{{ include "zhiyuan.ns" . }}
 rules:
   - apiGroups: [""]
     resources: ["services", "endpoints"]
@@ -56,11 +56,11 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pw-node-agent-endpoints-read
+  name: pw-node-agent-endpoints-read-{{ include "zhiyuan.ns" . }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: pw-node-agent-endpoints-read
+  name: pw-node-agent-endpoints-read-{{ include "zhiyuan.ns" . }}
 subjects:
   - kind: ServiceAccount
     name: pw-node-agent

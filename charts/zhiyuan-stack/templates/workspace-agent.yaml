@@ -20,6 +20,10 @@ spec:
         app: pw-node-agent
     spec:
       serviceAccountName: pw-node-agent
+      {{- with .Values.workspaceAgent.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       nodeSelector:
         {{- range $k, $v := .Values.workspaceAgent.nodeSelector }}
         {{ $k }}: {{ $v | quote }}
@@ -36,6 +40,7 @@ spec:
         {{- range $index, $template := prepend .Values.workspaceAgent.additionalTemplates .Values.workspaceAgent.templateImage }}
         - name: template-materialize-{{ $index }}
           image: {{ include "zhiyuan.image" (dict "registry" $root.Values.global.registry "repo" $template.repository "tag" $template.tag) }}
+          imagePullPolicy: {{ $root.Values.workspaceAgent.imagePullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -50,6 +55,7 @@ spec:
       containers:
         - name: agent
           image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.workspaceAgent.image.repository "tag" .Values.workspaceAgent.image.tag) }}
+          imagePullPolicy: {{ .Values.workspaceAgent.imagePullPolicy }}
           args:
             - --namespace={{ include "zhiyuan.ns" . }}
             - --node-name=$(NODE_NAME)

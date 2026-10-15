@@ -312,6 +312,9 @@ conversationStore:
 # 特权+root 为 PoC 级隔离决策（无 jailer，2026-10-14）；加固轮再收敛。
 workspaceAgent:
   enabled: false
+  # Namespace-local registry credentials, shared by agent and template init containers.
+  imagePullSecrets: []
+  imagePullPolicy: IfNotPresent
   # microvm 分配池（operator 的 WORKSPACE_MICROVM_NODES）——顺序=分配偏好：
   # cicd 把 rtl-l20 排前（burst6 根盘 92% 红线，首个工作区避开）。
   microvmNodes: []
@@ -335,9 +338,10 @@ workspaceAgent:
   workdirRoot: /var/lib/zhiyuan/workspace-agent
   portRange: 8800-8899
   modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local/v1
+  # Firecracker children share this container cgroup. Any limits must budget
+  # for all guests on the node plus agent overhead, not just the Go process.
   resources:
     requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: "1", memory: 512Mi }
 
 employees: []
 #  - name: sales-helper
