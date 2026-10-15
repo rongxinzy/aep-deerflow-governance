@@ -418,6 +418,13 @@ type DigitalEmployeeSpec struct {
 	// A2A optionally exposes this employee over the A2A delegation contract.
 	// +optional
 	A2A *A2ASpec `json:"a2a,omitempty"`
+	// Email optionally gives this employee its own mailbox(es). The secret
+	// named here must carry EMAIL_MAILBOXES (JSON array of mailbox configs
+	// incl. credentials); the operator envFrom-injects it into the runtime
+	// and the governance middleware registers the email tools when the env
+	// is present. Portal is the writer of that secret.
+	// +optional
+	Email *EmailSpec `json:"email,omitempty"`
 	// Hibernation optionally lets the operator scale the runtime to zero
 	// when idle (KEDA watches the portal database's wake/activity tables).
 	// Disabled by default; employees with an IM channel that holds an
@@ -425,6 +432,13 @@ type DigitalEmployeeSpec struct {
 	// channel-gateway lands.
 	// +optional
 	Hibernation *HibernationSpec `json:"hibernation,omitempty"`
+}
+
+// EmailSpec references the employee's mailbox configuration secret.
+type EmailSpec struct {
+	// SecretName names a Secret in this namespace whose EMAIL_MAILBOXES key
+	// holds the JSON mailbox array (label/address/imap/smtp/username/password).
+	SecretName string `json:"secretName"`
 }
 
 // HibernationSpec configures scale-to-zero for one employee. The effective

@@ -64,6 +64,9 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("/api/v1/workplace", p.auth(p.handleWorkplace))
 	// 邮箱底层（一人多箱）：配置/测试/状态/收件/发件直达本人工作区网关。
 	mux.HandleFunc("/api/v1/email/{rest...}", p.auth(p.handleEmail))
+	// 数字员工自有邮箱：配置写 Secret + CR（admin 或员工 owner），读掩码。
+	mux.HandleFunc("GET /api/v1/employees/{name}/email", p.auth(p.handleGetEmployeeEmail))
+	mux.HandleFunc("PUT /api/v1/employees/{name}/email", p.auth(p.handlePutEmployeeEmail))
 	mux.HandleFunc("/api/v1/email", p.auth(p.handleEmail))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))

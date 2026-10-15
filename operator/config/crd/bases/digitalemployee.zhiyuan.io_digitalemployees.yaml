@@ -149,6 +149,22 @@ spec:
                 type: string
               displayName:
                 type: string
+              email:
+                description: |-
+                  Email optionally gives this employee its own mailbox(es). The secret
+                  named here must carry EMAIL_MAILBOXES (JSON array of mailbox configs
+                  incl. credentials); the operator envFrom-injects it into the runtime
+                  and the governance middleware registers the email tools when the env
+                  is present. Portal is the writer of that secret.
+                properties:
+                  secretName:
+                    description: |-
+                      SecretName names a Secret in this namespace whose EMAIL_MAILBOXES key
+                      holds the JSON mailbox array (label/address/imap/smtp/username/password).
+                    type: string
+                required:
+                - secretName
+                type: object
               governance:
                 description: GovernanceSpec carries AEP governance middleware parameters.
                 properties:
