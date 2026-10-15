@@ -57,6 +57,8 @@ func (p *portal) routes() http.Handler {
 	// Personal workspaces (个人搭档): self-service, one per user, owner/admin
 	// scoped. Chat rides the workspace gateway's per-companion prefix route.
 	mux.HandleFunc("POST /api/v1/workspaces", p.auth(p.createWorkspace))
+	mux.HandleFunc("POST /api/v1/workspaces/{name}/companions", p.auth(p.addWorkspaceCompanion))
+	mux.HandleFunc("GET /api/v1/workspaces/{name}/{companion}/ready", p.auth(p.workspaceCompanionReady))
 	mux.HandleFunc("GET /api/v1/workspaces", p.auth(p.listWorkspaces))
 	mux.HandleFunc("GET /api/v1/workspaces/{name}", p.auth(p.getWorkspace))
 	mux.HandleFunc("PATCH /api/v1/workspaces/{name}", p.auth(p.updateWorkspace))
