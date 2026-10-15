@@ -286,3 +286,19 @@ func TestDesktopResourcesAndTemplateRolloutKeepsData(t *testing.T) {
 	require.Error(t, e.m.Resync(context.Background()))
 	require.Equal(t, 1, e.stops)
 }
+
+func TestEarlyProvisioningFailureIsVisibleAndRecovers(t *testing.T) {
+	objects := baseObjects(manifestV1)
+	// The roster has not arrived yet: failure occurs before a VM exists.
+	roster := objects[1]
+	e := newEnv(t, append(objects[:1:1], objects[2:]...)...)
+	require.Error(t, e.m.Resync(context.Background()))
+	ws := getWS(t, e.client)
+	assert.Equal(t, v1alpha1.WorkspacePhaseFailed, ws.Status.Phase)
+	assert.Contains(t, ws.Status.Message, "自动重试")
+	require.NoError(t, e.client.Create(context.Background(), roster))
+	require.NoError(t, e.m.Resync(context.Background()))
+	ws = getWS(t, e.client)
+	assert.Equal(t, v1alpha1.WorkspacePhaseRunning, ws.Status.Phase)
+	assert.Empty(t, ws.Status.Message)
+}

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/rongxinzy/aep-deerflow-governance/workspace-agent/internal/hostcmd"
+	"github.com/rongxinzy/aep-deerflow-governance/workspace-agent/internal/tap"
 )
 
 // Target is one allowed destination (a resolved service endpoint).
@@ -136,9 +137,9 @@ func EnsureEgress(ctx context.Context, run hostcmd.Runner, workspace string, tar
 	_, _ = run.Run(ctx, "iptables", "-F", scratch)
 	_, _ = run.Run(ctx, "iptables", "-X", scratch)
 	// FORWARD jump (idempotent via -C).
-	jump := []string{"-C", "FORWARD", "-i", "tap-" + workspace, "-j", chain}
+	jump := []string{"-C", "FORWARD", "-i", tap.InterfaceName(workspace), "-j", chain}
 	if _, err := run.Run(ctx, "iptables", jump...); err != nil {
-		if _, err := run.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", "tap-"+workspace, "-j", chain); err != nil {
+		if _, err := run.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", tap.InterfaceName(workspace), "-j", chain); err != nil {
 			return fmt.Errorf("forward jump for %s: %w", chain, err)
 		}
 	}
@@ -149,7 +150,7 @@ func EnsureEgress(ctx context.Context, run hostcmd.Runner, workspace string, tar
 // Idempotent; missing pieces are the desired end state.
 func TeardownEgress(ctx context.Context, run hostcmd.Runner, workspace string) error {
 	chain := ChainID(workspace)
-	_, _ = run.Run(ctx, "iptables", "-D", "FORWARD", "-i", "tap-"+workspace, "-j", chain)
+	_, _ = run.Run(ctx, "iptables", "-D", "FORWARD", "-i", tap.InterfaceName(workspace), "-j", chain)
 	_, _ = run.Run(ctx, "iptables", "-F", chain)
 	_, _ = run.Run(ctx, "iptables", "-X", chain)
 	_, _ = run.Run(ctx, "iptables", "-F", chain+"_N")
