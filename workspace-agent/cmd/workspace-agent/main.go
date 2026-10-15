@@ -45,6 +45,7 @@ func main() {
 	flag.StringVar(&cfg.TemplateTag, "template-tag", envOr("TEMPLATE_TAG", "0.5.0"), "pw-rootfs template tag")
 	portRange := flag.String("port-range", envOr("PORT_RANGE", "8800-8899"), "host port range for proxies")
 	flag.StringVar(&cfg.ModelBaseURL, "model-base-url", envOr("MODEL_BASE_URL", "http://higress-gateway.higress-system.svc.cluster.local/v1"), "model gateway route")
+	flag.StringVar(&cfg.MemoryBaseURL, "memory-base-url", envOr("MEMORY_BASE_URL", "http://openviking.memory-system.svc.cluster.local:1933"), "OpenViking service the companions dial directly")
 	hostRoot := flag.String("host-root", envOr("HOST_ROOT", "/host"), "mounted host filesystem root")
 	serialMB := flag.Int("serial-log-mb", 5, "serial log rotation threshold (MiB)")
 	interval := flag.Duration("resync", 10*time.Second, "resync interval")

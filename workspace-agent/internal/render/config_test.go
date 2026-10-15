@@ -45,10 +45,11 @@ func TestBuildPayloadBasics(t *testing.T) {
 				"WORKSPACE_INTERNAL_TOKEN": []byte("tok"),
 			}),
 		},
-		Credentials:  secret("creds", map[string][]byte{"BIGMODEL_API_KEY": []byte("sk-x")}),
-		ModelBaseURL: "http://higress-gateway.higress-system.svc.cluster.local/v1",
-		DNSIP:        "10.43.0.10",
-		DNSSearch:    "digital-employees.svc.cluster.local",
+		Credentials:   secret("creds", map[string][]byte{"BIGMODEL_API_KEY": []byte("sk-x")}),
+		ModelBaseURL:  "http://higress-gateway.higress-system.svc.cluster.local/v1",
+		MemoryBaseURL: "http://openviking.memory-system.svc.cluster.local:1933",
+		DNSIP:         "10.43.0.10",
+		DNSSearch:     "digital-employees.svc.cluster.local",
 	}
 	p, err := BuildPayload(in)
 	require.NoError(t, err)
@@ -61,6 +62,7 @@ func TestBuildPayloadBasics(t *testing.T) {
 		"BENCH_BASE_URL=http://higress-gateway.higress-system.svc.cluster.local/v1",
 		"BENCH_MODEL=glm-4.6",
 		"BENCH_API_KEY=sk-x",
+		"OPENVIKING_BASE_URL=http://openviking.memory-system.svc.cluster.local:1933",
 		"PW_GUEST_IP=192.168.77.2",
 		"PW_GUEST_GW=192.168.77.1",
 		"PW_ASSISTANT_OPENVIKING_API_KEY=ov-key",
@@ -102,6 +104,25 @@ func TestBuildPayloadHashSensitivity(t *testing.T) {
 func TestBuildPayloadRejectsEmptyManifest(t *testing.T) {
 	_, err := BuildPayload(Inputs{Workspace: testWorkspace(), DNSIP: "10.43.0.10"})
 	assert.ErrorContains(t, err, "manifest")
+}
+
+func TestBuildPayloadMemoryBaseURL(t *testing.T) {
+	base := Inputs{
+		Workspace:    testWorkspace(),
+		Manifest:     `{"companions":[{"name":"assistant"}]}`,
+		ModelBaseURL: "http://gw/v1",
+		DNSIP:        "10.43.0.10",
+	}
+	without, err := BuildPayload(base)
+	require.NoError(t, err)
+	assert.NotContains(t, string(without.EnvFile), "OPENVIKING_BASE_URL", "empty MemoryBaseURL skips the line")
+
+	with := base
+	with.MemoryBaseURL = "http://openviking.memory-system.svc.cluster.local:1933"
+	rendered, err := BuildPayload(with)
+	require.NoError(t, err)
+	assert.Contains(t, string(rendered.EnvFile), "OPENVIKING_BASE_URL=http://openviking.memory-system.svc.cluster.local:1933")
+	assert.NotEqual(t, without.Hash, rendered.Hash, "the base URL rides the config rollout identity")
 }
 
 func TestSubnetEndpoints(t *testing.T) {
