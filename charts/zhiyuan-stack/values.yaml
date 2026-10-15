@@ -319,6 +319,10 @@ conversationStore:
 #   1) kubectl label node <kvm-hosts> zhiyuan.io/kvm=true（当前=burst6、rtl-l20）
 #   2) operator env WORKSPACE_MICROVM_NODES 指向同一批节点（分配池，顺序=偏好）
 # 特权+root 为 PoC 级隔离决策（无 jailer，2026-10-14）；加固轮再收敛。
+# 个人工作区网关默认镜像（operator PERSONAL_WORKSPACE_IMAGE env 覆盖其编译期
+# 默认 0.4.2——不带 rooms/email 的老版本；不设置的 CR spec.image 走此值）。
+workspaceGateway:
+  image: ""
 workspaceAgent:
   enabled: false
   # Namespace-local registry credentials, shared by agent and template init containers.
@@ -347,6 +351,10 @@ workspaceAgent:
   workdirRoot: /var/lib/zhiyuan/workspace-agent
   portRange: 8800-8899
   modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local/v1
+  # 搭档进程直连的 OpenViking 服务（渲染为 env 盘全局 OPENVIKING_BASE_URL）。
+  memoryBaseURL: http://openviking.memory-system.svc.cluster.local:1933
+  # /metrics 监听端口（hostNetwork 下的节点端口；勿与 portRange/node-exporter 冲突）。
+  metricsPort: 9091
   # Firecracker children share this container cgroup. Any limits must budget
   # for all guests on the node plus agent overhead, not just the Go process.
   resources:

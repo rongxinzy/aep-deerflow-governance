@@ -80,7 +80,7 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null 2>&1 || true
           helm lint charts/zhiyuan-stack
-          python -m unittest scripts/test_managed_knowledge_chart.py
+          python -m unittest scripts/test_managed_knowledge_chart.py scripts/test_audit_shipper.py
 
   # Coverage ratchet: compare against the latest verified main ancestor.
   # A broken main must not prevent its repair; head tests and floors remain mandatory.

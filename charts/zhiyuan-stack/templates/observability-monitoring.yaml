@@ -58,6 +58,23 @@ data:
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
 
+      # pw-node-agent（workspace-agent）：hostNetwork DaemonSet，容器声明的
+      # metrics 端口即节点端口（与 node-exporter job 同型）。
+      - job_name: pw-node-agent
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: pw-node-agent
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: {{ .Values.workspaceAgent.metricsPort | quote }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_spec_node_name]
+            target_label: node
+
       - job_name: kube-state-metrics
         kubernetes_sd_configs:
           - role: pod
@@ -79,7 +96,7 @@ data:
 ---
 # 告警规则。Prometheus 负责 hold-down（for:）与 resolved；evaluator 只转发
 # firing。覆盖曾经静默发生的故障类：节点磁盘压力/体积、抓取目标消失、
-# 节点 NotReady、pod 反复重启，以及 AEP 5xx。
+# 节点 NotReady、pod 反复重启、AEP 5xx，以及 audit-shipper 归档失败。
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -120,12 +137,27 @@ data:
             labels: {severity: warning}
             annotations:
               summary: "Pod restarted more than 5 times in 30m"
+          - alert: WorkspacePhaseStuck
+            expr: pw_node_agent_workspace_phase{phase=~"Failed|Pending"} == 1
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "Workspace stuck in Failed/Pending for 15m"
           - alert: AEP5xx
             expr: sum(rate(aep_control_service_http_requests_total{status=~"5.."}[5m])) > {{ $obs.alerts.aep5xxRate }}
             for: 10m
             labels: {severity: warning}
             annotations:
               summary: "AEP control-service 5xx rate above threshold for 10m"
+          # audit-shipper 非零退出 = 有一页/一份文档没进 ES（源读不到、bulk 被拒、
+          # checkpoint 写不进）。它的日志给出具体源与文档 id；这条规则保证「归档
+          # 不完整」不会只留在一个没人看的失败 Job 里。
+          - alert: AuditShipperFailed
+            expr: max by (job_name) (kube_job_status_failed{namespace="{{ $obs.loggingNamespace }}",job_name=~"audit-shipper-.*"}) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "audit-shipper job failed: the audit trail is not fully archived (pod log names the failing source/document)"
 ---
 apiVersion: v1
 kind: ServiceAccount
