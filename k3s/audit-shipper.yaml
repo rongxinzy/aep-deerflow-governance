@@ -9,9 +9,51 @@ metadata:
   name: audit-shipper-script
   namespace: logging
 data:
+  # 与 charts/zhiyuan-stack/files/ship.py 逐字符一致（chart 模板用
+  # .Files.Get 装载同一份脚本；scripts/test_audit_shipper.py 守住这份同步）。
   ship.py: |
-    """Poll AEP + portal admin APIs; bulk-index structured audit docs into ES."""
-    import json, os, sys, time, urllib.request
+    """Ship the business-layer audit trail into the zhiyuan-audit-* ES indices.
+
+    This file is the chart's single source of truth for audit collection: the
+    ConfigMap template includes this very file (`.Files.Get "files/ship.py"`), so
+    there is no second copy to drift out of sync.
+
+    Data sources and schemas (each source is read with its own paging cursor and
+    mapped with that interface's own field names; see AEP
+    services/control-service/internal/httpapi/{admin_audit,audit_handlers,event_handlers,model_handlers}.go):
+
+      管理审计   GET /aep/v1/admin/audit/operations      items[].{cursor,actorUserId,action,resourceType,resourceId,result,reason,changes,createdAt}
+      认证日志   GET /aep/v1/admin/audit/authentication  items[].{cursor,userId,eventType,outcome,reason,sourceHash,createdAt}
+      控制事件   GET /aep/v1/admin/control-events        items[].{eventId,type,scope,resource,task,expiresAt,state,createdAt,createdBy,deliverySummary}
+      遥测事件   GET /aep/v1/admin/events                items[].{eventId,userId,sessionId,type,resourceType,resourceId,result,data,occurredAt,receivedAt}
+      用户快照   GET /aep/v1/admin/users                 items[].{id,username,displayName}
+      员工快照   GET {portal}/api/v1/employees           employees[]        (the portal has no cursor here)
+      申请留痕   GET {portal}/api/v1/requests?state=…     requests[].{id,employeeName,owner,displayName,state,reason,createdAt}  (newest 100 per state; the portal offers no cursor)
+      模型健康   GET /aep/v1/admin/models                models[].{id,displayName,sourceType,protocol,enabled,healthStatus,…}
+
+    Every paginated source consumes `nextCursor` until its pages are drained. A
+    page is shipped first and only then checkpointed in ES (index
+    zhiyuan-shipper-state), so a page whose bulk failed is retried by the next
+    run instead of being skipped: the cursor never advances past unprocessed
+    items. Documents carry a stable id (source primary key, or the document hash
+    when the key is absent), so a re-read upserts instead of duplicating.
+
+    Bulk responses are inspected item by item: transient rejections (HTTP 429/5xx,
+    queue/backpressure error types) are retried with backoff for the affected
+    documents only, permanent ones are reported together with the offending
+    document id. Any unresolved failure — unreadable source, rejected document,
+    checkpoint that cannot be persisted, missing response field — makes the
+    process exit non-zero and print FAILED, because a partially archived audit
+    trail must never look like success.
+    """
+    import hashlib
+    import json
+    import os
+    import sys
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
 
     AEP = os.environ.get("AEP_BASE_URL", "http://aep-control-service.aep-system.svc.cluster.local:8080")
     PORTAL = os.environ.get("PORTAL_BASE_URL", "http://de-portal.digital-employees.svc.cluster.local:8090")
@@ -20,142 +62,472 @@ data:
     USER = os.environ.get("AEP_ADMIN_USER", "admin")
     PASS = os.environ.get("AEP_ADMIN_PASSWORD", "")
 
+    PAGE_LIMIT = 200  # AEP's contract maximum; the server clamps anything above it
+    MAX_PAGES = 50  # per source per run; the checkpoint resumes the remainder
+    HTTP_ATTEMPTS = 3
+    BULK_ATTEMPTS = 3
+    RETRY_SLEEP = float(os.environ.get("AUDIT_SHIPPER_RETRY_SLEEP", "2"))
+    CHECKPOINT_INDEX = "zhiyuan-shipper-state"
+    REQUEST_STATES = ("pending", "approved", "rejected", "deployed")
+
+    RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+    RETRYABLE_ES_TYPES = {
+        "circuit_breaking_exception",
+        "cluster_block_exception",
+        "es_rejected_execution_exception",
+        "no_shard_available_action_exception",
+        "node_not_connected_exception",
+        "process_cluster_event_timeout_exception",
+        "timeout",
+        "unavailable_shards_exception",
+    }
+
+
+    class ShipError(Exception):
+        """A failure that must make the CronJob exit non-zero."""
+
+
+    def _sleep(attempt):
+        if RETRY_SLEEP > 0:
+            time.sleep(RETRY_SLEEP * (2 ** (attempt - 1)))
+
+
+    def _transport_error(error):
+        reason = getattr(error, "reason", None)
+        return f"transport error: {reason if reason is not None else error}"
+
+
     def api(base, method, path, token=None, body=None):
+        """One authenticated AEP/portal call, retried on transient failures only."""
         headers = {"Content-Type": "application/json", "X-AEP-Protocol-Version": "1.0"}
-        if token: headers["Authorization"] = "Bearer " + token
-        data = json.dumps(body).encode() if body else None
-        req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=15)
-        return json.loads(resp.read()) if resp.status == 200 else {}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        payload = json.dumps(body).encode() if body else None
+        detail = ""
+        for attempt in range(1, HTTP_ATTEMPTS + 1):
+            try:
+                request = urllib.request.Request(base + path, data=payload, method=method, headers=headers)
+                response = urllib.request.urlopen(request, timeout=15)
+                if response.status != 200:
+                    detail = f"HTTP {response.status}"
+                else:
+                    raw = response.read()
+                    return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as error:
+                detail = f"HTTP {error.code}"
+                if error.code not in RETRYABLE_HTTP:
+                    break
+            except urllib.error.URLError as error:
+                detail = _transport_error(error)
+            except (OSError, TimeoutError) as error:
+                detail = _transport_error(error)
+            except json.JSONDecodeError as error:
+                raise ShipError(f"{method} {base}{path}: response body is not JSON ({error})") from error
+            if attempt < HTTP_ATTEMPTS:
+                _sleep(attempt)
+        raise ShipError(f"{method} {base}{path}: {detail or 'request failed'} after {HTTP_ATTEMPTS} attempts")
 
-    def es_bulk(docs):
-        if not docs: return 0
-        idx = f"zhiyuan-audit-{time.strftime('%Y.%m.%d')}"
-        lines = []
-        meta = json.dumps({"index": {"_index": idx}})
-        for doc in docs:
-            lines.append(meta)
-            lines.append(json.dumps(doc, ensure_ascii=False, default=str))
-        body = "\n".join(lines) + "\n"
-        req = urllib.request.Request(ES + "/_bulk", data=body.encode(), method="POST",
-                                     headers={"Content-Type": "application/x-ndjson"})
-        resp = urllib.request.urlopen(req, timeout=30)
-        result = json.loads(resp.read())
-        errors = [i for i in result.get("items", []) if "error" in i.get("index", {})]
-        return len(docs) - len(errors)
 
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    docs = []
+    def _es(method, path, body=None, content_type="application/json", missing_ok=False):
+        """One ES call, retried on transient failures only."""
+        detail = ""
+        for attempt in range(1, HTTP_ATTEMPTS + 1):
+            request = urllib.request.Request(
+                ES + path, data=body, method=method, headers={"Content-Type": content_type})
+            try:
+                response = urllib.request.urlopen(request, timeout=30)
+                if response.status not in (200, 201):
+                    detail = f"HTTP {response.status}"
+                else:
+                    raw = response.read()
+                    return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as error:
+                if error.code == 404 and missing_ok:
+                    return None
+                detail = f"HTTP {error.code}"
+                if error.code not in RETRYABLE_HTTP:
+                    break
+            except urllib.error.URLError as error:
+                detail = _transport_error(error)
+            except (OSError, TimeoutError) as error:
+                detail = _transport_error(error)
+            except json.JSONDecodeError as error:
+                raise ShipError(f"ES {method} {path}: response body is not JSON ({error})") from error
+            if attempt < HTTP_ATTEMPTS:
+                _sleep(attempt)
+        raise ShipError(f"ES {method} {path}: {detail or 'request failed'} after {HTTP_ATTEMPTS} attempts")
 
-    # Login to AEP for admin credentials
-    token = api(AEP, "POST", "/aep/v1/auth/password/login", body={
-        "deploymentId": DEPLOYMENT, "sessionId": f"audit-{int(time.time())}",
-        "username": USER, "password": PASS,
-    }).get("accessToken", "")
-    if not token:
-        print("ERROR: AEP login failed", file=sys.stderr); sys.exit(1)
 
-    # 1. AEP control events (lifecycle commands, approvals)
-    try:
-        events = api(AEP, "GET", "/aep/v1/admin/events?limit=200", token)
-        for ev in (events.get("items") or []):
-            docs.append({
-                "@timestamp": ev.get("createdAt", now),
-                "audit_type": "control_event",
-                "event_id": ev.get("eventId") or ev.get("id"),
-                "event_type": ev.get("type"),
-                "state": ev.get("state"),
-                "created_by": ev.get("createdBy"),
+    def _es_error_reason(status, error):
+        if not isinstance(error, dict):
+            return f"HTTP {status}"
+        kind = error.get("type", "unknown")
+        reason = str(error.get("reason") or "")[:200]
+        return f"HTTP {status} {kind}" + (f": {reason}" if reason else "")
+
+
+    def _retryable_es(status, error):
+        if status in RETRYABLE_HTTP:
+            return True
+        if not isinstance(error, dict):
+            return False
+        if error.get("type") in RETRYABLE_ES_TYPES:
+            return True
+        caused_by = error.get("caused_by")
+        return isinstance(caused_by, dict) and caused_by.get("type") in RETRYABLE_ES_TYPES
+
+
+    def _dedup_id(kind, key):
+        """Stable document id: <kind>:<deployment>:<source primary key>."""
+        if key is None or (isinstance(key, str) and not key.strip()):
+            return None
+        return f"{kind}:{DEPLOYMENT}:{str(key).strip()}"
+
+
+    def _content_id(kind, doc):
+        """Fallback dedup id for a record with no usable primary key."""
+        canonical = json.dumps(doc, ensure_ascii=False, sort_keys=True, default=str)
+        return f"{kind}:{DEPLOYMENT}:{hashlib.sha1(canonical.encode('utf-8')).hexdigest()}"
+
+
+    def es_bulk(index, entries):
+        """Index entries = [(doc_id, doc)] into `index`; return the acknowledged count.
+
+        Transient per-item rejections retry those documents only; a permanent
+        rejection, a response that does not line up with the request, or an item
+        still rejected after BULK_ATTEMPTS raises ShipError.
+        """
+        if not entries:
+            return 0
+        pending = list(entries)
+        acked = 0
+        for attempt in range(1, BULK_ATTEMPTS + 1):
+            lines = []
+            for doc_id, doc in pending:
+                meta = {"index": {"_index": index}}
+                if doc_id:
+                    meta["index"]["_id"] = doc_id
+                lines.append(json.dumps(meta))
+                lines.append(json.dumps(doc, ensure_ascii=False, default=str))
+            result = _es("POST", "/_bulk", ("\n".join(lines) + "\n").encode(),
+                         content_type="application/x-ndjson")
+            if not isinstance(result, dict):
+                raise ShipError(f"ES _bulk into {index} returned no bulk response object")
+            items = result.get("items")
+            if not isinstance(items, list) or len(items) != len(pending):
+                count = len(items) if isinstance(items, list) else "no"
+                raise ShipError(
+                    f"ES _bulk into {index} returned {count} items for {len(pending)} documents: "
+                    "cannot tell which documents were indexed")
+            retry = []
+            permanent = []
+            for (doc_id, doc), item in zip(pending, items):
+                action = item.get("index") or item.get("create") or {} if isinstance(item, dict) else {}
+                status = action.get("status", 0)
+                error = action.get("error")
+                if error is None and isinstance(status, int) and 200 <= status < 300:
+                    acked += 1
+                    continue
+                reason = _es_error_reason(status, error)
+                if _retryable_es(status, error):
+                    retry.append((doc_id, doc, reason))
+                else:
+                    permanent.append((doc_id, reason))
+            if permanent:
+                raise ShipError(
+                    f"ES rejected {len(permanent)} document(s) in {index} permanently (not indexed): "
+                    + "; ".join(f"{doc_id or '<auto-id>'}: {reason}" for doc_id, reason in permanent[:5]))
+            if not retry:
+                return acked
+            if attempt == BULK_ATTEMPTS:
+                raise ShipError(
+                    f"ES still rejects {len(retry)} document(s) in {index} after {BULK_ATTEMPTS} attempts: "
+                    + "; ".join(f"{doc_id or '<auto-id>'}: {reason}" for doc_id, _, reason in retry[:5]))
+            print(f"WARN: ES rejected {len(retry)} document(s) in {index} "
+                  f"(attempt {attempt}/{BULK_ATTEMPTS}); retrying those only", file=sys.stderr)
+            pending = [(doc_id, doc) for doc_id, doc, _ in retry]
+            _sleep(attempt)
+        return acked
+
+
+    def _checkpoint_id(source):
+        return f"{DEPLOYMENT}:{source}"
+
+
+    def read_checkpoint(source):
+        """Last cursor confirmed for `source`; "" means 'start from the newest page'."""
+        path = f"/{CHECKPOINT_INDEX}/_doc/{urllib.parse.quote(_checkpoint_id(source), safe='')}"
+        document = _es("GET", path, missing_ok=True)
+        if not isinstance(document, dict) or document.get("found") is False:
+            return ""
+        body = document.get("_source")
+        if not isinstance(body, dict):
+            return ""
+        cursor = body.get("cursor")
+        return cursor if isinstance(cursor, str) else ""
+
+
+    def write_checkpoint(source, cursor, run_at):
+        """Persist progress; only ever called after the page's documents were acknowledged."""
+        es_bulk(CHECKPOINT_INDEX, [(_checkpoint_id(source), {
+            "source": source, "deployment": DEPLOYMENT, "cursor": cursor, "updated_at": run_at})])
+
+
+    class Source:
+        """One audited data source: where it is read from and how its items map."""
+
+        def __init__(self, name, base, path, list_key, mapper, paginated=True, extra_query=""):
+            self.name = name
+            self.base = base
+            self.path = path
+            self.list_key = list_key
+            self.mapper = mapper
+            self.paginated = paginated
+            self.extra_query = extra_query
+
+        def page_path(self, cursor):
+            separator = "&" if "?" in self.path else "?"
+            query = f"limit={PAGE_LIMIT}"
+            if self.extra_query:
+                query += "&" + self.extra_query
+            if cursor:
+                query += "&cursor=" + urllib.parse.quote(cursor, safe="")
+            return f"{self.path}{separator}{query}"
+
+
+    def ship(source, token, index, run_at, stats):
+        """Read one source to the end, shipping and checkpointing page by page."""
+        source_stats = stats.setdefault(source.name, {"acked": 0, "attempted": 0})
+        cursor = read_checkpoint(source.name) if source.paginated else ""
+        stored = cursor
+        for _ in range(MAX_PAGES):
+            page = api(source.base, "GET", source.page_path(cursor), token)
+            if source.list_key not in page:
+                raise ShipError(f"{source.name}: {source.base}{source.path} answered without a "
+                                f"{source.list_key!r} field; the source was not read")
+            items = page.get(source.list_key) or []
+            if not isinstance(items, list):
+                raise ShipError(f"{source.name}: {source.list_key} is not a list in "
+                                f"{source.base}{source.path}")
+            entries = [source.mapper(item) for item in items]
+            source_stats["attempted"] += len(entries)
+            source_stats["acked"] += es_bulk(index, entries)
+            if not source.paginated:
+                return
+            next_cursor = page.get("nextCursor") or ""
+            if not next_cursor:
+                # Drained: the next run starts from the newest page again. Re-reads
+                # are upserts thanks to the stable document ids, and clearing the
+                # checkpoint must never be read as "skip everything newer".
+                if stored:
+                    write_checkpoint(source.name, "", run_at)
+                    stored = ""
+                return
+            if not isinstance(next_cursor, str):
+                raise ShipError(f"{source.name}: the API returned a non-string nextCursor "
+                                f"({next_cursor!r})")
+            if cursor and next_cursor == cursor:
+                # A cursor that does not move would re-read the same page forever and
+                # silently hide every older one: fail instead of looping.
+                raise ShipError(f"{source.name}: the API answered with the same nextCursor "
+                                f"({cursor!r}) it was given; refusing to re-read the same page")
+            if next_cursor != stored:
+                write_checkpoint(source.name, next_cursor, run_at)
+                stored = next_cursor
+            cursor = next_cursor
+        print(f"WARN: {source.name}: stopped after {MAX_PAGES} pages; the ES checkpoint resumes the rest",
+              file=sys.stderr)
+
+
+    def source_plan(now, run_id):
+        """Sources in collection order, each with its interface-specific field mapping."""
+        def admin_audit(item):
+            doc = {
+                "@timestamp": item.get("createdAt") or now,
+                "audit_type": "admin_audit",
+                "audit_source": "/aep/v1/admin/audit/operations",
+                "event_id": item.get("cursor"),
+                "actor_user_id": item.get("actorUserId"),
+                "action": item.get("action"),
+                "resource_type": item.get("resourceType"),
+                "resource_id": item.get("resourceId"),
+                "result": item.get("result"),
+                "reason": item.get("reason"),
+                "changes": item.get("changes"),
                 "shipped_at": now,
-            })
-    except Exception as e:
-        print(f"WARN: events: {e}", file=sys.stderr)
+            }
+            return _dedup_id("admin_audit", item.get("cursor")) or _content_id("admin_audit", doc), doc
 
-    # 2. AEP users snapshot
-    try:
-        users = api(AEP, "GET", "/aep/v1/admin/users?limit=100", token)
-        for u in (users.get("users") or users.get("items") or []):
-            docs.append({
+        def authentication_audit(item):
+            doc = {
+                "@timestamp": item.get("createdAt") or now,
+                "audit_type": "authentication_audit",
+                "audit_source": "/aep/v1/admin/audit/authentication",
+                "event_id": item.get("cursor"),
+                "actor_user_id": item.get("userId"),
+                "event_type": item.get("eventType"),
+                "outcome": item.get("outcome"),
+                "reason": item.get("reason"),
+                "source_hash": item.get("sourceHash"),
+                "shipped_at": now,
+            }
+            return (_dedup_id("authentication_audit", item.get("cursor"))
+                    or _content_id("authentication_audit", doc)), doc
+
+        def control_event(item):
+            doc = {
+                "@timestamp": item.get("createdAt") or now,
+                "audit_type": "control_event",
+                "audit_source": "/aep/v1/admin/control-events",
+                "event_id": item.get("eventId"),
+                "event_type": item.get("type"),
+                "state": item.get("state"),
+                "created_by": item.get("createdBy"),
+                "scope": item.get("scope"),
+                "resource": item.get("resource"),
+                "task": item.get("task"),
+                "expires_at": item.get("expiresAt"),
+                "delivery_summary": item.get("deliverySummary"),
+                "shipped_at": now,
+            }
+            return _dedup_id("control_event", item.get("eventId")) or _content_id("control_event", doc), doc
+
+        def telemetry_event(item):
+            doc = {
+                "@timestamp": item.get("occurredAt") or now,
+                "audit_type": "telemetry_event",
+                "audit_source": "/aep/v1/admin/events",
+                "event_id": item.get("eventId"),
+                "actor_user_id": item.get("userId"),
+                "session_id": item.get("sessionId"),
+                "event_type": item.get("type"),
+                "resource_type": item.get("resourceType"),
+                "resource_id": item.get("resourceId"),
+                "result": item.get("result"),
+                "data": item.get("data"),
+                "received_at": item.get("receivedAt"),
+                "shipped_at": now,
+            }
+            return _dedup_id("telemetry_event", item.get("eventId")) or _content_id("telemetry_event", doc), doc
+
+        def user_snapshot(item):
+            doc = {
                 "@timestamp": now,
                 "audit_type": "user_snapshot",
-                "user_id": u.get("id"),
-                "username": u.get("username"),
-                "display_name": u.get("displayName"),
+                "snapshot_run": run_id,
+                "user_id": item.get("id"),
+                "username": item.get("username"),
+                "display_name": item.get("displayName"),
                 "shipped_at": now,
-            })
-    except Exception as e:
-        print(f"WARN: users: {e}", file=sys.stderr)
+            }
+            return _dedup_id(f"user_snapshot:{run_id}", item.get("id")) or _content_id("user_snapshot", doc), doc
 
-    # 3. Portal digital-employee snapshots (the real workload state)
-    try:
-        emps = api(PORTAL, "GET", "/api/v1/employees", token)
-        for e in (emps.get("employees") or []):
-            docs.append({
+        def employee_snapshot(item):
+            doc = {
                 "@timestamp": now,
                 "audit_type": "employee_snapshot",
-                "name": e.get("name"),
-                "display_name": e.get("displayName"),
-                "phase": e.get("phase"),
-                "model": e.get("model"),
-                "model_failover": e.get("modelFailover"),
-                "runtime_account": e.get("runtimeAccount"),
-                "wecom": (e.get("channels") or {}).get("wecom", False),
+                "snapshot_run": run_id,
+                "name": item.get("name"),
+                "display_name": item.get("displayName"),
+                "phase": item.get("phase"),
+                "model": item.get("model"),
+                "model_failover": item.get("modelFailover"),
+                "runtime_account": item.get("runtimeAccount"),
+                "wecom": (item.get("channels") or {}).get("wecom", False),
                 "shipped_at": now,
-            })
-    except Exception as e:
-        print(f"WARN: portal employees: {e}", file=sys.stderr)
+            }
+            return _dedup_id(f"employee_snapshot:{run_id}", item.get("name")) or _content_id("employee_snapshot", doc), doc
 
-    # 4. Portal requests (approval workflow audit trail)
-    try:
-        reqs = api(PORTAL, "GET", "/api/v1/requests?limit=100", token)
-        for r in (reqs.get("requests") or []):
-            docs.append({
-                "@timestamp": r.get("createdAt", now),
+        def employee_request(item):
+            doc = {
+                "@timestamp": item.get("createdAt") or now,
                 "audit_type": "employee_request",
-                "request_id": r.get("id"),
-                "employee_name": r.get("employeeName"),
-                "state": r.get("state"),
-                "decided_by": r.get("decidedBy"),
-                "decision_reason": r.get("decisionReason"),
+                "snapshot_run": run_id,
+                "request_id": item.get("id"),
+                "employee_name": item.get("employeeName"),
+                "display_name": item.get("displayName"),
+                "owner": item.get("owner"),
+                "state": item.get("state"),
+                "reason": item.get("reason"),
                 "shipped_at": now,
+            }
+            return _dedup_id(f"employee_request:{run_id}", item.get("id")) or _content_id("employee_request", doc), doc
+
+        def model_health(item):
+            doc = {
+                "@timestamp": now,
+                "audit_type": "model_health_snapshot",
+                "snapshot_run": run_id,
+                "model_id": item.get("id"),
+                "display_name": item.get("displayName"),
+                "source_type": item.get("sourceType"),
+                "protocol": item.get("protocol"),
+                "enabled": item.get("enabled"),
+                "health_status": item.get("healthStatus"),
+                "health_checked_at": item.get("healthCheckedAt"),
+                "health_since": item.get("healthSince"),
+                "health_detail": item.get("healthDetail"),
+                "shipped_at": now,
+            }
+            return _dedup_id(f"model_health_snapshot:{run_id}", item.get("id")) or _content_id("model_health_snapshot", doc), doc
+
+        sources = [
+            Source("admin_audit", AEP, "/aep/v1/admin/audit/operations", "items", admin_audit),
+            Source("authentication_audit", AEP, "/aep/v1/admin/audit/authentication", "items", authentication_audit),
+            Source("control_events", AEP, "/aep/v1/admin/control-events", "items", control_event),
+            Source("telemetry_events", AEP, "/aep/v1/admin/events", "items", telemetry_event),
+            Source("user_snapshots", AEP, "/aep/v1/admin/users", "items", user_snapshot),
+            Source("employee_snapshots", PORTAL, "/api/v1/employees", "employees", employee_snapshot, paginated=False),
+            Source("model_health_snapshots", AEP, "/aep/v1/admin/models", "models", model_health),
+        ]
+        for state in REQUEST_STATES:
+            sources.append(Source(f"employee_requests[{state}]", PORTAL, "/api/v1/requests", "requests",
+                                  employee_request, paginated=False, extra_query=f"state={state}"))
+        return sources
+
+
+    def main():
+        run_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        run_id = os.environ.get("AUDIT_SHIPPER_RUN_ID") or time.strftime("%Y%m%dT%H%MZ", time.gmtime())
+        index = f"zhiyuan-audit-{time.strftime('%Y.%m.%d')}"
+
+        try:
+            login = api(AEP, "POST", "/aep/v1/auth/password/login", body={
+                "deploymentId": DEPLOYMENT, "sessionId": f"audit-{int(time.time())}",
+                "username": USER, "password": PASS,
             })
-    except Exception as e:
-        print(f"WARN: portal requests: {e}", file=sys.stderr)
+        except ShipError as error:
+            print(f"ERROR: AEP login failed: {error}. Check AEP_BASE_URL and the audit-shipper secret",
+                  file=sys.stderr)
+            return 1
+        token = login.get("accessToken", "") if isinstance(login, dict) else ""
+        if not token:
+            print("ERROR: AEP login returned no accessToken; check AEP_ADMIN_USER / AEP_ADMIN_PASSWORD",
+                  file=sys.stderr)
+            return 1
 
-    # 5. Model health snapshot (probe verdicts). A model going unhealthy is the
-    # failure the failover chain reacts to — keep the evidence in the audit
-    # trail, not only in probe logs.
-    try:
-        cursor = ""
-        pages = 0
-        while True:
-            path = "/aep/v1/admin/models?limit=100" + (f"&cursor={cursor}" if cursor else "")
-            catalog = api(AEP, "GET", path, token)
-            for m in (catalog.get("models") or []):
-                docs.append({
-                    "@timestamp": now,
-                    "audit_type": "model_health_snapshot",
-                    "model_id": m.get("id"),
-                    "display_name": m.get("displayName"),
-                    "source_type": m.get("sourceType"),
-                    "protocol": m.get("protocol"),
-                    "enabled": m.get("enabled"),
-                    "health_status": m.get("healthStatus"),
-                    "health_checked_at": m.get("healthCheckedAt"),
-                    "health_since": m.get("healthSince"),
-                    "health_detail": m.get("healthDetail"),
-                    "shipped_at": now,
-                })
-            cursor = catalog.get("nextCursor") or ""
-            pages += 1
-            if not cursor or pages >= 50:
-                break
-    except Exception as e:
-        print(f"WARN: model health: {e}", file=sys.stderr)
+        stats = {}
+        failures = []
+        for source in source_plan(run_at, run_id):
+            try:
+                ship(source, token, index, run_at, stats)
+            except ShipError as error:
+                failures.append(f"{source.name}: {error}")
+                print(f"ERROR: {source.name}: {error}", file=sys.stderr)
 
-    indexed = es_bulk(docs)
-    print(f"OK: {indexed}/{len(docs)} audit docs indexed")
+        acked = sum(entry["acked"] for entry in stats.values())
+        attempted = sum(entry["attempted"] for entry in stats.values())
+        for name, entry in stats.items():
+            print(f"shipped {name}: {entry['acked']}/{entry['attempted']} docs")
+        if failures:
+            print(f"FAILED: {acked}/{attempted} audit docs indexed; {len(failures)} source failure(s)")
+            return 1
+        print(f"OK: {acked}/{attempted} audit docs indexed")
+        return 0
 
+
+    if __name__ == "__main__":
+        sys.exit(main())
 ---
 apiVersion: v1
 kind: Secret
