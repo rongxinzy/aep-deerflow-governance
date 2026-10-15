@@ -113,6 +113,14 @@ func (m *Manager) Resync(ctx context.Context) error {
 		assigned[ws.Name] = true
 		if err := m.reconcile(ctx, ws); err != nil {
 			firstErr = fmt.Errorf("%s: %w", ws.Name, err)
+			// Startup failures before VM supervision must be visible to the
+			// owner too. Keep detailed host errors in logs, not the user UI.
+			if ws.DeletionTimestamp.IsZero() && ws.Status.Phase != v1alpha1.WorkspacePhaseRunning && ws.Status.Phase != v1alpha1.WorkspacePhaseFailed {
+				_ = m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
+					s.Phase = v1alpha1.WorkspacePhaseFailed
+					s.Message = "云电脑准备失败，系统将自动重试。请稍后重新检查，或联系管理员。"
+				})
+			}
 		}
 	}
 	// Orphan teardown: supervisor exists but CR no longer ours.

@@ -5,6 +5,7 @@ package tap
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,17 @@ type Device struct {
 	Subnet string
 }
 
+// InterfaceName preserves short names and hashes long workspace names.
+// Linux interfaces allow only 15 visible bytes. Truncation would collide
+// for generated names sharing the same username prefix.
+func InterfaceName(workspace string) string {
+	if len("tap-"+workspace) <= 15 {
+		return "tap-" + workspace
+	}
+	sum := sha256.Sum256([]byte(workspace))
+	return fmt.Sprintf("tap%x", sum[:6])
+}
+
 // New derives the device from workspace name and assigned subnet.
 func New(workspace, vmSubnet string) (*Device, error) {
 	hostIP, err := hostOfSubnet(vmSubnet)
@@ -28,7 +40,7 @@ func New(workspace, vmSubnet string) (*Device, error) {
 		return nil, err
 	}
 	return &Device{
-		Name:     "tap-" + workspace,
+		Name:     InterfaceName(workspace),
 		HostCIDR: hostIP + "/30",
 		Subnet:   vmSubnet,
 	}, nil
@@ -98,6 +110,6 @@ func (d *Device) Teardown(ctx context.Context, run hostcmd.Runner) error {
 // subnet; stale MASQUERADE rules are cleared by node reboot or a later
 // full teardown).
 func TeardownByName(ctx context.Context, run hostcmd.Runner, name string) error {
-	_, _ = run.Run(ctx, "ip", "link", "del", "tap-"+name)
+	_, _ = run.Run(ctx, "ip", "link", "del", InterfaceName(name))
 	return nil
 }

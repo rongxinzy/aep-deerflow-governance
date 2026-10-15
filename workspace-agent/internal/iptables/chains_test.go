@@ -2,6 +2,7 @@ package iptables
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/rongxinzy/aep-deerflow-governance/workspace-agent/internal/hostcmd"
+	"github.com/rongxinzy/aep-deerflow-governance/workspace-agent/internal/tap"
 )
 
 func TestRulesGoldenOrder(t *testing.T) {
@@ -88,4 +90,19 @@ func TestTeardownEgressIdempotent(t *testing.T) {
 	first := append([]string(nil), run.Calls...)
 	require.NoError(t, TeardownEgress(context.Background(), run, "ws1"))
 	assert.Equal(t, first, run.Calls[:len(first)], "second teardown replays the same absent-tolerant sequence, error-free")
+}
+
+func TestGeneratedWorkspaceUsesSameTapForForwardAndCleanup(t *testing.T) {
+	run := &hostcmd.FakeRunner{Response: func(name string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "-C" {
+			return "", fmt.Errorf("missing")
+		}
+		return "", nil
+	}}
+	workspace := "ws-longusername-1234"
+	require.NoError(t, EnsureEgress(context.Background(), run, workspace, nil))
+	require.NoError(t, TeardownEgress(context.Background(), run, workspace))
+	calls := strings.Join(run.Calls, "\n")
+	assert.Contains(t, calls, "-i "+tap.InterfaceName(workspace))
+	assert.NotContains(t, calls, "tap-"+workspace)
 }
