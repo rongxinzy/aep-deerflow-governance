@@ -178,7 +178,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           portal.routes(),
+		Handler:           traceMiddleware(logger, portal.routes()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go portal.runModelFailover(context.Background())

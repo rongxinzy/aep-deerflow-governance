@@ -112,6 +112,9 @@ func (p *portal) handleWorkspaceChat(w http.ResponseWriter, r *http.Request, ide
 			stripped := strings.TrimPrefix(rest, "api/")
 			pr.Out.URL.Path = "/" + companion + "/api/" + stripped
 			pr.Out.Header.Set(workspaceTokenHeader, token)
+			if tp := currentTraceParent(pr.In.Context()); tp != "" {
+				pr.Out.Header.Set("traceparent", tp)
+			}
 			pr.Out.Header.Set(workspaceOwnerHeaderName, ident.UserID)
 			pr.Out.Header.Del("Authorization")
 			pr.Out.Header.Del("Cookie")
