@@ -109,24 +109,50 @@ class _IdentityResolver:
         self._lock = threading.Lock()
 
     def _load(self) -> dict[str, str]:
-        path = f"/aep/v1/admin/identity-sources/{self.source_id}/mappings?subjectType=user&limit=200"
-        req = urllib.request.Request(
-            self.client.base_url + path,
-            headers={"Authorization": f"Bearer {self.client.token()}",
-                     "X-AEP-Protocol-Version": "1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            body = json.load(resp)
         out: dict[str, str] = {}
-        for item in body.get("items") or body.get("mappings") or []:
-            if item.get("status") != "active":
-                continue
-            out[str(item.get("externalId"))] = str(item.get("localSubjectId"))
-        return out
+        source = urllib.parse.quote(self.source_id, safe="")
+        cursor = None
+        seen: set[str] = set()
+        deadline = time.monotonic() + 8
+        # Build a complete snapshot before publishing it to the cache. A
+        # failing/looping page must not leave a partial authorization map.
+        for _ in range(100):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Identity mapping pagination timed out")
+            params = {"subjectType": "user", "limit": "200"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            path = f"/aep/v1/admin/identity-sources/{source}/mappings?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(
+                self.client.base_url + path,
+                headers={"Authorization": f"Bearer {self.client.token()}",
+                         "X-AEP-Protocol-Version": "1.0"})
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
+                body = json.load(resp)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Identity mapping pagination timed out")
+            items = body.get("items", body.get("mappings", []))
+            if not isinstance(items, list):
+                raise ValueError("Invalid identity mapping page")
+            for item in items:
+                if not isinstance(item, dict) or item.get("status") != "active":
+                    continue
+                external, local = item.get("externalId"), item.get("localSubjectId")
+                if isinstance(external, str) and external and isinstance(local, str) and local:
+                    out[external] = local
+            cursor = body.get("nextCursor")
+            if cursor is None or cursor == "":
+                return out
+            if not isinstance(cursor, str) or cursor in seen:
+                raise ValueError("Invalid or repeated identity mapping cursor")
+            seen.add(cursor)
+        raise ValueError("Identity mapping pagination exceeded 100 pages")
 
     def resolve(self, external_id: str) -> str | None:
         now = time.time()
         with self._lock:
-            if not self._by_external or now - self._loaded_at > self.cache_seconds:
+            if self._loaded_at == 0.0 or now - self._loaded_at > self.cache_seconds:
                 try:
                     self._by_external = self._load()
                     self._loaded_at = now
@@ -597,6 +623,15 @@ class AepGovernanceMiddleware(AgentMiddleware):
         if denial is not None:
             return denial
         name = str(_tool_field(call, "name", "") or "")
+        # Mailbox credentials belong to the employee, not to every sender who
+        # can reach its bot. Identity is the minimum gate for all three tools;
+        # per-user mailbox grants and send approval remain separate policy.
+        if name in {"email_list", "email_read", "email_send"}:
+            if self.resolve_aep_user(getattr(request, "runtime", None)) is None:
+                return ToolMessage(
+                    content="DENIED: 当前为访客身份（未绑定企业账号），无法使用员工邮箱。请联系管理员绑定企业账号。",
+                    tool_call_id=str(_tool_field(call, "id", "") or ""),
+                )
         if name not in self.governed:
             return None
         args = dict(_tool_field(call, "args", None) or {})
