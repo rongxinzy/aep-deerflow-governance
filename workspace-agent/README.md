@@ -26,7 +26,7 @@ microVM。架构与 runbook 见 zhiyuan-docs `guides/microvm-runtime.md`（随 E
 | `internal/template` | 模板 SHA256SUMS 校验 + keep-2 GC |
 | `internal/vm` | Firecracker v1.17 UDS 驱动（golden PUT 序列、CtrlAltDel→SIGKILL 停机、serial rotate） |
 | `internal/proxy` | userspace TCP proxy（host port → guest:8080；SSE 透明；零 iptables 入站态） |
-| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 give-up）；give-up 后每小时自愈重试 1 次、Running 稳定 1 小时清零 bootFails；每轮 Resync（无论成败）刷新 `<workdir>/run/agent.heartbeat` 供 liveness 探针；私有 registry 的 /metrics（phase/bootFails/resync 错误/VM 数） |
+| `internal/manager` | per-workspace 状态机 + Resync（含孤儿拆除、backoff 5/10/20/40/60、连续 5 败 give-up）；give-up 后每小时自愈重试 1 次、Running 稳定 1 小时清零 bootFails；心跳 `<workdir>/run/agent.heartbeat` 在每个 workspace 处理完后刷新（每轮结束兜底，与成败无关）供 liveness 探针（最迟发现时延 ≈ 3min 陈旧窗 + 2.5min 失败累计 ≈ 5.5 分钟）；私有 registry 的 /metrics（phase 以 CR List 为准——sup 创建前的失败也有序列；bootFails/VM 数取 supervisor 快照；另有 resync 错误计数）；metrics 端口 bind 失败即退出（fail-fast，不让告警静默失明） |
 
 ## 测试纪律
 

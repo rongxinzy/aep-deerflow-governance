@@ -11,12 +11,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 // Firecracker drives one firecracker process over its UDS API (v1.17).
+// All methods take the instance mutex: the /metrics scrape (Alive) runs
+// concurrently with reconcile's Start/Stop, and concurrent process-state
+// operations on the same firecracker must not interleave. The mutex is held
+// for the full operation, so a scrape can block behind a Stop grace window —
+// that is deliberate: it serializes without risking a torn kill/spawn, and
+// the manager never holds its own lock across these calls.
 type Firecracker struct {
+	mu      sync.Mutex
 	apiSock string
 	pidFile string
 	serial  string
@@ -46,6 +54,8 @@ func bootArgs() string {
 
 // Start boots the VM: spawn process, PUT the device model, InstanceStart.
 func (f *Firecracker) Start(cfg Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	_ = os.Remove(f.apiSock)
 	if err := os.MkdirAll(filepath.Dir(f.apiSock), 0o755); err != nil {
 		return err
@@ -76,7 +86,7 @@ func (f *Firecracker) Start(cfg Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.BootTimeout)
 	defer cancel()
 	if err := waitForSock(ctx, f.apiSock); err != nil {
-		_ = f.Stop(2 * time.Second)
+		_ = f.stop(2 * time.Second)
 		return fmt.Errorf("api sock: %w", err)
 	}
 
@@ -95,9 +105,9 @@ func (f *Firecracker) Start(cfg Config) error {
 			"boot_args":         bootArgs(),
 		}},
 		{"machine-config", map[string]any{
-			"vcpu_count": cfg.VCPUs,
+			"vcpu_count":   cfg.VCPUs,
 			"mem_size_mib": cfg.MemMib,
-			"smt": false,
+			"smt":          false,
 		}},
 		{"drives/rootfs", drive{DriveID: "rootfs", PathOnHost: cfg.Rootfs, IsRootDevice: true, IsReadOnly: true}},
 		{"drives/config", drive{DriveID: "config", PathOnHost: cfg.ConfigDisk, IsReadOnly: true}},
@@ -116,12 +126,12 @@ func (f *Firecracker) Start(cfg Config) error {
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
-			_ = f.Stop(2 * time.Second)
+			_ = f.stop(2 * time.Second)
 			return fmt.Errorf("PUT /%s: %w", p.path, err)
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			_ = f.Stop(2 * time.Second)
+			_ = f.stop(2 * time.Second)
 			return fmt.Errorf("PUT /%s: status %d", p.path, resp.StatusCode)
 		}
 	}
@@ -129,12 +139,12 @@ func (f *Firecracker) Start(cfg Config) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		_ = f.Stop(2 * time.Second)
+		_ = f.stop(2 * time.Second)
 		return fmt.Errorf("InstanceStart: %w", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		_ = f.Stop(2 * time.Second)
+		_ = f.stop(2 * time.Second)
 		return fmt.Errorf("InstanceStart: status %d", resp.StatusCode)
 	}
 	return nil
@@ -142,7 +152,15 @@ func (f *Firecracker) Start(cfg Config) error {
 
 // Stop: CtrlAltDel (clean shutdown lets the guest init sync), then SIGKILL.
 func (f *Firecracker) Stop(grace time.Duration) error {
-	pid := f.PID()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stop(grace)
+}
+
+// stop is the unlocked body of Stop; callers must hold f.mu (Start's error
+// paths use it directly).
+func (f *Firecracker) stop(grace time.Duration) error {
+	pid := f.pid()
 	if pid == 0 {
 		return nil
 	}
@@ -174,12 +192,21 @@ func (f *Firecracker) Stop(grace time.Duration) error {
 // succeeds unconditionally — the classic footgun that made the agent treat
 // every stopped VM as alive and skip booting forever.
 func (f *Firecracker) Alive() bool {
-	pid := f.PID()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pid := f.pid()
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
 // PID reads the recorded pid (0 when absent or dead-unknown).
 func (f *Firecracker) PID() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pid()
+}
+
+// pid is the unlocked body of PID; callers must hold f.mu.
+func (f *Firecracker) pid() int {
 	if f.cmd != nil && f.cmd.Process != nil {
 		return f.cmd.Process.Pid
 	}

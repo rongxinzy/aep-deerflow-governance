@@ -12,6 +12,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -106,8 +107,16 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", m.MetricsHandler())
 	metricsSrv := &http.Server{Addr: *metricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// Fail fast on an unbindable metrics port: logging and continuing would
+	// silently blind every alert built on pw_node_agent_* (port conflicts are
+	// plausible — the DaemonSet is hostNetwork and hostPort-publishes 9091).
+	metricsLn, err := net.Listen("tcp", *metricsAddr)
+	if err != nil {
+		logger.Error(err, "metrics listen failed", "addr", *metricsAddr)
+		os.Exit(1)
+	}
 	go func() {
-		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := metricsSrv.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
 			logger.Error(err, "metrics server", "addr", *metricsAddr)
 		}
 	}()

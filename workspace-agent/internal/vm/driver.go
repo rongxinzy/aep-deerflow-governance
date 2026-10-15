@@ -25,7 +25,7 @@ type Config struct {
 	// GuestMAC is the eth0 MAC (derived from the /30, stable per subnet).
 	GuestMAC string
 	// VCPUs / MemMib shape machine-config.
-	VCPUs int32
+	VCPUs  int32
 	MemMib int32
 	// RunDir holds the API socket, serial log, pid file.
 	RunDir string
@@ -35,7 +35,8 @@ type Config struct {
 	BootTimeout time.Duration
 }
 
-// Driver starts/stops one VM.
+// Driver starts/stops one VM. Implementations must be safe for concurrent
+// use: the /metrics scrape (Alive) races the reconcile loop's Start/Stop.
 type Driver interface {
 	// Start boots the VM (blocking through InstanceStart; the process runs on).
 	Start(cfg Config) error

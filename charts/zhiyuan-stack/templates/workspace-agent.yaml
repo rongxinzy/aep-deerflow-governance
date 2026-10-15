@@ -80,9 +80,10 @@ spec:
             - name: metrics
               containerPort: {{ .Values.workspaceAgent.metricsPort }}
               hostPort: {{ .Values.workspaceAgent.metricsPort }}
-          # 存活性 = resync 循环仍在跳动（心跳文件每轮 Resync 结束刷新，与单轮
-          # 成败无关）。误判的代价是全节点 VM 随容器断电，因此参数刻意保守：
-          # 60s 起等 + 连续 5 次（约 2.5 分钟心跳停滞）才重启。
+          # 存活性 = resync 循环仍在跳动（心跳文件在每个 workspace 处理完后刷新，
+          # 另有每轮 Resync 结束的兜底；均与单轮成败无关）。误判的代价是全节点 VM
+          # 随容器断电，因此参数刻意保守：60s 起等 + 连续 5 次（30s 间隔）才重启，
+          # 最迟发现时延 ≈ 3 分钟陈旧窗（-mmin -3）+ 2.5 分钟失败累计 ≈ 5.5 分钟。
           livenessProbe:
             exec:
               command:
