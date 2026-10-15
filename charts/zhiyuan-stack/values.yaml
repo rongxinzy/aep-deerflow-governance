@@ -82,10 +82,9 @@ aepStack:
   # 这是**文件路径**（挂载的 aep-license Secret 内文件），不是密钥内容
   licenseTrustedKeysFile: /var/run/aep-license/license-trusted-keys.json
   licenseCustomerId: customer-internal-test
-  # rustfs 凭据：dev 默认值（= cicd 活体现值，集群内网信任域）；生产环境
-  # 在 local values 覆盖。此处如实记录而非占位，避免引入新的回填断点。
-  minioAccessKey: minioadmin
-  minioSecretKey: minioadmin
+  # RustFS 与两个 AEP 服务共用；只在 gitignored local values 中配置真实凭据。
+  minioAccessKey: "<set-in-local-values>"
+  minioSecretKey: "<set-in-local-values>"
   minioBucket: aep-skills
   minioEndpoint: rustfs:9000
   postgres: {database: aep, user: aep, password: "<db-password>", storage: 5Gi, storageClass: longhorn}
@@ -322,6 +321,9 @@ conversationStore:
 # 特权+root 为 PoC 级隔离决策（无 jailer，2026-10-14）；加固轮再收敛。
 workspaceAgent:
   enabled: false
+  # Namespace-local registry credentials, shared by agent and template init containers.
+  imagePullSecrets: []
+  imagePullPolicy: IfNotPresent
   # microvm 分配池（operator 的 WORKSPACE_MICROVM_NODES）——顺序=分配偏好：
   # cicd 把 rtl-l20 排前（burst6 根盘 92% 红线，首个工作区避开）。
   microvmNodes: []
@@ -333,6 +335,9 @@ workspaceAgent:
   templateImage:
     repository: rongxinzy/pw-rootfs
     tag: 0.5.0
+  # Additional immutable versions available for per-workspace templateTag.
+  # Keep pinned versions here during upgrades; never replace content under a tag.
+  additionalTemplates: []
   nodeSelector:
     zhiyuan.io/kvm: "true"
   tolerations:
@@ -342,9 +347,10 @@ workspaceAgent:
   workdirRoot: /var/lib/zhiyuan/workspace-agent
   portRange: 8800-8899
   modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local/v1
+  # Firecracker children share this container cgroup. Any limits must budget
+  # for all guests on the node plus agent overhead, not just the Go process.
   resources:
     requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: "1", memory: 512Mi }
 
 employees: []
 #  - name: sales-helper

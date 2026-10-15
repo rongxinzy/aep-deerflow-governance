@@ -89,7 +89,8 @@ func newEnv(t *testing.T, objects ...client.Object) *env {
 	// healthz probes are patched (network to a fake guest IP)
 	un1 := mockey.Mock(probeHealthz).To(func(string, time.Duration) bool { return e.healthy }).Build()
 	un2 := mockey.Mock(waitForHealthz).To(func(string, time.Duration) bool { return e.healthy }).Build()
-	t.Cleanup(func() { un1.UnPatch(); un2.UnPatch() })
+	un3 := mockey.Mock(prepareGuestStop).To(func(string, string) {}).Build()
+	t.Cleanup(func() { un1.UnPatch(); un2.UnPatch(); un3.UnPatch() })
 	return e
 }
 

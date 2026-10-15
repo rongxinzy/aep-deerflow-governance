@@ -493,6 +493,12 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 	if spec.Memory != nil {
 		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: memkeySecretName(employee)})
 	}
+	// Employee mailbox(es): the secret carries EMAIL_MAILBOXES (JSON with
+	// credentials); envFrom makes it runtime env, where the governance
+	// middleware registers the email tools iff it is present.
+	if spec.Email != nil && spec.Email.SecretName != "" {
+		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: spec.Email.SecretName})
+	}
 	// Per-employee conversation DSN rides in its own child Secret (a key
 	// distinct from any platform-wide DSN, so envFrom order is irrelevant).
 	convDatabase, err := conversationDatabaseName(employee)

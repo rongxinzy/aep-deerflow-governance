@@ -53,9 +53,13 @@ func (p *portal) authorizeWorkspaceChat(ctx context.Context, name, companion str
 		return "", http.StatusConflict, "workspace is not Running (phase " + string(item.Status.Phase) + ")"
 	}
 	found := false
+	secretName := workspaceMemkeySecretName(name, companion)
 	for i := range item.Spec.Companions {
 		if item.Spec.Companions[i].Name == companion {
 			found = true
+			if memory := item.Spec.Companions[i].Memory; memory != nil && memory.UserKeySecret != "" {
+				secretName = memory.UserKeySecret
+			}
 			break
 		}
 	}
@@ -63,7 +67,7 @@ func (p *portal) authorizeWorkspaceChat(ctx context.Context, name, companion str
 		return "", http.StatusNotFound, "unknown companion " + companion
 	}
 	var secret corev1.Secret
-	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: workspaceMemkeySecretName(name, companion)}, &secret); err != nil {
+	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: secretName}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", http.StatusServiceUnavailable, "companion credentials not provisioned yet"
 		}

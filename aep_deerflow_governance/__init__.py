@@ -196,6 +196,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         self._scope_cache: dict[str, tuple[float, frozenset[str]]] = {}
         self._aep_user_cache: dict[str, tuple[float, bool]] = {}
         self._cache_lock = threading.Lock()
+        # Employee mailbox tools: registered iff EMAIL_MAILBOXES env is
+        # present (operator envFrom-injects the employee's email Secret).
+        # Absent/malformed env = no tools; the misconfiguration is logged,
+        # never a crash loop. See email_tools for the security notes.
+        from .email_tools import build_email_tools
+        self.tools = build_email_tools()
+        if self.tools:
+            print(f"[aep-governance] email tools registered: {sorted(t.name for t in self.tools)}", flush=True)
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:

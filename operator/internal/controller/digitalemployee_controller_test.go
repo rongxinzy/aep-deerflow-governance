@@ -94,6 +94,24 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(a2aEnv["DEERFLOW_URL"]).To(Equal("http://de-alice-helper:8001"))
 		})
 
+		It("renders the email secret envFrom into the runtime when spec.email is set", func(ctx context.Context) {
+			updated := &v1alpha1.DigitalEmployee{}
+			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(employee), updated)).To(Succeed())
+			updated.Spec.Email = &v1alpha1.EmailSpec{SecretName: "de-alice-helper-email"}
+			Expect(fx.client.Update(ctx, updated)).To(Succeed())
+			reconcile(ctx)
+
+			runtimeDeployment := &appsv1.Deployment{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(employee)}, runtimeDeployment)).To(Succeed())
+			names := []string{}
+			for _, source := range runtimeDeployment.Spec.Template.Spec.Containers[0].EnvFrom {
+				if source.SecretRef != nil {
+					names = append(names, source.SecretRef.Name)
+				}
+			}
+			Expect(names).To(ContainElement("de-alice-helper-email"), "mailbox credentials must ride envFrom into the runtime")
+		})
+
 		It("renders a durable home PVC and Recreate strategy when persistence is enabled", func(ctx context.Context) {
 			updated := &v1alpha1.DigitalEmployee{}
 			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(employee), updated)).To(Succeed())
