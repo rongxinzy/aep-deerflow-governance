@@ -43,7 +43,8 @@ type ConfigPayload struct {
 
 // Inputs are everything BuildPayload needs from the API server.
 type Inputs struct {
-	Workspace *v1alpha1.PersonalWorkspace
+	Workspace      *v1alpha1.PersonalWorkspace
+	LifecycleToken string
 	// Manifest is the companions.json ConfigMap data.
 	Manifest string
 	// Memkeys maps companion name -> memkey Secret.
@@ -110,6 +111,9 @@ func BuildPayload(in Inputs) (*ConfigPayload, error) {
 		"PW_GUEST_IP=" + guestIP,
 		"PW_GUEST_GW=" + hostIP,
 		"PW_GUEST_PREFIX=30",
+	}
+	if in.LifecycleToken != "" {
+		lines = append(lines, "WORKSPACE_LIFECYCLE_TOKEN="+in.LifecycleToken)
 	}
 	if in.Credentials != nil {
 		if key := in.Credentials.Data[apiKeyDataKey]; len(key) > 0 {

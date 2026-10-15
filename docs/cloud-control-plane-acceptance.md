@@ -70,5 +70,7 @@ Helm 渲染/校验与镜像内执行分别验证，不把它们表述为生产�
 不要使用全局 prune、清空 FORWARD 或按模糊名字终止进程。
 
 本轮不验证模型回答质量、Windows 原生显示、生产升级、跨节点迁移或数据盘扩容。
-模板切换通过现有 stop/rebuild 路径完成；内核不响应 CtrlAltDel 时仍使用现有
-超时强制停止，因此持久化通过不代表桌面应用未保存内容能自动保留。
+模板切换先通过节点专用 lifecycle token 请求 guest 正常关闭 Chromium，让 profile
+落盘，再由 guest init sync/reboot。该 token 仅保存在节点运行目录和只读配置盘，
+不出现在状态 API、不转交 companion 子进程。旧模板不支持此通道时，仍使用现有
+有界 stop 回退；因此不能把新模板的持久化结果推及旧模板，也不能保证应用内未保存的编辑内容。
