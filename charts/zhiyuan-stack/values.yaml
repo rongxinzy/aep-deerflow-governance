@@ -82,10 +82,9 @@ aepStack:
   # 这是**文件路径**（挂载的 aep-license Secret 内文件），不是密钥内容
   licenseTrustedKeysFile: /var/run/aep-license/license-trusted-keys.json
   licenseCustomerId: customer-internal-test
-  # rustfs 凭据：dev 默认值（= cicd 活体现值，集群内网信任域）；生产环境
-  # 在 local values 覆盖。此处如实记录而非占位，避免引入新的回填断点。
-  minioAccessKey: minioadmin
-  minioSecretKey: minioadmin
+  # RustFS 与两个 AEP 服务共用；只在 gitignored local values 中配置真实凭据。
+  minioAccessKey: "<set-in-local-values>"
+  minioSecretKey: "<set-in-local-values>"
   minioBucket: aep-skills
   minioEndpoint: rustfs:9000
   postgres: {database: aep, user: aep, password: "<db-password>", storage: 5Gi, storageClass: longhorn}
