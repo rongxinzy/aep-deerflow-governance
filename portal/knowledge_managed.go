@@ -33,6 +33,15 @@ const maxManagedUploadFileNameBytes = 2048
 // The managed API is deliberately a fixed adapter, not a general-purpose
 // WeKnora proxy. Every route is admin-only and bound to the verified AEP
 // deployment plus an explicitly configured WeKnora tenant.
+
+// managedKBScope is the authorization summary of one registered base: how many
+// distinct user and team subjects hold a grant. Portal owns these rows, so the
+// console never needs an upstream call to render the usage range.
+type managedKBScope struct {
+	Users int64 `json:"users"`
+	Teams int64 `json:"teams"`
+}
+
 type managedKB struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
@@ -40,6 +49,14 @@ type managedKB struct {
 	TenantID         string `json:"tenant_id"`
 	EmbeddingModelID string `json:"embedding_model_id"`
 	Type             string `json:"type"`
+	// Live counters and the last upstream modification time. They are pointers
+	// so that an absent or unreadable upstream value stays absent: the console
+	// renders a missing field as "not counted" rather than inventing a zero.
+	KnowledgeCount  *int64          `json:"knowledge_count,omitempty"`
+	ChunkCount      *int64          `json:"chunk_count,omitempty"`
+	ProcessingCount *int64          `json:"processing_count,omitempty"`
+	UpdatedAt       string          `json:"updated_at,omitempty"`
+	Scope           *managedKBScope `json:"scope,omitempty"`
 }
 
 func (kb *managedKB) UnmarshalJSON(raw []byte) error {
@@ -50,6 +67,10 @@ func (kb *managedKB) UnmarshalJSON(raw []byte) error {
 		TenantID         json.RawMessage `json:"tenant_id"`
 		EmbeddingModelID string          `json:"embedding_model_id"`
 		Type             string          `json:"type"`
+		KnowledgeCount   json.RawMessage `json:"knowledge_count"`
+		ChunkCount       json.RawMessage `json:"chunk_count"`
+		ProcessingCount  json.RawMessage `json:"processing_count"`
+		UpdatedAt        json.RawMessage `json:"updated_at"`
 	}
 	var value wire
 	if err := json.Unmarshal(raw, &value); err != nil {
@@ -61,8 +82,80 @@ func (kb *managedKB) UnmarshalJSON(raw []byte) error {
 			tenant = strings.Trim(string(value.TenantID), `"`)
 		}
 	}
-	*kb = managedKB{ID: value.ID, Name: value.Name, Description: value.Description, TenantID: tenant, EmbeddingModelID: value.EmbeddingModelID, Type: value.Type}
+	*kb = managedKB{
+		ID:               value.ID,
+		Name:             value.Name,
+		Description:      value.Description,
+		TenantID:         tenant,
+		EmbeddingModelID: value.EmbeddingModelID,
+		Type:             value.Type,
+		KnowledgeCount:   decodeOptionalCount(value.KnowledgeCount),
+		ChunkCount:       decodeOptionalCount(value.ChunkCount),
+		ProcessingCount:  decodeOptionalCount(value.ProcessingCount),
+		UpdatedAt:        decodeOptionalTimestamp(value.UpdatedAt),
+	}
 	return nil
+}
+
+// decodeOptionalCount reads a counter upstream may omit, send as a JSON number,
+// or send as a quoted number. Anything unreadable is reported as absent: a
+// display-only counter must not fail the whole listing.
+func decodeOptionalCount(raw json.RawMessage) *int64 {
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if text == "" || text == "null" {
+		return nil
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || value < 0 {
+		return nil
+	}
+	return &value
+}
+
+// decodeOptionalTimestamp keeps only a parseable upstream timestamp, normalized
+// to UTC, so the console never renders upstream prose as a time and a format
+// change upstream cannot break the listing.
+func decodeOptionalTimestamp(raw json.RawMessage) string {
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if text == "" || text == "null" {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339)
+}
+
+// managedGrantScopes counts granted subjects per base for one deployment and
+// tenant. An empty baseID counts every registered base in one query; a concrete
+// baseID narrows it to the base a detail request is about.
+func (p *portal) managedGrantScopes(ctx context.Context, deployment, tenant, baseID string) (map[string]managedKBScope, error) {
+	query := `SELECT knowledge_base_id, COUNT(*) FILTER (WHERE subject_type='user'), COUNT(*) FILTER (WHERE subject_type='team') FROM knowledge_base_grants WHERE deployment_id=$1 AND weknora_tenant_id=$2`
+	args := []any{deployment, tenant}
+	if baseID != "" {
+		query += ` AND knowledge_base_id=$3`
+		args = append(args, baseID)
+	}
+	query += ` GROUP BY knowledge_base_id`
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	scopes := map[string]managedKBScope{}
+	for rows.Next() {
+		var id string
+		var scope managedKBScope
+		if err := rows.Scan(&id, &scope.Users, &scope.Teams); err != nil {
+			return nil, err
+		}
+		scopes[id] = scope
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return scopes, nil
 }
 
 type managedModel struct {
@@ -517,6 +610,23 @@ func (p *portal) handleManagedKnowledgeBases(w http.ResponseWriter, r *http.Requ
 		result[i].Description = live.Description
 		result[i].Type = live.Type
 		result[i].EmbeddingModelID = live.EmbeddingModelID
+		result[i].KnowledgeCount = live.KnowledgeCount
+		result[i].ChunkCount = live.ChunkCount
+		result[i].ProcessingCount = live.ProcessingCount
+		result[i].UpdatedAt = live.UpdatedAt
+	}
+	// Usage range is display metadata owned by Portal itself. It degrades to an
+	// absent field instead of failing the page: every entry above was already
+	// validated against upstream and the registry, and the console renders a
+	// missing scope as "not counted".
+	if scopes, err := p.managedGrantScopes(r.Context(), ident.DeploymentID, tenant, ""); err != nil {
+		p.logger.Warn("managed knowledge list: grant scope unavailable", "error", err)
+	} else {
+		for i := range result {
+			if scope, ok := scopes[result[i].ID]; ok {
+				result[i].Scope = &scope
+			}
+		}
 	}
 	writeJSON(w, 200, map[string]any{"data": result})
 }
@@ -534,6 +644,11 @@ func (p *portal) handleManagedKnowledgeGetBase(w http.ResponseWriter, r *http.Re
 	if !found {
 		p.managedWriteError(w, 404, "KNOWLEDGE_BASE_NOT_FOUND", "未找到已登记知识库", "")
 		return
+	}
+	if scopes, err := p.managedGrantScopes(r.Context(), ident.DeploymentID, tenant, kb.ID); err != nil {
+		p.logger.Warn("managed knowledge read: grant scope unavailable", "error", err)
+	} else if scope, ok := scopes[kb.ID]; ok {
+		kb.Scope = &scope
 	}
 	writeJSON(w, 200, map[string]any{"data": kb})
 }

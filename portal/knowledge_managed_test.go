@@ -1417,3 +1417,114 @@ func TestManagedKnowledgeUploadMapsDuplicateFileToDeterministicConflict(t *testi
 	assert.NotContains(t, w.Body.String(), "KNOWLEDGE_UPSTREAM_INVALID")
 	assert.NoError(t, h.dbmock.ExpectationsWereMet())
 }
+
+func ptrInt64(value int64) *int64 { return &value }
+
+// Upstream shapes drift: the console list must survive a counter it cannot read
+// instead of failing the page or inventing a zero.
+func TestManagedKBWireCountersTolerateUpstreamShapes(t *testing.T) {
+	cases := []struct {
+		name       string
+		raw        string
+		knowledge  *int64
+		processing *int64
+		chunks     *int64
+		updatedAt  string
+	}{
+		{name: "numbers are kept", raw: `{"id":"kb-1","knowledge_count":8,"chunk_count":3,"processing_count":2,"updated_at":"2026-10-15T06:18:30Z"}`, knowledge: ptrInt64(8), chunks: ptrInt64(3), processing: ptrInt64(2), updatedAt: "2026-10-15T06:18:30Z"},
+		{name: "quoted numbers are kept", raw: `{"id":"kb-1","knowledge_count":"8"}`, knowledge: ptrInt64(8)},
+		{name: "absent counters stay absent", raw: `{"id":"kb-1"}`},
+		{name: "unreadable counters stay absent", raw: `{"id":"kb-1","knowledge_count":"many","chunk_count":{},"processing_count":-1}`},
+		{name: "fractional offset timestamp is normalized", raw: `{"id":"kb-1","updated_at":"2026-10-15T14:18:30.123456789+08:00"}`, updatedAt: "2026-10-15T06:18:30Z"},
+		{name: "unparseable timestamp stays absent", raw: `{"id":"kb-1","updated_at":"last tuesday"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var kb managedKB
+			require.NoError(t, json.Unmarshal([]byte(tc.raw), &kb))
+			assert.Equal(t, tc.knowledge, kb.KnowledgeCount)
+			assert.Equal(t, tc.chunks, kb.ChunkCount)
+			assert.Equal(t, tc.processing, kb.ProcessingCount)
+			assert.Equal(t, tc.updatedAt, kb.UpdatedAt)
+		})
+	}
+}
+
+func TestManagedKnowledgeListCarriesLiveCountersAndGrantScope(t *testing.T) {
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	configureManagedTest(t, h, "10000")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		case "/api/v1/knowledge-bases/kb-owned":
+			_, _ = w.Write([]byte(`{"data":{"id":"kb-owned","name":"Managed","tenant_id":10000,"embedding_model_id":"emb-1","type":"document","knowledge_count":8,"processing_count":2,"updated_at":"2026-10-15T06:18:30Z"}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h.cfg.knowledgeAPIURL = server.URL
+	h.dbmock.ExpectQuery(`SELECT knowledge_base_id,name_snapshot,created_by,created_at,updated_at FROM knowledge_base_registry`).WithArgs("demo", "10000").
+		WillReturnRows(sqlmock.NewRows([]string{"knowledge_base_id", "name_snapshot", "created_by", "created_at", "updated_at"}).
+			AddRow("kb-owned", "Managed", "u1", time.Now(), time.Now()))
+	h.dbmock.ExpectQuery(`COUNT\(\*\) FILTER .*knowledge_base_grants`).WithArgs("demo", "10000").
+		WillReturnRows(sqlmock.NewRows([]string{"knowledge_base_id", "users", "teams"}).AddRow("kb-owned", 2, 1))
+	w := httptest.NewRecorder()
+	h.handleManagedKnowledgeBases(w, httptest.NewRequest(http.MethodGet, "/", nil), identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body struct {
+		Data []struct {
+			KnowledgeCount  *int64 `json:"knowledge_count"`
+			ProcessingCount *int64 `json:"processing_count"`
+			UpdatedAt       string `json:"updated_at"`
+			Scope           *struct {
+				Users int64 `json:"users"`
+				Teams int64 `json:"teams"`
+			} `json:"scope"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Len(t, body.Data, 1)
+	require.NotNil(t, body.Data[0].KnowledgeCount)
+	require.NotNil(t, body.Data[0].ProcessingCount)
+	assert.Equal(t, int64(8), *body.Data[0].KnowledgeCount)
+	assert.Equal(t, int64(2), *body.Data[0].ProcessingCount)
+	assert.Equal(t, "2026-10-15T06:18:30Z", body.Data[0].UpdatedAt)
+	require.NotNil(t, body.Data[0].Scope)
+	assert.Equal(t, int64(2), body.Data[0].Scope.Users)
+	assert.Equal(t, int64(1), body.Data[0].Scope.Teams)
+	// 上游没报的分块数不下发：界面靠字段缺失判定「暂未统计」，而不是当作 0。
+	assert.NotContains(t, w.Body.String(), `"chunk_count"`)
+	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+// 统计是展示数据：授权范围查不出来只能少一列，不能把整页列表变成 502。
+func TestManagedKnowledgeListSurvivesUnavailableGrantScope(t *testing.T) {
+	stub := newServicesStubs(t)
+	h := newServicesHarness(t, stub)
+	configureManagedTest(t, h, "10000")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			_, _ = w.Write([]byte(`{"data":{"tenant":{"id":10000}}}`))
+		case "/api/v1/knowledge-bases/kb-owned":
+			_, _ = w.Write([]byte(`{"data":{"id":"kb-owned","name":"Managed","tenant_id":10000,"embedding_model_id":"emb-1","knowledge_count":8}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h.cfg.knowledgeAPIURL = server.URL
+	h.dbmock.ExpectQuery(`SELECT knowledge_base_id,name_snapshot,created_by,created_at,updated_at FROM knowledge_base_registry`).WithArgs("demo", "10000").
+		WillReturnRows(sqlmock.NewRows([]string{"knowledge_base_id", "name_snapshot", "created_by", "created_at", "updated_at"}).
+			AddRow("kb-owned", "Managed", "u1", time.Now(), time.Now()))
+	h.dbmock.ExpectQuery(`COUNT\(\*\) FILTER .*knowledge_base_grants`).WithArgs("demo", "10000").WillReturnError(errors.New("connection reset"))
+	w := httptest.NewRecorder()
+	h.handleManagedKnowledgeBases(w, httptest.NewRequest(http.MethodGet, "/", nil), identity{UserID: "admin-user", DeploymentID: "demo", Roles: []string{"admin"}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"id":"kb-owned"`)
+	assert.NotContains(t, w.Body.String(), `"scope"`)
+	assert.NoError(t, h.dbmock.ExpectationsWereMet())
+}
