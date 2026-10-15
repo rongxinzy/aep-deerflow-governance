@@ -7,20 +7,23 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
 
 // Assets of one template tag.
 type Assets struct {
-	Dir        string
-	RootfsPath string
-	KernelPath string
-	FcPath     string
+	DesktopAvailable bool
+	Dir              string
+	RootfsPath       string
+	KernelPath       string
+	FcPath           string
 }
 
 // PayloadFile names inside a template dir.
@@ -33,6 +36,9 @@ const (
 
 // Resolve checks the template exists and matches SHA256SUMS.
 func Resolve(templatesDir, tag string) (*Assets, error) {
+	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`).MatchString(tag) {
+		return nil, fmt.Errorf("invalid template tag")
+	}
 	dir := filepath.Join(templatesDir, tag)
 	a := &Assets{
 		Dir:        dir,
@@ -64,6 +70,30 @@ func Resolve(templatesDir, tag string) (*Assets, error) {
 		if got != want {
 			return nil, fmt.Errorf("template %s: %s sha256 mismatch (want %s, got %s)", tag, name, want, got)
 		}
+	}
+	// Legacy templates remain usable without a desktop. New templates declare
+	// capabilities in checksum-covered metadata, not inferred from the tag name.
+	if want, ok := expected["template.json"]; ok {
+		path := filepath.Join(dir, "template.json")
+		got, err := fileSHA256(path)
+		if err != nil || got != want {
+			return nil, fmt.Errorf("template metadata checksum mismatch")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var metadata struct {
+			Tag     string `json:"tag"`
+			Desktop bool   `json:"desktop"`
+		}
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return nil, err
+		}
+		if metadata.Tag != tag {
+			return nil, fmt.Errorf("template metadata tag mismatch")
+		}
+		a.DesktopAvailable = metadata.Desktop
 	}
 	return a, nil
 }

@@ -106,6 +106,7 @@ func BuildPayload(in Inputs) (*ConfigPayload, error) {
 		"BENCH_BASE_URL=" + in.ModelBaseURL,
 		"BENCH_MODEL=" + primary,
 		"PW_WORKSPACE=" + ws.Name,
+		"WORKSPACE_DESKTOP_ENABLED=" + map[bool]string{true: "1", false: "0"}[ws.Spec.Desktop.Enabled],
 		"PW_GUEST_IP=" + guestIP,
 		"PW_GUEST_GW=" + hostIP,
 		"PW_GUEST_PREFIX=30",

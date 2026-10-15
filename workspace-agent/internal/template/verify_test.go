@@ -66,3 +66,30 @@ func TestGCKeepNewest(t *testing.T) {
 	}
 	assert.Equal(t, []string{"0.4.9", "0.5.0"}, names, "oldest dropped, keep-2")
 }
+
+func TestResolveRejectsPathAndMissingMetadataChecksum(t *testing.T) {
+	_, err := Resolve(t.TempDir(), "../outside")
+	require.Error(t, err)
+}
+
+func TestDesktopMetadataIsChecksumBound(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "desktop-v1", "")
+	tagDir := filepath.Join(dir, "desktop-v1")
+	assets, err := Resolve(dir, "desktop-v1")
+	require.NoError(t, err)
+	require.False(t, assets.DesktopAvailable)
+	metadata := []byte(`{"tag":"desktop-v1","desktop":true}`)
+	require.NoError(t, os.WriteFile(filepath.Join(tagDir, "template.json"), metadata, 0644))
+	sum := sha256.Sum256(metadata)
+	sums, err := os.ReadFile(filepath.Join(tagDir, "SHA256SUMS"))
+	require.NoError(t, err)
+	sums = append(sums, []byte(hex.EncodeToString(sum[:])+"  template.json\n")...)
+	require.NoError(t, os.WriteFile(filepath.Join(tagDir, "SHA256SUMS"), sums, 0644))
+	assets, err = Resolve(dir, "desktop-v1")
+	require.NoError(t, err)
+	require.True(t, assets.DesktopAvailable)
+	require.NoError(t, os.WriteFile(filepath.Join(tagDir, "template.json"), []byte(`{}`), 0644))
+	_, err = Resolve(dir, "desktop-v1")
+	require.Error(t, err)
+}

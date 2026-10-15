@@ -70,9 +70,8 @@ func main() {
 		logger.Error(err, "template verification failed", "tag", cfg.TemplateTag)
 		os.Exit(1)
 	}
-	if err := template.GC(cfg.Workdir+"/templates", 2); err != nil {
-		logger.Error(err, "template GC failed (continuing)")
-	}
+	// Workspaces can pin older templates. Retention is explicit until GC can
+	// account for all workspace references; startup must not delete pinned roots.
 
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

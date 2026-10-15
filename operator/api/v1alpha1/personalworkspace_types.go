@@ -20,9 +20,7 @@ type PersonalWorkspaceSpec struct {
 	// subject every companion in this workspace acts on behalf of.
 	Owner string `json:"owner"`
 
-	// Runtime selects the execution substrate. "pod" renders a plain
-	// Deployment; "microvm" is reserved for the Firecracker backend and is
-	// rejected until that lands.
+	// Runtime selects a pod or a Firecracker personal workspace.
 	// +optional
 	// +kubebuilder:validation:Enum=pod;microvm
 	// +kubebuilder:default=pod
@@ -32,6 +30,15 @@ type PersonalWorkspaceSpec struct {
 	// Empty falls back to the operator's PERSONAL_WORKSPACE_IMAGE default.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// TemplateTag pins a materialized microvm template. Empty uses the node default.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
+	TemplateTag string `json:"templateTag,omitempty"`
+
+	// Desktop enables the shared cloud computer (microvm only).
+	// +optional
+	Desktop WorkspaceDesktop `json:"desktop,omitempty"`
 
 	// Resources bounds the workspace as a whole.
 	// +optional
@@ -66,9 +73,15 @@ type PersonalWorkspaceSpec struct {
 	Credentials CredentialsRef `json:"credentials"`
 }
 
+// WorkspaceDesktop controls the dedicated shared desktop.
+type WorkspaceDesktop struct {
+	// +optional
+	Enabled bool `json:"enabled"`
+}
+
 // WorkspaceResources bounds one workspace.
 type WorkspaceResources struct {
-	// Memory is the container memory limit. Default 512Mi.
+	// Memory is the workspace memory limit. Default 512Mi; desktop requires at least 4Gi.
 	// +optional
 	// +kubebuilder:default="512Mi"
 	Memory string `json:"memory,omitempty"`
@@ -77,7 +90,7 @@ type WorkspaceResources struct {
 	// +optional
 	// +kubebuilder:default="2Gi"
 	Disk string `json:"disk,omitempty"`
-	// VCPUs is reserved for the microvm substrate (P1); the pod runtime
+	// VCPUs bounds the microvm substrate; the pod runtime
 	// ignores it.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
@@ -219,6 +232,16 @@ type PersonalWorkspaceStatus struct {
 // and the config hash the running guest was booted with (config-change
 // rollouts compare against it).
 type WorkspaceVMStatus struct {
+	// TemplateTag is the verified template used by the running guest.
+	// +optional
+	TemplateTag string `json:"templateTag,omitempty"`
+	// Resources records the applied machine configuration.
+	// +optional
+	Resources WorkspaceResources `json:"resources,omitempty"`
+	// DesktopEnabled records the applied desktop flag.
+	// +optional
+	DesktopEnabled bool `json:"desktopEnabled"`
+
 	// HostPort is the node-local port the agent's proxy listens on; callers
 	// reach the gateway at http://<nodeIP>:<hostPort>.
 	// +optional

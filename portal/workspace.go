@@ -31,13 +31,22 @@ type workspaceCompanionRequest struct {
 	Model       string `json:"model,omitempty"`
 }
 
+type workspaceConfiguration struct {
+	Desktop     *dev1alpha1.WorkspaceDesktop   `json:"desktop,omitempty"`
+	Resources   *dev1alpha1.WorkspaceResources `json:"resources,omitempty"`
+	TemplateTag *string                        `json:"templateTag,omitempty"`
+}
+
 type createWorkspaceRequest struct {
+	workspaceConfiguration
+	Runtime    string                      `json:"runtime,omitempty"`
 	Name       string                      `json:"name,omitempty"`
 	Companions []workspaceCompanionRequest `json:"companions"`
 	Image      string                      `json:"image,omitempty"`
 }
 
 type updateWorkspaceRequest struct {
+	workspaceConfiguration
 	Companions *[]workspaceCompanionRequest `json:"companions,omitempty"`
 	Image      *string                      `json:"image,omitempty"`
 }
@@ -161,6 +170,13 @@ func (p *portal) createWorkspace(w http.ResponseWriter, r *http.Request, ident i
 		return
 	}
 	spec := p.renderWorkspaceSpec(name, ident, companions, body.Image)
+	if body.Runtime != "" {
+		spec.Spec.Runtime = body.Runtime
+	}
+	if err := applyWorkspaceConfiguration(&spec.Spec, body.workspaceConfiguration, false); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := p.k8s.Create(r.Context(), &spec); err != nil {
 		writeJSON(w, statusOf(err), map[string]string{"error": err.Error()})
 		return
@@ -230,6 +246,10 @@ func (p *portal) updateWorkspace(w http.ResponseWriter, r *http.Request, ident i
 	if body.Image != nil {
 		item.Spec.Image = strings.TrimSpace(*body.Image)
 	}
+	if err := applyWorkspaceConfiguration(&item.Spec, body.workspaceConfiguration, true); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := p.k8s.Update(r.Context(), item); err != nil {
 		writeJSON(w, statusOf(err), map[string]string{"error": err.Error()})
 		return
@@ -265,12 +285,15 @@ func summarizeWorkspace(item *dev1alpha1.PersonalWorkspace) map[string]any {
 		companions = append(companions, entry)
 	}
 	out := map[string]any{
-		"name":       item.Name,
-		"owner":      item.Spec.Owner,
-		"phase":      string(item.Status.Phase),
-		"companions": companions,
-		"runtime":    runtime,
-		"resources":  item.Spec.Resources,
+		"name":        item.Name,
+		"owner":       item.Spec.Owner,
+		"phase":       string(item.Status.Phase),
+		"companions":  companions,
+		"runtime":     runtime,
+		"resources":   item.Spec.Resources,
+		"desktop":     item.Spec.Desktop,
+		"templateTag": item.Spec.TemplateTag,
+		"applied":     item.Status.VM,
 	}
 	if item.Status.GatewayEndpoint != "" {
 		out["gatewayEndpoint"] = item.Status.GatewayEndpoint

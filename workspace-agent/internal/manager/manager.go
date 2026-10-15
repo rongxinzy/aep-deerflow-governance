@@ -10,6 +10,7 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,11 +42,11 @@ const AgentFinalizer = "digitalemployee.zhiyuan.io/workspace-node-agent"
 
 // Config wires the manager.
 type Config struct {
-	Namespace   string
-	NodeName    string
-	HostIP      string
-	Workdir     string // hostPath root: templates/ disks/ run/
-	TemplateTag string
+	Namespace      string
+	NodeName       string
+	HostIP         string
+	Workdir        string // hostPath root: templates/ disks/ run/
+	TemplateTag    string
 	PortLo, PortHi int32
 	ModelBaseURL   string
 	SerialLogMB    int
@@ -60,8 +61,8 @@ type Manager struct {
 	// NewDriver builds a driver per run dir (tests swap fakes in).
 	NewDriver func(runDir string) vm.Driver
 
-	mu      sync.Mutex
-	supers  map[string]*Supervisor
+	mu        sync.Mutex
+	supers    map[string]*Supervisor
 	usedPorts func() []int32 // extra occupied ports (proxies of live supervisors)
 }
 
@@ -197,9 +198,28 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 
 	diskDir := filepath.Join(m.cfg.Workdir, "disks", ws.Name)
 	runDir := filepath.Join(m.cfg.Workdir, "run", ws.Name)
-	assets, err := template.Resolve(filepath.Join(m.cfg.Workdir, "templates"), m.cfg.TemplateTag)
+	tag := ws.Spec.TemplateTag
+	if tag == "" {
+		tag = m.cfg.TemplateTag
+	}
+	assets, err := template.Resolve(filepath.Join(m.cfg.Workdir, "templates"), tag)
+	if err == nil && ws.Spec.Desktop.Enabled && !assets.DesktopAvailable {
+		err = fmt.Errorf("template %s does not declare desktop support", tag)
+	}
 	if err != nil {
+		_ = m.patchStatus(ctx, ws, func(s *v1alpha1.PersonalWorkspaceStatus) {
+			s.Message = "configuration not applied: " + err.Error()
+		})
 		return err
+	}
+	// Include machine shape and template in the rollout identity, not only env.
+	shape := fmt.Sprintf("%s-%s-%d-%s-%s", payload.Hash, tag, ws.Spec.Resources.VCPUs, ws.Spec.Resources.Memory, ws.Spec.Resources.Disk)
+	payload.Hash = fmt.Sprintf("%x", sha256.Sum256([]byte(shape)))[:16]
+	if ws.Spec.Desktop.Enabled {
+		memory, err := parseQuantity(ws.Spec.Resources.Memory)
+		if err != nil || memory < 4096 || ws.Spec.Resources.VCPUs < 2 {
+			return fmt.Errorf("desktop requires at least 2 vcpus and 4Gi memory")
+		}
 	}
 	dev, err := tap.New(ws.Name, ws.Status.VMSubnet)
 	if err != nil {
@@ -243,6 +263,9 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 	sup := m.supers[ws.Name]
 	if sup == nil {
 		sup = &Supervisor{name: ws.Name, subnet: ws.Status.VMSubnet, driver: m.NewDriver(runDir)}
+		if ws.Status.VM != nil {
+			sup.configHash = ws.Status.VM.ConfigHash
+		}
 		m.supers[ws.Name] = sup
 	}
 	m.mu.Unlock()
@@ -291,7 +314,7 @@ func (m *Manager) reconcile(ctx context.Context, ws *v1alpha1.PersonalWorkspace)
 		s.Phase = v1alpha1.WorkspacePhaseRunning
 		s.Message = ""
 		s.GatewayEndpoint = m.cfg.HostIP + ":" + strconv.Itoa(int(port))
-		s.VM = &v1alpha1.WorkspaceVMStatus{HostPort: port, ConfigHash: payload.Hash}
+		s.VM = &v1alpha1.WorkspaceVMStatus{HostPort: port, ConfigHash: payload.Hash, TemplateTag: tag, Resources: ws.Spec.Resources, DesktopEnabled: ws.Spec.Desktop.Enabled}
 	})
 }
 
