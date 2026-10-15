@@ -77,3 +77,24 @@ func TestTraceMiddleware(t *testing.T) {
 		assert.True(t, strings.HasPrefix(seen, "00-"+traceID+"-"), "出站携带同 trace")
 	})
 }
+
+func TestTraceRecorderPreservesResponseController(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: w}
+	require.NoError(t, http.NewResponseController(rec).Flush())
+	require.True(t, w.Flushed)
+	server := httptest.NewServer(traceMiddleware(slog.Default(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})))
+	defer server.Close()
+	response, err := http.Get(server.URL)
+	require.NoError(t, err)
+	defer func() { _ = response.Body.Close() }()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+}
