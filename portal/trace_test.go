@@ -89,12 +89,12 @@ func TestTraceRecorderPreservesResponseController(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 	})))
 	defer server.Close()
 	response, err := http.Get(server.URL)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	require.Equal(t, http.StatusOK, response.StatusCode)
 }
