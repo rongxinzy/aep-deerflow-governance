@@ -5,7 +5,7 @@
 ## 合同与归属
 
 - 新建搭档默认组织内可联系。未配置联系范围的存量搭档保持仅自己，主人可在搭档详情调整范围及对外介绍。
-- 联系范围写入 PersonalWorkspace 的 `digitalemployee.zhiyuan.io/companion-contacts` annotation，不升级 CRD。
+- 联系范围写入 PersonalWorkspace 的 `digitalemployee.zhiyuan.io/companion-contacts` annotation；联系范围不新增 CRD 字段。
 - `GET /api/v1/colleague-companions` 返回组织内可联系的搭档及自己的搭档；核对 AEP 中的活动人员身份，隐藏停用人员。
 - `PUT /api/v1/colleague-companions/{workspace}/{companion}` 仅主人可调整。
 - `POST /api/v1/collaborations` 保存消息和稳定 requestId；`GET /api/v1/collaborations[/{id}]` 仅发起人与搭档主人可读。
@@ -35,3 +35,9 @@ PostgreSQL 保存协作、来信、搭档回复、待本人处理的问题、本
 - 真正 PostgreSQL：CI 的临时 postgres:16 服务运行 `TestCollaborationPostgresRelayRoundTrip`，验证消息去重、4 worker 并发领取、换连接池后继续回复、同一回执重复投递以及第三方读取被拒绝。没有配置一次性 PostgreSQL 时本地明确 skip。
 - Runtime：实际 harness + 临时 SQLite + 合成模型，验证仅接待工具可用、本人私有回执不进入接待模型、重启去重、被动回执不触发模型、自然语言查找／发送／读取回复。
 - UI：`verify/collaboration.mjs` 使用合成双用户 API，实际 Chromium 验证同事详情→直接聊天、原会话→传话、接收人回复→发起人原对话、刷新恢复、浅色桌面与深色移动端。该测试证明界面与 API 合同，不代表真实生产双用户联调。
+
+## Persona 主线合同修复
+
+Portal 已提供的 Persona 字段补齐到 CompanionSpec、生成的三处 CRD 和 companions.json。字段可选、最多 2000 个 Unicode 字符；旧对象不填保持原行为。配置变更沿现有清单 checksum 更新网关，清空后省略该字段。CRD 文件只提交代码，没有 apply 到集群。
+
+Operator 回归验证 Persona 持久化、清单传递、配置变更与清空；Portal 保留 Unicode 长度、创建与摘要回显测试。覆盖率比较固定 head SHA，并选取主线上最近成功 push CI 的祖先作为可编译基线；找不到基线即失败，当前提交全量测试及 80% 门槛仍强制执行。这样已损坏的主线不会阻塞自身修复。

@@ -79,6 +79,7 @@ type companionManifestEntry struct {
 	Name         string   `json:"name"`
 	DisplayName  string   `json:"displayName,omitempty"`
 	Model        string   `json:"model"`
+	Persona      string   `json:"persona,omitempty"`
 	Tools        []string `json:"tools,omitempty"`
 	MemkeySecret string   `json:"memkeySecret,omitempty"`
 	MemoryScopes []string `json:"memoryScopes,omitempty"`
@@ -109,6 +110,7 @@ func renderCompanionsManifest(workspace *v1alpha1.PersonalWorkspace) string {
 			Name:         c.Name,
 			DisplayName:  c.DisplayName,
 			Model:        c.Model,
+			Persona:      c.Persona,
 			Tools:        c.Tools,
 			MemkeySecret: companionMemkeySecretName(workspace, c.Name),
 			MemoryLimit:  c.Resources.Memory,

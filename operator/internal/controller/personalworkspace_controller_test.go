@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -102,6 +103,29 @@ var _ = Describe("PersonalWorkspace reconciler", func() {
 	}
 
 	Describe("child rendering", func() {
+		It("persists persona and refreshes the gateway configuration when it changes", func(ctx context.Context) {
+			reconcile(ctx)
+			before := getDeployment(ctx).Spec.Template.Annotations
+			fresh := getWorkspace(ctx)
+			fresh.Spec.Companions[0].Persona = "用中文回答，协助整理工作。"
+			Expect(fx.client.Update(ctx, fresh)).To(Succeed())
+			reconcile(ctx)
+			Expect(getWorkspace(ctx).Spec.Companions[0].Persona).To(Equal(fresh.Spec.Companions[0].Persona))
+			manifest := &corev1.ConfigMap{}
+			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspaceConfigName(workspace)}, manifest)).To(Succeed())
+			var roster companionsManifest
+			Expect(json.Unmarshal([]byte(manifest.Data["companions.json"]), &roster)).To(Succeed())
+			Expect(roster.Companions[0].Persona).To(Equal(fresh.Spec.Companions[0].Persona))
+			Expect(roster.Companions[1].Persona).To(BeEmpty())
+			Expect(getDeployment(ctx).Spec.Template.Annotations).NotTo(Equal(before))
+			fresh = getWorkspace(ctx)
+			fresh.Spec.Companions[0].Persona = ""
+			Expect(fx.client.Update(ctx, fresh)).To(Succeed())
+			reconcile(ctx)
+			Expect(fx.client.Get(ctx, client.ObjectKeyFromObject(manifest), manifest)).To(Succeed())
+			Expect(manifest.Data["companions.json"]).NotTo(ContainSubstring(`"persona"`))
+		})
+
 		It("renders manifest, pvc, deployment and service", func(ctx context.Context) {
 			reconcile(ctx)
 

@@ -110,6 +110,10 @@ type CompanionSpec struct {
 	// Model is the AEP-approved model route the companion uses (wire id
 	// routed by the model gateway, never a provider-native name).
 	Model string `json:"model"`
+	// Persona describes the owner-configured companion behavior.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2000
+	Persona string `json:"persona,omitempty"`
 	// Tools lists the capability faces the companion may use. Stored for the
 	// gateway; the operator never interprets entries.
 	// +optional
