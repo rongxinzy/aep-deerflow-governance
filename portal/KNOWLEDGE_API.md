@@ -95,7 +95,11 @@ identity and managed configuration; caller-provided tenant/deployment filters
 are rejected. It reads only Portal metadata and works without contacting WeKnora.
 
 Optional filters: `operationId`, `actorUserId`, `action`, `resourceId`, `outcome`.
-Each occurs once and is at most 256 bytes. `limit` defaults to 50 and accepts
+Each occurs once and is at most 256 bytes. `knowledgeBaseId` narrows the page to
+one registered base: it matches the base-level `resource_id` and the
+document-level `parent_resource_id`, so the console's "operations of this base"
+view also sees document actions. A value that cannot be a knowledge base id is
+rejected with the same invalid-query error instead of answering an empty page. `limit` defaults to 50 and accepts
 1–100. `cursor` is the positive decimal audit ID returned by the previous page.
 Pages are ordered by descending audit ID with `id < cursor`; results include
 `items` and `nextCursor` (string or null). Each item contains `cursor`,

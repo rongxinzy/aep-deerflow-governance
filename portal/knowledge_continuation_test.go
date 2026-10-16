@@ -70,6 +70,28 @@ func TestKnowledgeAuditIsScopedAndPagedWithoutUpstream(t *testing.T) {
 	require.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 
+// 「查看本库操作记录」：库级动作写在 resource_id、文档级动作写在 parent_resource_id，
+// 按库筛选必须两者都算；非法库 ID 直接拒绝，不用空列表伪装成功。
+func TestKnowledgeAuditFiltersByKnowledgeBase(t *testing.T) {
+	h := newServicesHarness(t, newServicesStubs(t))
+	configureManagedTest(t, h, "10000")
+	now := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{"id", "operation_id", "actor_user_id", "action", "resource_type", "resource_id", "parent_resource_id", "outcome", "status_code", "created_at"}).
+		AddRow(21, "kbop-3", "admin-user", "upload_file", "document", "doc-1", "kb-1", "succeeded", 202, now)
+	h.dbmock.ExpectQuery(`SELECT id,operation_id.*WHERE deployment_id=\$1 AND weknora_tenant_id=\$2 AND \(resource_id=\$3 OR parent_resource_id=\$3\) ORDER BY id DESC LIMIT \$4`).
+		WithArgs("demo", "10000", "kb-1", 51).WillReturnRows(rows)
+	w := httptest.NewRecorder()
+	h.handleKnowledgeAudit(w, httptest.NewRequest("GET", "/?knowledgeBaseId=kb-1", nil), adminIdentityForManagedTest())
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), `"parentResourceId":"kb-1"`)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
+
+	bad := httptest.NewRecorder()
+	h.handleKnowledgeAudit(bad, httptest.NewRequest("GET", "/?knowledgeBaseId=kb%2F1", nil), adminIdentityForManagedTest())
+	require.Equal(t, 400, bad.Code)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
 func TestKnowledgeAuditRejectsInvalidFiltersAndIdentity(t *testing.T) {
 	for _, query := range []string{"tenantId=other", "cursor=-1", "limit=101", "actorUserId=a&actorUserId=b"} {
 		h := newServicesHarness(t, newServicesStubs(t))

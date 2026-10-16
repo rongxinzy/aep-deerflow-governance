@@ -50,6 +50,18 @@ func (p *portal) handleKnowledgeAudit(w http.ResponseWriter, r *http.Request, id
 			continue
 		}
 		switch key {
+		case "knowledgeBaseId":
+			if value == "" {
+				continue
+			}
+			if _, valid := safeKnowledgeID(value); !valid {
+				p.managedWriteError(w, 400, "INVALID_QUERY", "审计筛选无效", "")
+				return
+			}
+			// 库级操作把库 ID 写在 resource_id，文档级操作写在 parent_resource_id：
+			// 按库筛选必须两者都算，否则「查看本库操作记录」会漏掉文档相关动作。
+			args = append(args, value)
+			where = append(where, fmt.Sprintf("(resource_id=$%d OR parent_resource_id=$%d)", len(args), len(args)))
 		case "cursor":
 			id, err := strconv.ParseInt(value, 10, 64)
 			if err != nil || id <= 0 {
