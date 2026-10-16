@@ -74,6 +74,15 @@ jobs:
         run: |
           python -m pip install --quiet pytest pytest-asyncio pytest-cov fastapi uvicorn asyncpg pydantic httpx
           python -m pytest tests/ --cov=gateway_app --cov-fail-under=80 --cov-report=term
+      # The governance package has no runtime manifest of its own (it ships
+      # inside the deerflow-gov image), so tests/requirements.txt is the only
+      # declaration of what its suite imports. Run it from the repository root:
+      # `python -m pytest` puts the root on sys.path, which is how
+      # `from aep_deerflow_governance import ...` resolves.
+      - name: Governance middleware tests
+        run: |
+          python -m pip install --quiet -r tests/requirements.txt
+          python -m pytest tests/ -q
       - name: Isolated stack update safety tests (no containers)
         run: python -m unittest scripts/test_update_knowledge_stack.py scripts/test_update_local_portal.py
       - name: Helm chart lint
