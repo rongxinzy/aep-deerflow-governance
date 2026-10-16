@@ -16,22 +16,24 @@ global:
     main: digital-employees
     memory: memory-system
 
+# 默认 tag 与 zhiyuan-docs guides/cicd-environment.md「在役版本」表（2026-10-15
+# 只读核查）一致；该表之外的组件维持原值。
 images:
-  operator: { repository: rongxinzy/de-operator, tag: "0.14.0" }
-  portal: { repository: rongxinzy/de-portal, tag: "0.13.0" }
-  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.3" }
+  operator: { repository: rongxinzy/de-operator, tag: "0.21.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.23.6" }
+  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.15.0" }
   # runtime images are big and version rarely; the lineage lives on ghcr
-  runtime: { repository: rongxinzy/deerflow-gov, tag: "v18" }
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v26" }
   openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
   embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
   # AEP control plane + datastore images (ns aep-system, see templates/aep-stack.yaml)
   postgres: { repository: postgres, tag: "17.6-alpine" }
   rustfs: { repository: rustfs, tag: "1.0.0" }
-  aepControlService: { repository: aep-control-service, tag: "0.8.0" }
+  aepControlService: { repository: aep-control-service, tag: "0.12.0" }
   aepAgentControl: { repository: aep-agent-control, tag: "0.1.0" }
   aepGatewayAuthorizer: { repository: aep-gateway-authorizer, tag: "0.2.0" }
-  aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.4.3" }
+  aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.6.0" }
   # zhiyuan's MCP bridge in front of WeKnora (see templates/weknora-mcp.yaml)
   weknoraMcp: { repository: weknora-mcp, tag: "0.1.0" }
 
@@ -337,11 +339,11 @@ workspaceAgent:
   microvmSubnet: 192.168.77.0/24
   image:
     repository: rongxinzy/pw-node-agent
-    tag: 0.1.0
+    tag: 0.1.3
   # pw-rootfs 模板镜像（pi-durable-bench 构建，独立版本线 0.5.x）
   templateImage:
     repository: rongxinzy/pw-rootfs
-    tag: 0.5.0
+    tag: 0.5.1
   # Additional immutable versions available for per-workspace templateTag.
   # Keep pinned versions here during upgrades; never replace content under a tag.
   additionalTemplates: []
