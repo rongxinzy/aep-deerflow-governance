@@ -368,3 +368,54 @@ employees: []
 #    displayName: 销售助理
 #    wecom: false
 #    wecomName: ""
+
+# ---------------------------------------------------------------------------
+# 加固（P0）：网络隔离、Pod 安全、资源边界、PostgreSQL 异地备份。
+# 全部可按开关回退；滚动步骤见 chart README「加固（P0）」。
+# ---------------------------------------------------------------------------
+
+# NetworkPolicy：chart 管理的命名空间默认拒绝入站，再按调用关系放行；
+# 数字员工运行时额外限制出站。enabled=false 整体不渲染（回退路径）。
+networkPolicy:
+  enabled: true
+  # AEP /internal 与 /aep/v1 同端口（control-service :8080），L3/L4 策略
+  # 无法区分路径。cilium = 渲染 CiliumNetworkPolicy，对运行时 → control-service
+  # 只放行 /aep/v1/*（需集群为 Cilium 且启用 L7 代理）；none = 只渲染标准
+  # NetworkPolicy，运行时可访问 control-service 全部路径（/internal 仅靠令牌）。
+  aepInternalGuard: cilium
+  # 运行时允许访问的 control-service 路径（Cilium L7 正则，匹配完整路径）。
+  aepAllowedPaths: ["/aep/v1/.*", "/healthz", "/readyz"]
+  # Pod/Service 网段：运行时“访问外网”规则从 0.0.0.0/0 中排除，避免绕过
+  # 集群内白名单（cicd：podCIDR 10.42.0.0/16、serviceCIDR 10.43.0.0/16）。
+  clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16]
+  dns:
+    namespace: kube-system
+    podLabels: {k8s-app: kube-dns}
+  # Prometheus 所在命名空间（抓取 /metrics 的入站放行）；默认取
+  # observability.monitoringNamespace。
+  monitoringNamespace: ""
+  higressNamespace: higress-system
+  # 需要直连 aep-system/postgres 的其他命名空间：KEDA 的 postgresql 唤醒
+  # 触发器（员工休眠/唤醒）从 keda 命名空间轮询 portal 库。
+  postgresExtraFromNamespaces: [keda]
+  runtime:
+    # 运行时访问集群外地址（Web 工具、邮件、外部 MCP 等）。false = 只允许
+    # 集群内白名单 + 模型网关。
+    allowExternalEgress: true
+    # 外网出站端口；空 = 全部端口。
+    externalEgressPorts: []
+    # 额外允许调用运行时 :8001 的 Pod（主命名空间内的 app 标签）。operator
+    # 升级出 component 标签之前，带 A2A 的员工需在此列出其 de-<name>-a2a。
+    extraIngressApps: []
+    # 额外出站规则（原样拼入运行时出站策略的 egress 列表）。
+    extraEgress: []
+  # 主命名空间内非本 chart 管理的 Pod（zhiyuanBotUI、pi-companion、个人工作区
+  # 等）是否保持入站全开。默认 true 以免默认拒绝误伤；用 Hubble 盘点调用
+  # 关系并补齐规则后再置 false。
+  openUnmanagedMainNamespacePods: true
+  # 观测命名空间（monitoring/logging）的默认拒绝与放行规则。
+  observability: true
+  # WeKnora 子图命名空间：子图内部调用关系（docreader/redis/postgres）
+  # 尚未盘点，默认不渲染。
+  weknora: false
+

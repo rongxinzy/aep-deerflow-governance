@@ -1,0 +1,369 @@
+{{- /*
+NetworkPolicy（加固 P0）。
+- chart 管理的命名空间默认拒绝入站，再按调用关系逐项放行。
+- 已通过 NodePort 对集群外开放的端口（AEP 三个服务、portal、管理后台等）
+  入站不限来源：它们本就面向集群外，访问控制在应用层（令牌/会话）。
+- 数字员工运行时额外限制出站：只能访问 DNS、AEP 数据面与必要依赖；
+  不能访问其他员工、rustfs、AEP /internal（见 network-policies-cilium.yaml）。
+参照 Agent-Enterprise-Protocol deploy/kubernetes/production/network-policies.yaml，
+按本 chart 的标签（app=...）与实际调用关系改写。
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $main := include "zhiyuan.ns" . }}
+{{- $mem := include "zhiyuan.nsMemory" . }}
+{{- $mon := include "zhiyuan.np.monitoringNs" . }}
+{{- $managedApps := list "de-operator" "de-portal" "de-admin-console" "deerflow-chat-ui" "de-channel-gateway" "de-runtime-image-prepull" "pw-node-agent" "pg-backup" }}
+{{- if .Values.aepStack.enabled }}
+# ============================== aep-system ==============================
+---
+{{ include "zhiyuan.np.defaultDenyIngress" "aep-system" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: postgres-ingress, namespace: aep-system}
+spec:
+  podSelector: {matchLabels: {app: postgres}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [aep-control-service, aep-agent-control]}
+        # 主命名空间：portal、operator（建对话库）、各员工 db-init 与运行时
+        # （仅持本员工 DSN）、pg-backup、channel-gateway。
+        {{- include "zhiyuan.np.fromNamespace" $main | nindent 8 }}
+        {{- range $np.postgresExtraFromNamespaces }}
+        {{- include "zhiyuan.np.fromNamespace" . | nindent 8 }}
+        {{- end }}
+      ports: [{protocol: TCP, port: 5432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: rustfs-ingress, namespace: aep-system}
+spec:
+  podSelector: {matchLabels: {app: rustfs}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [aep-control-service, aep-agent-control]}
+      ports: [{protocol: TCP, port: 9000}]
+---
+# control-service / agent-control / gateway-authorizer 以 NodePort 对集群外
+# 提供服务（30180/30182/30181），入站不限来源。运行时对 control-service
+# 的路径级限制在出站侧（CiliumNetworkPolicy）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: aep-public-endpoints, namespace: aep-system}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app, operator: In, values: [aep-control-service, aep-agent-control]}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: aep-gateway-authorizer-ingress, namespace: aep-system}
+spec:
+  podSelector: {matchLabels: {app: aep-gateway-authorizer}}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8090}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: aep-gateway-reconciler-ingress, namespace: aep-system}
+spec:
+  podSelector: {matchLabels: {app: aep-gateway-reconciler}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" $mon | nindent 8 }}
+      ports: [{protocol: TCP, port: 8091}]
+{{- end }}
+# =========================== 主命名空间 ===========================
+---
+{{ include "zhiyuan.np.defaultDenyIngress" $main }}
+---
+# 面向浏览器/集群外的入口（NodePort）：portal、管理后台、对话前端。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: public-entrypoints, namespace: {{ $main }}}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app, operator: In, values: [de-portal, de-admin-console, deerflow-chat-ui]}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 8090}
+        - {protocol: TCP, port: 5173}
+        - {protocol: TCP, port: 5174}
+        - {protocol: TCP, port: 3000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: de-operator-ingress, namespace: {{ $main }}}
+spec:
+  podSelector: {matchLabels: {app: de-operator}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" $mon | nindent 8 }}
+{{- if .Values.channelGateway.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: de-channel-gateway-ingress, namespace: {{ $main }}}
+spec:
+  podSelector: {matchLabels: {app: de-channel-gateway}}
+  policyTypes: [Ingress]
+  ingress:
+    # 运行时轮询 inbox、operator 下发；网关按每员工 caller credential 鉴权。
+    - from:
+        - podSelector: {}
+      ports: [{protocol: TCP, port: {{ .Values.channelGateway.port }}}]
+{{- end }}
+---
+# 运行时 :8001 只接受 portal、operator（开通运行时账号）、channel-gateway、
+# a2a 适配器与监控抓取；员工之间不能直连。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: de-runtime-ingress, namespace: {{ $main }}}
+spec:
+  podSelector:
+    {{- include "zhiyuan.np.runtimeSelector" . | nindent 4 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: {{ concat (list "de-portal" "de-operator" "de-channel-gateway") $np.runtime.extraIngressApps | toJson }}
+        - podSelector:
+            matchLabels: {digitalemployee.zhiyuan.io/component: a2a}
+        {{- include "zhiyuan.np.fromNamespace" $mon | nindent 8 }}
+      ports: [{protocol: TCP, port: 8001}]
+---
+# a2a 适配器（:8102）可经 NodePort 暴露，也被其他员工/个人工作区调用；
+# 入站不限来源，鉴权在适配器（内部令牌 + aep_chain）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: de-a2a-ingress, namespace: {{ $main }}}
+spec:
+  podSelector:
+    matchLabels: {digitalemployee.zhiyuan.io/component: a2a}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8102}]
+---
+# 运行时出站白名单。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: de-runtime-egress, namespace: {{ $main }}}
+spec:
+  podSelector:
+    {{- include "zhiyuan.np.runtimeSelector" . | nindent 4 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $np.dns.namespace }}}
+          podSelector:
+            matchLabels: {{ toJson $np.dns.podLabels }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    {{- if .Values.aepStack.enabled }}
+    # 对话库（per-employee DSN）与模型 JWT 校验入口。
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: aep-system}
+          podSelector: {matchLabels: {app: postgres}}
+      ports: [{protocol: TCP, port: 5432}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: aep-system}
+          podSelector: {matchLabels: {app: aep-gateway-authorizer}}
+      ports: [{protocol: TCP, port: 8090}]
+    {{- if eq $np.aepInternalGuard "none" }}
+    # aepInternalGuard=none：L4 放行 control-service（含 /internal 路径）。
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: aep-system}
+          podSelector: {matchLabels: {app: aep-control-service}}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
+    {{- end }}
+    # 模型网关（Higress：openai 路由与 Anthropic 透传）。
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $np.higressNamespace }}}
+    {{- if .Values.memory.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $mem }}}
+          podSelector: {matchLabels: {app: openviking}}
+      ports: [{protocol: TCP, port: 1933}]
+    {{- end }}
+    {{- if .Values.weknora.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.weknora.namespace }}}
+    {{- end }}
+    {{- if .Values.channelGateway.enabled }}
+    - to:
+        - podSelector: {matchLabels: {app: de-channel-gateway}}
+      ports: [{protocol: TCP, port: {{ .Values.channelGateway.port }}}]
+    {{- end }}
+    # A2A 委托：只到 a2a 适配器，不到其他员工的运行时。
+    - to:
+        - podSelector:
+            matchLabels: {digitalemployee.zhiyuan.io/component: a2a}
+        {{- if $np.runtime.extraIngressApps }}
+        - podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: {{ toJson $np.runtime.extraIngressApps }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: 8102}]
+    {{- if $np.runtime.allowExternalEgress }}
+    # 集群外地址（Web 工具、邮件、外部 MCP）。排除 Pod/Service 网段，
+    # 防止借 0.0.0.0/0 绕过上面的集群内白名单。
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: {{ toJson $np.clusterCIDRs }}
+      {{- with $np.runtime.externalEgressPorts }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- with $np.runtime.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if $np.openUnmanagedMainNamespacePods }}
+---
+# 过渡规则：主命名空间里不由本 chart 渲染的 Pod（zhiyuanBotUI、pi-companion、
+# 个人工作区等）入站保持全开，直到调用关系盘点完成（openUnmanagedMainNamespacePods=false）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: unmanaged-pods-open-ingress, namespace: {{ $main }}}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app, operator: NotIn, values: {{ toJson $managedApps }}}
+      - {key: digitalemployee.zhiyuan.io/name, operator: DoesNotExist}
+  policyTypes: [Ingress]
+  ingress:
+    - {}
+{{- end }}
+{{- if .Values.memory.enabled }}
+# ============================ 记忆命名空间 ============================
+---
+{{ include "zhiyuan.np.defaultDenyIngress" $mem }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: openviking-ingress, namespace: {{ $mem }}}
+spec:
+  podSelector: {matchLabels: {app: openviking}}
+  policyTypes: [Ingress]
+  ingress:
+    {{- if .Values.workspaceAgent.enabled }}
+    # 个人工作区 microVM 由 hostNetwork 节点代理承载，来源是节点地址，
+    # 标准 NetworkPolicy 无法按 Pod 选择，故放开该端口。
+    - ports: [{protocol: TCP, port: 1933}]
+    {{- else }}
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" $main | nindent 8 }}
+        {{- include "zhiyuan.np.fromNamespace" $mem | nindent 8 }}
+        {{- include "zhiyuan.np.fromNamespace" $mon | nindent 8 }}
+      ports: [{protocol: TCP, port: 1933}]
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: embed-server-ingress, namespace: {{ $mem }}}
+spec:
+  podSelector: {matchLabels: {app: embed-server}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" $mem | nindent 8 }}
+        # Higress 平台 embedding 路由（aep-embed-gateway）。
+        {{- include "zhiyuan.np.fromNamespace" $np.higressNamespace | nindent 8 }}
+      ports: [{protocol: TCP, port: 8080}]
+{{- end }}
+{{- if and .Values.observability.enabled $np.observability }}
+{{- $obs := .Values.observability }}
+# ============================ 观测命名空间 ============================
+---
+{{ include "zhiyuan.np.defaultDenyIngress" $obs.monitoringNamespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: monitoring-intra-namespace, namespace: {{ $obs.monitoringNamespace }}}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: grafana-ingress, namespace: {{ $obs.monitoringNamespace }}}
+spec:
+  podSelector: {matchLabels: {app: grafana}}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 3000}]
+{{- if $obs.logging.enabled }}
+---
+{{ include "zhiyuan.np.defaultDenyIngress" $obs.loggingNamespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: elasticsearch-ingress, namespace: {{ $obs.loggingNamespace }}}
+spec:
+  podSelector: {matchLabels: {app: elasticsearch}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" $obs.loggingNamespace | nindent 8 }}
+        {{- include "zhiyuan.np.fromNamespace" $obs.monitoringNamespace | nindent 8 }}
+      ports: [{protocol: TCP, port: 9200}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: kibana-ingress, namespace: {{ $obs.loggingNamespace }}}
+spec:
+  podSelector: {matchLabels: {app: kibana}}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 5601}]
+{{- end }}
+{{- end }}
+{{- if and .Values.weknora.enabled $np.weknora }}
+# ============================ WeKnora（可选） ============================
+---
+{{ include "zhiyuan.np.defaultDenyIngress" .Values.weknora.namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: weknora-allowed-callers, namespace: {{ .Values.weknora.namespace }}}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "zhiyuan.np.fromNamespace" .Values.weknora.namespace | nindent 8 }}
+        {{- include "zhiyuan.np.fromNamespace" $main | nindent 8 }}
+        {{- include "zhiyuan.np.fromNamespace" $np.higressNamespace | nindent 8 }}
+{{- end }}
+{{- end }}
