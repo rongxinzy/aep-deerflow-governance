@@ -150,13 +150,13 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		for rows.Next() {
 			var id string
 			if err = rows.Scan(&id); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 			ids = append(ids, id)
 		}
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -246,7 +246,7 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO shared_space_runtime_bindings(id,space_id,task_id,workspace_name,workspace_uid,owner_id,companion,source_conversation_id,generation,execution_id,expected_version,bind_hash,assignment_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash)
 		if err != nil {
 			return err
@@ -440,7 +440,7 @@ func (p *portal) processSharedRuntime(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if action == "start" {
 		t, _ := receipt["task"].(map[string]any)
 		taskID, _ := t["id"].(string)

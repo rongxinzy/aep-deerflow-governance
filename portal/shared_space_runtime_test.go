@@ -69,7 +69,7 @@ func TestSharedRuntimeLoadAndCommandGate(t *testing.T) {
 	require.ErrorIs(t, err, sql.ErrNoRows)
 	conn, err := h.db.Conn(t.Context())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for _, blocked := range []bool{false, true} {
 		h.dbmock.ExpectQuery("SELECT EXISTS").WithArgs("space", "task").WillReturnRows(sqlmock.NewRows([]string{"blocked"}).AddRow(blocked))
 		err = runtimeCommandGate(t.Context(), conn, "space", "task")
