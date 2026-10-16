@@ -55,7 +55,9 @@ type config struct {
 	aepDeploymentID string
 	chatUIURL       string
 
-	dbURL string
+	dbURL            string
+	paperclipBaseURL string
+	paperclipToken   string
 
 	// Hibernation: how long handleChat waits for a scaled-to-zero employee
 	// to come back before giving up (the browser shows "waking up").
@@ -79,11 +81,13 @@ type managedKnowledgeConfig struct {
 
 func loadConfig() config {
 	return config{
-		addr:       env("PORTAL_ADDR", ":8090"),
-		aepBaseURL: strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
-		policyMode: env("PORTAL_POLICY_MODE", "approval"),
-		adminUsers: set(env("PORTAL_ADMIN_USERS", "")),
-		adminRoles: set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
+		paperclipBaseURL: strings.TrimRight(env("PORTAL_PAPERCLIP_BASE_URL", ""), "/"),
+		paperclipToken:   env("PORTAL_PAPERCLIP_TOKEN", ""),
+		addr:             env("PORTAL_ADDR", ":8090"),
+		aepBaseURL:       strings.TrimRight(env("PORTAL_AEP_BASE_URL", "http://aep-control-service.aep-system.svc:8080"), "/"),
+		policyMode:       env("PORTAL_POLICY_MODE", "approval"),
+		adminUsers:       set(env("PORTAL_ADMIN_USERS", "")),
+		adminRoles:       set(env("PORTAL_ADMIN_ROLES", "admin,platform-admin")),
 		// 0 is a meaningful value here (unlimited), which envInt rejects as
 		// unset — use the non-negative parser.
 		quotaPerUser: envIntNonNegative("PORTAL_QUOTA_PER_USER", 2),
@@ -191,7 +195,7 @@ func main() {
 }
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(collaborationSchema + `
+	_, err := db.Exec(sharedSpaceSchema + collaborationSchema + `
 CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	employee_name TEXT NOT NULL,
