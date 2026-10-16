@@ -19,9 +19,13 @@ Configuration:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import time
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,51 @@ logger = logging.getLogger("channel-gateway")
 
 INBOX_LEASE_SECONDS = 60
 POLL_WAIT_SECONDS = 20
+RECONCILE_INTERVAL_SECONDS = 15
+# Start attempts for one leg back off exponentially from here (capped), so a
+# wrong secret or a flapping platform endpoint is retried without busy polling.
+RETRY_BASE_SECONDS = 15
+RETRY_MAX_SECONDS = 300
+
+# Every bot_secret that enters this process, so no log record can carry one:
+# our own lines never interpolate a config, but a failing channel may put the
+# secret into its exception text. Values shorter than 4 characters cannot be
+# real credentials, and redacting them would mangle unrelated log text.
+_SECRETS: set[str] = set()
+
+
+def _register_secret(config: dict[str, Any]) -> None:
+    secret = config.get("bot_secret")
+    if isinstance(secret, str) and len(secret) >= 4:
+        _SECRETS.add(secret)
+
+
+def _redact(text: str) -> str:
+    for secret in _SECRETS:
+        text = text.replace(secret, "***")
+    return text
+
+
+class _SecretScrubFilter(logging.Filter):
+    """Last line of defence: a bot_secret must never reach a log handler."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not _SECRETS:
+            return True
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message += "\n" + "".join(traceback.format_exception(*record.exc_info))
+                record.exc_info = None
+                record.exc_text = None
+            record.msg = _redact(message)
+            record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+logger.addFilter(_SecretScrubFilter())
 
 app = FastAPI(title="de-channel-gateway")
 
@@ -135,6 +184,26 @@ class GatewayLeg:
 
 pool: asyncpg.Pool | None = None
 legs: dict[str, GatewayLeg] = {}
+
+
+@dataclass
+class LegState:
+    """Desired vs. observed state of one employee's leg, kept across reconciles.
+
+    ``fingerprint`` digests the connect-relevant config the *running* leg was
+    built from (a digest, so it is safe to log or compare). ``pending_reason``
+    says why the currently desired config is not being served — a failed start,
+    or a file entry missing its credentials — and ``attempts``/``next_attempt_at``
+    drive the retry backoff that gets it serving once the file is fixed.
+    """
+
+    fingerprint: str | None = None
+    pending_reason: str | None = None
+    attempts: int = 0
+    next_attempt_at: float = 0.0
+
+
+leg_states: dict[str, LegState] = {}
 connections_file = os.getenv("CONNECTIONS_FILE", "/etc/channel-gateway/connections.json")
 
 
@@ -164,43 +233,138 @@ def load_connections() -> dict[str, dict[str, Any]]:
     return {name: cfg for name, cfg in data.items() if isinstance(cfg, dict) and cfg.get("provider") == "wecom"}
 
 
+# Only these fields drive the websocket leg; anything else in the Secret is
+# ignored, so editing an unrelated key must not force a reconnect.
+LEG_CONFIG_KEYS = ("bot_id", "bot_secret", "working_message")
+MISSING_CREDENTIALS = "connections entry lacks bot_id/bot_secret"
+
+
+def _leg_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The connect-relevant subset of a connections entry, or None if unusable."""
+    bot_id, bot_secret = cfg.get("bot_id"), cfg.get("bot_secret")
+    if not bot_id or not bot_secret:
+        return None
+    return {"bot_id": bot_id, "bot_secret": bot_secret, "working_message": cfg.get("working_message")}
+
+
+def _fingerprint(config: dict[str, Any]) -> str:
+    """Stable digest of a connect-relevant config (the secret never leaves it)."""
+    payload = json.dumps([config.get(key) for key in LEG_CONFIG_KEYS], ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _retry_delay(attempts: int) -> float:
+    """Exponential backoff between failed start attempts (the exponent is capped
+    because the delay itself is capped, and a leg may fail for days)."""
+    return float(min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 8)))
+
+
+async def _stop_leg(name: str) -> None:
+    """Tear one leg down; a failing stop must not abort the whole reconcile."""
+    leg = legs.pop(name, None)
+    if leg is None:
+        return
+    try:
+        await leg.stop()
+    except Exception:
+        logger.exception("leg %s failed to stop cleanly", name)
+
+
+async def _swap_leg(name: str, config: dict[str, Any], fingerprint: str, state: LegState) -> None:
+    """Bring one leg to the desired config: stop the old connection, start the new one.
+
+    The old leg is stopped before the new one starts, so an employee never has
+    two long connections consuming its messages. If the new connection fails,
+    the leg stays down (the old config is not a usable path once it changed)
+    and the backoff in ``state`` makes the watcher retry it.
+    """
+    assert pool is not None
+    if name in legs:
+        logger.info("leg %s config changed; reconnecting", name)
+        await _stop_leg(name)
+    _register_secret(config)
+    now = time.monotonic()
+    leg: GatewayLeg | None = None
+    try:
+        leg = GatewayLeg(name, config, pool)
+        await leg.start()
+    except Exception as exc:
+        if leg is not None:
+            try:
+                await leg.stop()
+            except Exception:
+                logger.exception("leg %s failed to clean up after a failed start", name)
+        state.attempts += 1
+        state.pending_reason = _redact(f"{type(exc).__name__}: {exc}")
+        delay = _retry_delay(state.attempts)
+        state.next_attempt_at = now + delay
+        logger.exception("leg %s failed to start (attempt %d); retrying in %.0fs", name, state.attempts, delay)
+        return
+    legs[name] = leg
+    state.pending_reason = None
+    state.attempts = 0
+    state.next_attempt_at = 0.0
+    logger.info("leg %s connected (config %s)", name, fingerprint[:12])
+
+
 async def reconcile_legs() -> None:
-    """Match running legs to the connections file (hot reload)."""
+    """Match running legs to the connections file (hot reload).
+
+    A leg whose connect-relevant config changed is replaced; a leg whose
+    desired config is not serving (failed start, missing credentials) is
+    retried with a backoff, so fixing the file, or the platform coming back,
+    heals the leg without waiting for another file change.
+    """
     assert pool is not None
     desired = load_connections()
     for name in list(legs):
         if name not in desired:
             logger.info("stopping leg %s (removed from connections)", name)
-            await legs.pop(name).stop()
+            await _stop_leg(name)
+    for name in list(leg_states):
+        if name not in desired:
+            leg_states.pop(name)
+
     for name, cfg in desired.items():
-        if name in legs:
+        state = leg_states.setdefault(name, LegState())
+        config = _leg_config(cfg)
+        if config is None:
+            # Leave any running leg alone: a truncated or half-written Secret
+            # must not take a working connection down.
+            if state.pending_reason != MISSING_CREDENTIALS:
+                logger.warning("leg %s lacks bot_id/bot_secret; skipped", name)
+                state.pending_reason = MISSING_CREDENTIALS
             continue
-        bot_id, bot_secret = cfg.get("bot_id"), cfg.get("bot_secret")
-        if not bot_id or not bot_secret:
-            logger.warning("leg %s lacks bot_id/bot_secret; skipped", name)
+        fingerprint = _fingerprint(config)
+        if name in legs and state.fingerprint == fingerprint:
+            state.pending_reason = None
             continue
-        leg = GatewayLeg(name, {"bot_id": bot_id, "bot_secret": bot_secret, "working_message": cfg.get("working_message")}, pool)
-        try:
-            await leg.start()
-            legs[name] = leg
-            logger.info("leg %s connected", name)
-        except Exception:
-            logger.exception("leg %s failed to start", name)
+        if state.fingerprint != fingerprint:
+            # First sight, or the config changed: replace, with a fresh budget.
+            state.fingerprint = fingerprint
+            state.pending_reason = None
+            state.attempts = 0
+            state.next_attempt_at = 0.0
+        elif time.monotonic() < state.next_attempt_at:
+            continue
+        await _swap_leg(name, config, fingerprint, state)
 
 
 async def config_watcher() -> None:
-    last_mtime: float | None = None
+    """Reconcile on a fixed cadence rather than only on a file mtime change.
+
+    An mtime-only trigger could never retry a leg whose start failed while the
+    file stayed put; ``reconcile_legs`` is cheap and a no-op when nothing is
+    desired, changed or due for a retry.
+    """
     while True:
         try:
-            mtime = Path(connections_file).stat().st_mtime if Path(connections_file).exists() else None
-            if mtime != last_mtime:
-                last_mtime = mtime
-                await reconcile_legs()
+            await reconcile_legs()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("config watcher iteration failed")
-        await asyncio.sleep(15)
+        await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
