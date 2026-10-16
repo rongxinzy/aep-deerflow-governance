@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -346,3 +348,271 @@ async def test_startup_requires_db_url(runtime_stubs, monkeypatch):
     monkeypatch.setattr(gateway.asyncpg, "create_pool", lambda *a, **k: BrokenPool())
     with pytest.raises(RuntimeError):
         await gateway.startup()
+
+
+# -- hot reload -----------------------------------------------------------------
+
+
+def _write_connections(path: Path, connections: dict) -> None:
+    path.write_text(json.dumps(connections), encoding="utf-8")
+
+
+def _wecom_leg(secret: str, **extra) -> dict:
+    return {"provider": "wecom", "bot_id": "bot-1", "bot_secret": secret, **extra}
+
+
+@pytest.fixture()
+def channel_factory(runtime_stubs, monkeypatch):
+    """Recording, fault-injectable WeComChannel stand-in.
+
+    ``events`` is one ordered log of every start/stop across legs, so a test can
+    prove the old connection is stopped before the new one starts. ``plan`` is
+    consumed by ``start()``: an exception there fails that attempt, anything else
+    (or an exhausted plan) succeeds. ``fail_stops`` holds the leg indexes whose
+    ``stop()`` raises.
+    """
+    import app.channels.wecom as wecom
+
+    events: list[str] = []
+    created: list[Any] = []
+    plan: list = []
+    fail_stops: set[int] = set()
+
+    class Channel(FakeChannel):
+        def __init__(self, bus, config):
+            super().__init__(bus, config)
+            self.index = len(created)
+            created.append(self)
+
+        async def start(self):
+            outcome = plan.pop(0) if plan else None
+            if outcome is not None:
+                events.append(f"start-failed:{self.index}")
+                raise outcome
+            await super().start()
+            events.append(f"start:{self.index}")
+
+        async def stop(self):
+            events.append(f"stop:{self.index}")
+            if self.index in fail_stops:
+                raise RuntimeError(f"stop {self.index} failed")
+            await super().stop()
+
+    monkeypatch.setattr(wecom, "WeComChannel", Channel)
+    return types.SimpleNamespace(events=events, created=created, plan=plan, fail_stops=fail_stops)
+
+
+def _leg_fixture(gateway, monkeypatch, tmp_path, connections: dict):
+    """Point the gateway at a fresh connections file and empty leg bookkeeping."""
+    cfg = tmp_path / "connections.json"
+    _write_connections(cfg, connections)
+    monkeypatch.setattr(gateway, "connections_file", str(cfg))
+    monkeypatch.setattr(gateway, "pool", FakePool())
+    monkeypatch.setattr(gateway, "legs", {})
+    monkeypatch.setattr(gateway, "leg_states", {})
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reconnects_when_credentials_change(runtime_stubs, channel_factory, tmp_path, monkeypatch):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-old-0001")})
+
+    await gateway.reconcile_legs()
+    first = gateway.legs["a"]
+    assert channel_factory.events == ["start:0"]
+
+    # Same connect-relevant config: the live connection must be left alone.
+    _write_connections(cfg, {"a": _wecom_leg("sec-old-0001")})
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is first
+    assert channel_factory.events == ["start:0"], "an unchanged config must not reconnect"
+
+    # Rotated secret: one controlled replacement, old stopped before new starts.
+    _write_connections(cfg, {"a": _wecom_leg("sec-new-0002")})
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is not first
+    assert first.channel.is_running is False, "the replaced leg must be stopped"
+    assert gateway.legs["a"].channel.config["bot_secret"] == "sec-new-0002"
+    assert channel_factory.events == ["start:0", "stop:0", "start:1"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_is_idempotent_and_ignores_unrelated_keys(runtime_stubs, channel_factory, tmp_path, monkeypatch):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-00000001")})
+
+    await gateway.reconcile_legs()
+    first = gateway.legs["a"]
+    for _ in range(3):
+        await gateway.reconcile_legs()
+    assert gateway.legs["a"] is first
+    assert channel_factory.events == ["start:0"], "repeated reconciles must be no-ops"
+
+    # A key that does not drive the connection is not connect-relevant.
+    _write_connections(cfg, {"a": _wecom_leg("sec-00000001", note="added by hand")})
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is first
+
+    # working_message *is* part of the connection config, so it triggers a reload.
+    _write_connections(cfg, {"a": _wecom_leg("sec-00000001", working_message="On it")})
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is not first
+    assert channel_factory.events == ["start:0", "stop:0", "start:1"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_retries_a_failed_start_with_backoff(runtime_stubs, channel_factory, tmp_path, monkeypatch, caplog):
+    gateway = runtime_stubs
+    secret = "sec-failure-1"
+    _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg(secret)})
+    caplog.set_level(logging.INFO, logger="channel-gateway")
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(gateway, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    channel_factory.plan.append(RuntimeError(f"credentials rejected: {secret}"))
+    await gateway.reconcile_legs()
+
+    assert gateway.legs == {}
+    state = gateway.leg_states["a"]
+    assert state.attempts == 1
+    assert state.next_attempt_at == 1000.0 + gateway.RETRY_BASE_SECONDS
+    assert state.pending_reason and secret not in state.pending_reason
+    assert secret not in caplog.text, "a bot_secret must never reach the log"
+    assert "***" in caplog.text, "the failing channel's secret must be redacted"
+
+    # Inside the backoff window the leg is not retried...
+    clock["now"] += gateway.RETRY_BASE_SECONDS / 2
+    await gateway.reconcile_legs()
+    assert len(channel_factory.created) == 1, "a failed leg must not be retried before its backoff elapses"
+
+    # ...and once it elapses the retry succeeds although the file never changed.
+    clock["now"] += gateway.RETRY_BASE_SECONDS
+    await gateway.reconcile_legs()
+    assert list(gateway.legs) == ["a"]
+    assert channel_factory.events == ["start-failed:0", "stop:0", "start:1"]
+    assert state.pending_reason is None and state.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_replacement_backs_off_then_heals(runtime_stubs, channel_factory, tmp_path, monkeypatch):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-old-0001")})
+    clock = {"now": 500.0}
+    monkeypatch.setattr(gateway, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    await gateway.reconcile_legs()
+    first = gateway.legs["a"]
+
+    # The rotated credential is rejected: the old connection is already gone.
+    channel_factory.plan.append(RuntimeError("rotated secret rejected"))
+    channel_factory.fail_stops.add(1)  # the half-started leg must still be cleaned up
+    clock["now"] += 1
+    _write_connections(cfg, {"a": _wecom_leg("sec-new-0002")})
+    await gateway.reconcile_legs()
+
+    assert "a" not in gateway.legs
+    assert first.channel.is_running is False
+    assert channel_factory.events == ["start:0", "stop:0", "start-failed:1", "stop:1"]
+    state = gateway.leg_states["a"]
+    assert state.attempts == 1 and state.pending_reason
+
+    # Backoff holds the leg down...
+    clock["now"] += 1
+    await gateway.reconcile_legs()
+    assert len(channel_factory.created) == 2
+
+    # ...then the retry of the unchanged file brings it back.
+    clock["now"] += gateway.RETRY_BASE_SECONDS * 2
+    await gateway.reconcile_legs()
+    assert list(gateway.legs) == ["a"]
+    assert gateway.legs["a"].channel.config["bot_secret"] == "sec-new-0002"
+    assert state.attempts == 0 and state.pending_reason is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stops_and_forgets_a_removed_leg(runtime_stubs, channel_factory, tmp_path, monkeypatch):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-00000001"), "b": _wecom_leg("sec-00000002")})
+    channel_factory.fail_stops.add(1)  # a stop that raises must not abort the reconcile
+
+    await gateway.reconcile_legs()
+    assert list(gateway.legs) == ["a", "b"]
+
+    _write_connections(cfg, {})
+    await gateway.reconcile_legs()
+    assert gateway.legs == {}
+    assert gateway.leg_states == {}
+    assert channel_factory.events == ["start:0", "start:1", "stop:0", "stop:1"]
+
+    # Nothing left to do on a second pass.
+    await gateway.reconcile_legs()
+    assert channel_factory.events == ["start:0", "start:1", "stop:0", "stop:1"]
+
+
+@pytest.mark.asyncio
+async def test_missing_credentials_keep_the_running_leg(runtime_stubs, channel_factory, tmp_path, monkeypatch, caplog):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-00000001")})
+    caplog.set_level(logging.INFO, logger="channel-gateway")
+
+    await gateway.reconcile_legs()
+    first = gateway.legs["a"]
+
+    # A half-written Secret must not take a working connection down.
+    _write_connections(cfg, {"a": {"provider": "wecom", "bot_id": "bot-1"}})
+    await gateway.reconcile_legs()
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is first
+    assert gateway.leg_states["a"].pending_reason == gateway.MISSING_CREDENTIALS
+    assert caplog.text.count("lacks bot_id/bot_secret") == 1, "the warning must not repeat every reconcile"
+
+    # The credentials come back unchanged: the running leg is kept as is.
+    _write_connections(cfg, {"a": _wecom_leg("sec-00000001")})
+    await gateway.reconcile_legs()
+    assert gateway.legs["a"] is first
+    assert gateway.leg_states["a"].pending_reason is None
+
+
+@pytest.mark.asyncio
+async def test_config_watcher_retries_a_failed_leg_without_a_file_change(
+    runtime_stubs, channel_factory, tmp_path, monkeypatch
+):
+    gateway = runtime_stubs
+    _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-00000001")})
+    monkeypatch.setattr(gateway, "RETRY_BASE_SECONDS", 0)
+    channel_factory.plan.append(RuntimeError("platform refused the first attempt"))
+
+    ticks = {"n": 0}
+
+    async def fast_sleep(seconds):
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(gateway.asyncio, "sleep", fast_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.config_watcher()
+    assert list(gateway.legs) == ["a"], "the watcher must retry a failed leg even though the file never changed"
+    assert channel_factory.events == ["start-failed:0", "stop:0", "start:1"]
+
+
+@pytest.mark.asyncio
+async def test_config_watcher_survives_a_half_written_file(runtime_stubs, channel_factory, tmp_path, monkeypatch, caplog):
+    gateway = runtime_stubs
+    cfg = _leg_fixture(gateway, monkeypatch, tmp_path, {"a": _wecom_leg("sec-00000001")})
+    caplog.set_level(logging.INFO, logger="channel-gateway")
+    await gateway.reconcile_legs()
+    first = gateway.legs["a"]
+
+    # A Secret being rewritten can be caught mid-write.
+    cfg.write_text('{"a": {"provider": "wecom", "bot_', encoding="utf-8")
+
+    async def fast_sleep(seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(gateway.asyncio, "sleep", fast_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.config_watcher()
+    assert gateway.legs["a"] is first, "a torn read must not tear a running leg down"
+    assert "config watcher iteration failed" in caplog.text
