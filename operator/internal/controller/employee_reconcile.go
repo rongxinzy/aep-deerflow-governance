@@ -324,7 +324,9 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 	// Knowledge-base whitelist: an explicit policy (Bases non-nil, even
 	// empty) is rendered into the governance middleware, which denies
 	// knowledge_search calls outside the list ({} denies every search).
-	// A nil Bases keeps the legacy unrestricted bridge credential.
+	// A nil Bases renders no policy kwarg: the middleware treats that as a
+	// configuration error and default-denies every knowledge tool —
+	// migration, inventory and rollback: docs/design/knowledge-whitelist-default-deny.md.
 	if spec.Knowledge != nil && spec.Knowledge.Bases != nil {
 		kwargs := config["extensions"].(map[string]any)["middlewares"].([]any)[0].(map[string]any)["kwargs"].(map[string]any)
 		bases := map[string]any{}
