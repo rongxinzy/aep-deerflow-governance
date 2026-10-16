@@ -23,3 +23,15 @@ func TestRenderWechatChannelGateWithoutCredentials(t *testing.T) {
 	require.NotContains(t, channels, "feishu")
 	require.NotContains(t, result, "bot_token")
 }
+
+func TestResidentChannelsBlockHibernationEvenWithGatewayURL(t *testing.T) {
+	for _, gateway := range []string{"", "http://channel-gateway.test"} {
+		r := &DigitalEmployeeReconciler{ChannelGatewayURL: gateway}
+		for _, channels := range []*dev1alpha1.ChannelsSpec{{Wecom: true}, {Feishu: true}, {Wechat: true}} {
+			employee := &dev1alpha1.DigitalEmployee{}
+			employee.Spec.Channels = channels
+			require.True(t, r.hibernationBlockedByChannel(employee), "a URL is not evidence of a working external consumer: %+v", channels)
+		}
+		require.False(t, r.hibernationBlockedByChannel(&dev1alpha1.DigitalEmployee{}))
+	}
+}

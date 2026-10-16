@@ -120,3 +120,9 @@ GOV_SERVICE_PASSWORD / GOV_DEFAULT_AEP_USER_ID
 **[rongxinzy/zhiyuan-docs](https://github.com/rongxinzy/zhiyuan-docs)** —— 部署细节以其中
 [07-deployment/k3s-bringup.md](https://github.com/rongxinzy/zhiyuan-docs/blob/main/07-deployment/k3s-bringup.md)
 为准；本仓 DEVELOPMENT.md 保留为运维快查。
+
+## 内置渠道管理
+
+企业管理台通过 Portal 管理数字员工的飞书、企业微信与微信接入。启用前须关闭该员工休眠；API 会拒绝冲突请求，不自动更改员工的常驻策略。
+
+Operator 对三种内置渠道统一禁止缩零，即使设置了 channel-gateway URL 也不放行：仅配置地址不能证明外部消费链路已可用。历史 Error 员工在运行时可达时可以从管理台停用渠道恢复；运行时清理失败会报错并保留开关，不宣称停用成功。

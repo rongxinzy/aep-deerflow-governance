@@ -123,12 +123,13 @@ func (p *portal) handleEmployeeChannels(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	items := make([]employeeChannel, 0, len(channelProviders))
+	hibernating := employee.Spec.Hibernation != nil && employee.Spec.Hibernation.Enabled != nil && *employee.Spec.Hibernation.Enabled
 	for _, provider := range channelProviders {
 		items = append(items, employeeChannel{Provider: provider, Enabled: channelEnabled(employee.Spec.Channels, provider), WorkerState: "unknown", Values: map[string]string{}})
 	}
 	// A config read must not wake the employee or invent a platform status.
 	if employee.Status.Phase != dev1alpha1.PhaseReady {
-		writeJSON(w, 200, map[string]any{"employee": employee.Name, "phase": employee.Status.Phase, "providers": items, "runtimeAvailable": false})
+		writeJSON(w, 200, map[string]any{"employee": employee.Name, "phase": employee.Status.Phase, "providers": items, "runtimeAvailable": false, "hibernationEnabled": hibernating})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -186,7 +187,7 @@ func (p *portal) handleEmployeeChannels(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"employee": employee.Name, "phase": employee.Status.Phase, "providers": items, "runtimeAvailable": available, "checkedAt": time.Now().UTC()})
+	writeJSON(w, 200, map[string]any{"employee": employee.Name, "phase": employee.Status.Phase, "providers": items, "runtimeAvailable": available, "hibernationEnabled": hibernating, "checkedAt": time.Now().UTC()})
 }
 
 // Wake uses the existing activity/KEDA path without changing deployment settings.
@@ -221,9 +222,15 @@ func (p *portal) handleActivateEmployeeChannel(w http.ResponseWriter, r *http.Re
 		return
 	}
 	provider := r.PathValue("provider")
+	if *input.Enabled && employee.Spec.Hibernation != nil && employee.Spec.Hibernation.Enabled != nil && *employee.Spec.Hibernation.Enabled {
+		p.managedWriteError(w, 409, "CHANNEL_HIBERNATION_CONFLICT", "内置渠道需要数字员工常驻，请先关闭此员工的休眠配置再启用接入", "")
+		return
+	}
 	// Stop/remove the independent runtime-store entry before clearing the CR.
 	if !*input.Enabled {
-		if employee.Status.Phase != dev1alpha1.PhaseReady {
+		// An incompatible historic spec may already be in Error while its
+		// runtime remains reachable. Allow removal so the UI can recover it.
+		if employee.Status.Phase != dev1alpha1.PhaseReady && employee.Status.Phase != dev1alpha1.PhaseError {
 			p.managedWriteError(w, 409, "CHANNEL_RUNTIME_NOT_READY", "请先唤醒数字员工并等待就绪，再停用渠道", "")
 			return
 		}

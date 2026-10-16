@@ -68,12 +68,15 @@ func TestChannelReadDoesNotInventHealth(t *testing.T) {
 			p := channelPortal(t, func(w http.ResponseWriter, _ *http.Request) { calls++; w.WriteHeader(503) })
 			var employee dev1alpha1.DigitalEmployee
 			require.NoError(t, p.k8s.Get(t.Context(), client.ObjectKey{Namespace: p.cfg.namespace, Name: "hr-bot"}, &employee))
+			employee.Spec.Hibernation = &dev1alpha1.HibernationSpec{Enabled: new(true)}
+			require.NoError(t, p.k8s.Update(t.Context(), &employee))
 			employee.Status.Phase = phase
 			require.NoError(t, p.k8s.Status().Update(t.Context(), &employee))
 			w := httptest.NewRecorder()
 			p.handleEmployeeChannels(w, channelRequest("GET", "", "", ""), identity{UserID: "admin-user"})
 			require.Equal(t, 200, w.Code)
 			require.Contains(t, w.Body.String(), `"runtimeAvailable":false`)
+			require.Contains(t, w.Body.String(), `"hibernationEnabled":true`)
 			require.NotContains(t, w.Body.String(), `"workerState":"running"`)
 			if phase == dev1alpha1.PhaseSleeping {
 				require.Zero(t, calls)
@@ -142,6 +145,49 @@ func TestChannelActivationPreservesOtherProviders(t *testing.T) {
 	w = httptest.NewRecorder()
 	p.handleActivateEmployeeChannel(w, channelRequest("PUT", "wechat", "", `{"enabled":true}`), identity{UserID: "admin-user"})
 	require.Equal(t, 202, w.Code)
+}
+
+func TestChannelActivationRejectsHibernationBeforeMutatingEmployee(t *testing.T) {
+	for _, provider := range channelProviders {
+		t.Run(provider, func(t *testing.T) {
+			p := channelPortal(t, func(_ http.ResponseWriter, _ *http.Request) { t.Error("activation must not call runtime") })
+			var employee dev1alpha1.DigitalEmployee
+			key := client.ObjectKey{Namespace: p.cfg.namespace, Name: "hr-bot"}
+			require.NoError(t, p.k8s.Get(t.Context(), key, &employee))
+			employee.Spec.Channels = nil
+			employee.Spec.Hibernation = &dev1alpha1.HibernationSpec{Enabled: new(true)}
+			require.NoError(t, p.k8s.Update(t.Context(), &employee))
+			w := httptest.NewRecorder()
+			p.handleActivateEmployeeChannel(w, channelRequest("PUT", provider, "", `{"enabled":true}`), identity{UserID: "admin-user"})
+			require.Equal(t, 409, w.Code, w.Body.String())
+			require.Contains(t, w.Body.String(), "CHANNEL_HIBERNATION_CONFLICT")
+			require.NoError(t, p.k8s.Get(t.Context(), key, &employee))
+			require.Nil(t, employee.Spec.Channels)
+			require.True(t, *employee.Spec.Hibernation.Enabled, "activation must not silently increase resource residency")
+		})
+	}
+}
+
+func TestChannelDisableRecoversErrorEmployeeWithoutChangingHibernation(t *testing.T) {
+	p := channelPortal(t, func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "DELETE", r.Method)
+		require.Equal(t, "/api/channels/wecom/runtime-config", r.URL.Path)
+		writeJSON(w, 200, map[string]bool{"enabled": false})
+	})
+	var employee dev1alpha1.DigitalEmployee
+	key := client.ObjectKey{Namespace: p.cfg.namespace, Name: "hr-bot"}
+	require.NoError(t, p.k8s.Get(t.Context(), key, &employee))
+	employee.Spec.Hibernation = &dev1alpha1.HibernationSpec{Enabled: new(true)}
+	require.NoError(t, p.k8s.Update(t.Context(), &employee))
+	employee.Status.Phase = dev1alpha1.PhaseError
+	require.NoError(t, p.k8s.Status().Update(t.Context(), &employee))
+	w := httptest.NewRecorder()
+	p.handleActivateEmployeeChannel(w, channelRequest("PUT", "wecom", "", `{"enabled":false}`), identity{UserID: "admin-user"})
+	require.Equal(t, 202, w.Code, w.Body.String())
+	require.NoError(t, p.k8s.Get(t.Context(), key, &employee))
+	require.False(t, employee.Spec.Channels.Wecom)
+	require.True(t, employee.Spec.Channels.Feishu)
+	require.True(t, *employee.Spec.Hibernation.Enabled)
 }
 
 func TestChannelDisableFailureKeepsGate(t *testing.T) {
