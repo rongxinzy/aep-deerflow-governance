@@ -465,3 +465,29 @@ resourceBoundaries:
       limits.memory: 96Gi
       persistentvolumeclaims: "60"
 
+# PostgreSQL 逻辑备份（pg_dumpall，覆盖 AEP、portal 与全部 de_* 对话库）
+# 上传到集群外 S3 兼容存储。s3.bucket 为空时不渲染（没有异地目标就不假装
+# 有备份）。恢复步骤见 chart README「PostgreSQL 备份与恢复」。
+backup:
+  postgres:
+    enabled: true
+    schedule: "23 2 * * *"
+    # 超过该天数的备份对象在本次上传成功后删除。
+    retentionDays: 14
+    # 连接串来源（主命名空间内 Secret；需要可连维护库的管理员 DSN）。
+    sourceSecret: {name: de-platform-creds, key: CONVERSATION_ADMIN_DB_URL}
+    s3:
+      endpoint: ""          # 例：https://s3.example.com（不要指向本集群 rustfs）
+      region: us-east-1
+      bucket: ""
+      prefix: zhiyuan/postgres
+      provider: Other       # rclone S3 provider：AWS / Minio / Ceph / Other …
+      forcePathStyle: true
+      # 凭据只通过已有 Secret 引用（主命名空间），不在 values 中写明文。
+      credentialsSecret: {name: pg-backup-s3, accessKeyIdKey: AWS_ACCESS_KEY_ID, secretAccessKeyKey: AWS_SECRET_ACCESS_KEY}
+    dumpImage: {repository: postgres, tag: "17.6-alpine"}
+    uploadImage: {repository: "harbor.zhiyuan.local:30443/zhiyuan/rclone/rclone", tag: "1.71.1"}
+    scratchSize: 10Gi
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 1Gi}

@@ -1,3 +1,7 @@
+# SUPERSEDED: the zhiyuan-stack chart now ships an off-cluster backup
+# (backup.postgres.*, templates/pg-backup.yaml). Keep this manifest only
+# until the chart CronJob has a verified S3 target and one restore drill.
+#
 # Nightly logical backup of the shared postgres instance (AEP + portal +
 # per-DE conversation databases). Born from the scale-round WAL incident:
 # local-path single-replica postgres loses its checkpoint record on a dirty
