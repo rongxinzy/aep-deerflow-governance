@@ -48,6 +48,11 @@ fail-closed；受管工具（`governed_tools`）调用范围外部门**不执行
 后者仍须由 AEP 的账号状态及授权契约补齐。知识库白名单不在本次范围内，
 其默认语义由单独的改动定义，不要因为本次修复把它当作已授权的安全配置。
 
+依赖面盘点与残留路径（C1）：谁还依赖「解析失败→回退实例默认用户」、哪条路径可以
+安全收口、记忆链（deer-flow）的跨仓待办与验收口径，见
+[docs/identity-fail-closed-inventory.md](docs/identity-fail-closed-inventory.md)；
+契约回归 `tests/test_identity_fail_closed.py`。
+
 ## 配置（config.yaml）
 
 Portal 创建或更新员工时从 AEP 认证方式目录校验 deployment ID/名称；部门名称来自已校验
