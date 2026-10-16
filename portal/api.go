@@ -95,6 +95,10 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.adminOnly(p.handleMemoryStatus)))
+	// Memory test box: an administrator diagnostic over one employee's own
+	// OpenViking key, annotated with the scope it ran in and the runtime
+	// recall filters it skips. It is not a requester-scoped recall, so the
+	// gate stays adminOnly and no user key is ever borrowed.
 	mux.HandleFunc("POST /api/v1/memory/search", p.auth(p.adminOnly(p.handleMemorySearch)))
 	mux.HandleFunc("GET /api/v1/knowledge/status", p.auth(p.adminOnly(p.handleKnowledgeStatus)))
 	mux.HandleFunc("/api/v1/knowledge/proxy/{rest...}", p.auth(p.handleKnowledgeProxy))

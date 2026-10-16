@@ -142,9 +142,116 @@ func (p *portal) openvikingSessionStats(ctx context.Context, userKey string) map
 	return map[string]any{"sessions": len(payload.Sessions), "lastActive": last}
 }
 
+// memoryRecallFilter names one part of the runtime recall contract and says
+// whether this administrator diagnostic reproduces it, so a caller can tell
+// "an admin looked at this employee's memory" apart from "the runtime would
+// recall this for a requester".
+type memoryRecallFilter struct {
+	Name    string `json:"name"`
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason"`
+}
+
+// memoryRecallRetrieval mirrors the retrieval tuning the operator renders from
+// spec.memory into the runtime config (operator employee_reconcile.go: top_k /
+// score_threshold / max_injection_chars). A zero field is unset in the CR and
+// takes the runtime default.
+type memoryRecallRetrieval struct {
+	TopK              int32   `json:"topK,omitempty"`
+	ScoreThreshold    float64 `json:"scoreThreshold,omitempty"`
+	MaxInjectionChars int32   `json:"maxInjectionChars,omitempty"`
+}
+
+// memoryRecallDiagnostic is returned with every successful admin memory search.
+// The console's test box calls OpenViking directly, so its hit list is not the
+// runtime's recall list; the annotation states which contract parts are missing
+// instead of letting the console imply equivalence.
+type memoryRecallDiagnostic struct {
+	Mode         string                 `json:"mode"` // admin-diagnostic, never a requester recall
+	Source       string                 `json:"source"`
+	RequestedBy  string                 `json:"requestedBy"`
+	Credential   string                 `json:"credential"`
+	Employee     string                 `json:"employee"`
+	MemoryUser   string                 `json:"memoryUser,omitempty"`
+	MemoryScope  string                 `json:"memoryScope"`
+	SharedPeerID string                 `json:"sharedPeerID,omitempty"`
+	Retrieval    *memoryRecallRetrieval `json:"retrieval,omitempty"`
+	Filters      []memoryRecallFilter   `json:"filters"`
+}
+
+const (
+	memoryDiagnosticMode   = "admin-diagnostic"
+	memoryDiagnosticSource = "POST /api/v1/search/find"
+	memoryDiagnosticKey    = "employee-user-key"
+	memoryScopeUnknown     = "unknown"
+	memoryScopeInstance    = "instance"
+	memoryScopeRequester   = "requester"
+)
+
+// memoryRuntimeContract resolves the employee's runtime memory scope straight
+// off the DigitalEmployee CR — the same fields the operator renders into the
+// runtime config, so the diagnostic cannot drift onto a second source of truth.
+// An unresolvable CR reports "unknown" rather than a guess.
+func (p *portal) memoryRuntimeContract(ctx context.Context, employee string) (scope, memoryUser, sharedPeerID string, retrieval *memoryRecallRetrieval) {
+	scope = memoryScopeUnknown
+	if p.k8s == nil {
+		return scope, "", "", nil
+	}
+	var item dev1alpha1.DigitalEmployee
+	if err := p.k8s.Get(ctx, client.ObjectKey{Namespace: p.cfg.namespace, Name: employee}, &item); err != nil {
+		return scope, "", "", nil
+	}
+	memoryUser = item.Status.MemoryUser
+	// The CRD defaults memoryScope to "instance"; an empty value means the
+	// runtime partition is the single instance space.
+	scope = memoryScopeInstance
+	if memory := item.Spec.Memory; memory != nil {
+		if memory.MemoryScope == memoryScopeRequester {
+			scope = memoryScopeRequester
+			// shared_peer_id is valid in requester scope only, matching the
+			// operator's render condition.
+			sharedPeerID = memory.SharedPeerID
+		}
+		if memory.TopK > 0 || memory.ScoreThreshold > 0 || memory.MaxInjectionChars > 0 {
+			retrieval = &memoryRecallRetrieval{
+				TopK: memory.TopK, ScoreThreshold: memory.ScoreThreshold, MaxInjectionChars: memory.MaxInjectionChars,
+			}
+		}
+	}
+	return scope, memoryUser, sharedPeerID, retrieval
+}
+
+// memoryRecallFilters states which parts of the runtime recall contract this
+// diagnostic does not reproduce. A hit list here may therefore legitimately
+// differ from what chat recall surfaces for the same employee.
+func memoryRecallFilters(scope string) []memoryRecallFilter {
+	scopeApplied := false
+	scopeReason := "spec.memory.memoryScope could not be resolved for this employee; the runtime partition is unknown, treat this as an instance-space read."
+	switch scope {
+	case memoryScopeInstance:
+		scopeApplied = true
+		scopeReason = "memoryScope=instance: the owner key reads the same single space the runtime recalls from for every requester."
+	case memoryScopeRequester:
+		scopeReason = "memoryScope=requester: the runtime partitions memory per requesting user, while this owner key reads only the employee instance space — no requester's partition is exercised here."
+	}
+	return []memoryRecallFilter{
+		{
+			Name: "existence", Applied: false,
+			Reason: "the runtime drops memory entries whose source no longer exists (deer-flow#18/#19) before injecting context; this box calls OpenViking search/find directly, so hits the chat would never recall can still appear.",
+		},
+		{Name: "scope", Applied: scopeApplied, Reason: scopeReason},
+		{
+			Name: "retrieval", Applied: false,
+			Reason: "this box sends the query only; the runtime additionally applies the employee's retrieval tuning (top_k/score_threshold/max_injection_chars, unset knobs follow the runtime defaults).",
+		},
+	}
+}
+
 // handleMemorySearch runs an OpenViking search/find with the named
-// employee's user key — the console's retrieval test box.
-func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ identity) {
+// employee's user key — the console's retrieval test box. It stays an
+// administrator diagnostic: the result is annotated with the scope it ran in
+// and the runtime filters it skips, and it never reads another user's memory.
+func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, ident identity) {
 	var body struct {
 		Employee string `json:"employee"`
 		Query    string `json:"query"`
@@ -158,6 +265,13 @@ func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ id
 	if userKey == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no memory key for employee"})
 		return
+	}
+	scope, memoryUser, sharedPeerID, retrieval := p.memoryRuntimeContract(r.Context(), body.Employee)
+	diagnostic := memoryRecallDiagnostic{
+		Mode: memoryDiagnosticMode, Source: memoryDiagnosticSource, RequestedBy: ident.UserID,
+		Credential: memoryDiagnosticKey, Employee: body.Employee, MemoryUser: memoryUser,
+		MemoryScope: scope, SharedPeerID: sharedPeerID, Retrieval: retrieval,
+		Filters: memoryRecallFilters(scope),
 	}
 	payload, _ := json.Marshal(map[string]string{"query": body.Query})
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.cfg.memoryServer+"/api/v1/search/find", bytes.NewReader(payload))
@@ -198,7 +312,7 @@ func (p *portal) handleMemorySearch(w http.ResponseWriter, r *http.Request, _ id
 	for _, memory := range result.Result.Memories {
 		memories = append(memories, map[string]any{"uri": memory.URI, "score": memory.Score, "abstract": memory.Abstract})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"memories": memories})
+	writeJSON(w, http.StatusOK, map[string]any{"diagnostic": diagnostic, "memories": memories})
 }
 
 // handleKnowledgeStatus reports WeKnora reachability through its configured
