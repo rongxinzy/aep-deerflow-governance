@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -334,4 +335,131 @@ func newKnowledgeProxyHarness(t *testing.T, upstream http.Handler) (*apiTestPort
 	h := newServicesHarness(t, stub)
 	h.cfg.knowledgeAPIURL = target.URL
 	return h, target
+}
+
+// TestMemorySearchRecallDiagnostic pins the admin test box's recall annotation:
+// a caller must be able to tell an administrator diagnostic apart from a
+// runtime recall performed as a requester, and must see which runtime recall
+// filters the box skips. Fixtures: the OpenViking HTTP server, the
+// DigitalEmployee CRs and the memkey Secrets are stubs; the outbound
+// search/find call carrying the employee's own user key, the CR read and the
+// annotation are the real code paths.
+func TestMemorySearchRecallDiagnostic(t *testing.T) {
+	type recallFilter struct {
+		Name    string `json:"name"`
+		Applied bool   `json:"applied"`
+		Reason  string `json:"reason"`
+	}
+	type recallRetrieval struct {
+		TopK              int32   `json:"topK"`
+		ScoreThreshold    float64 `json:"scoreThreshold"`
+		MaxInjectionChars int32   `json:"maxInjectionChars"`
+	}
+	type recallDiagnostic struct {
+		Mode         string           `json:"mode"`
+		Source       string           `json:"source"`
+		RequestedBy  string           `json:"requestedBy"`
+		Credential   string           `json:"credential"`
+		Employee     string           `json:"employee"`
+		MemoryUser   string           `json:"memoryUser"`
+		MemoryScope  string           `json:"memoryScope"`
+		SharedPeerID string           `json:"sharedPeerID"`
+		Retrieval    *recallRetrieval `json:"retrieval"`
+		Filters      []recallFilter   `json:"filters"`
+	}
+	type recallBody struct {
+		Diagnostic recallDiagnostic `json:"diagnostic"`
+		Memories   []struct {
+			URI string `json:"uri"`
+		} `json:"memories"`
+	}
+	search := func(t *testing.T, h *apiTestPortal, employee string) recallBody {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/memory/search",
+			strings.NewReader(`{"employee":"`+employee+`","query":"报价"}`))
+		w := httptest.NewRecorder()
+		h.handleMemorySearch(w, req, adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var body recallBody
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		return body
+	}
+	filtersByName := func(filters []recallFilter) map[string]recallFilter {
+		out := map[string]recallFilter{}
+		for _, filter := range filters {
+			out[filter.Name] = filter
+		}
+		return out
+	}
+
+	t.Run("instance scope marks the result an admin diagnostic", func(t *testing.T) {
+		h := newServicesHarness(t, newServicesStubs(t))
+		body := search(t, h, "sales-helper")
+
+		assert.Equal(t, "admin-diagnostic", body.Diagnostic.Mode)
+		assert.Equal(t, "POST /api/v1/search/find", body.Diagnostic.Source)
+		assert.Equal(t, "admin-user", body.Diagnostic.RequestedBy)
+		assert.Equal(t, "employee-user-key", body.Diagnostic.Credential)
+		assert.Equal(t, "sales-helper", body.Diagnostic.Employee)
+		assert.Equal(t, "sales-helper", body.Diagnostic.MemoryUser)
+		assert.Equal(t, "instance", body.Diagnostic.MemoryScope)
+		assert.Empty(t, body.Diagnostic.SharedPeerID)
+		assert.Nil(t, body.Diagnostic.Retrieval)
+		require.Len(t, body.Memories, 1)
+		assert.Equal(t, "mem://a", body.Memories[0].URI)
+
+		filters := filtersByName(body.Diagnostic.Filters)
+		require.Len(t, filters, 3)
+		assert.False(t, filters["existence"].Applied, "the box skips the runtime's deleted-entry filter")
+		assert.Contains(t, filters["existence"].Reason, "deer-flow#18/#19")
+		assert.True(t, filters["scope"].Applied, "instance scope reads the same space the runtime recalls from")
+		assert.False(t, filters["retrieval"].Applied)
+		for name, filter := range filters {
+			assert.NotEmpty(t, filter.Reason, "filter %s needs a caller-visible reason", name)
+		}
+	})
+
+	t.Run("requester scope reports the partition the box does not exercise", func(t *testing.T) {
+		cr := readyCR("req-helper", "admin-user")
+		cr.Status.MemoryUser = "req-helper"
+		cr.Spec.Memory = &dev1alpha1.MemorySpec{
+			MemoryScope: "requester", SharedPeerID: "df-shared-finance",
+			TopK: 8, ScoreThreshold: 0.25, MaxInjectionChars: 12000,
+		}
+		secret := memkey("req-helper")
+		secret.Data["OPENVIKING_API_KEY"] = []byte("req-helper-key")
+		seenKey := ""
+		stub := newServicesStubs(t)
+		stub.ov.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenKey = r.Header.Get("X-API-Key")
+			_, _ = w.Write([]byte(`{"status":"ok","result":{"memories":[{"uri":"mem://req","score":0.5,"abstract":"beta"}]}}`))
+		})
+		h := newServicesHarness(t, stub, cr, secret)
+		body := search(t, h, "req-helper")
+
+		assert.Equal(t, "req-helper-key", seenKey, "the box only ever sends that employee's own user key")
+		assert.Equal(t, "requester", body.Diagnostic.MemoryScope)
+		assert.Equal(t, "df-shared-finance", body.Diagnostic.SharedPeerID)
+		require.NotNil(t, body.Diagnostic.Retrieval)
+		assert.EqualValues(t, 8, body.Diagnostic.Retrieval.TopK)
+		assert.InDelta(t, 0.25, body.Diagnostic.Retrieval.ScoreThreshold, 1e-9)
+		assert.EqualValues(t, 12000, body.Diagnostic.Retrieval.MaxInjectionChars)
+
+		filters := filtersByName(body.Diagnostic.Filters)
+		assert.False(t, filters["scope"].Applied, "a requester's own partition is not exercised here")
+		assert.NotEmpty(t, filters["scope"].Reason)
+	})
+
+	t.Run("unresolved employee CR reports unknown scope instead of guessing", func(t *testing.T) {
+		orphan := memkey("orphan")
+		orphan.Data["OPENVIKING_API_KEY"] = []byte("orphan-key")
+		h := newServicesHarness(t, newServicesStubs(t), orphan)
+		body := search(t, h, "orphan")
+
+		assert.Equal(t, "unknown", body.Diagnostic.MemoryScope)
+		assert.Empty(t, body.Diagnostic.MemoryUser)
+		filters := filtersByName(body.Diagnostic.Filters)
+		assert.False(t, filters["scope"].Applied)
+		assert.NotEmpty(t, filters["scope"].Reason)
+	})
 }
