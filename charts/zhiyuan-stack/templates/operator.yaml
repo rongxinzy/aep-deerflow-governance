@@ -29,6 +29,14 @@ spec:
             - {name: PERSONAL_WORKSPACE_IMAGE, value: {{ .Values.workspaceGateway.image | quote }}}
             {{- end }}
             - {name: HIBERNATION_IDLE_TIMEOUT_SECONDS, value: "1800"}
+            {{- with .Values.runtimeDefaults.resources }}
+            # 运行时容器默认 requests/limits（CR spec.resources 优先）。
+            - {name: RUNTIME_DEFAULT_RESOURCES, value: {{ toJson . | quote }}}
+            {{- end }}
+            {{- with .Values.runtimeDefaults.securityContext }}
+            # 运行时与 db-init 容器的 securityContext（db-init 不继承身份字段）。
+            - {name: RUNTIME_SECURITY_CONTEXT, value: {{ toJson . | quote }}}
+            {{- end }}
             {{- if .Values.channelGateway.enabled }}
             - {name: CHANNEL_GATEWAY_URL, value: "http://de-channel-gateway.{{ include "zhiyuan.ns" . }}.svc.cluster.local:8899"}
             {{- end }}

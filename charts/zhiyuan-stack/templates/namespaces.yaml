@@ -2,20 +2,23 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.global.namespaces.main }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "main") | nindent 4 }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.global.namespaces.memory }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "memory") | nindent 4 }}
 {{- if .Values.aepStack.enabled }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: aep-system
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "aep") | nindent 4 }}
 {{- end }}
 {{- if .Values.observability.enabled }}
 ---
@@ -23,14 +26,16 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.observability.monitoringNamespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "monitoring") | nindent 4 }}
 {{- if .Values.observability.logging.enabled }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.observability.loggingNamespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "logging") | nindent 4 }}
 {{- end }}
 {{- end }}
 {{- if .Values.weknora.enabled }}
@@ -47,5 +52,6 @@ metadata:
   # required：空值会让父侧模板（default "weknora" 语义）与子图 helper
   # （default .Release.Namespace 语义）分叉到两个 namespace，直接 fail。
   name: {{ required "weknora.namespace is required when weknora.enabled (e.g. \"weknora\")" .Values.weknora.namespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "weknora") | nindent 4 }}
 {{- end }}

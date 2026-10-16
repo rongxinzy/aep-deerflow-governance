@@ -1,0 +1,32 @@
+{{- /*
+AEP /internal 隔离（加固 P0）。control-service 的 /internal/* 与 /aep/v1/*
+同在 :8080，标准 NetworkPolicy 无法按路径区分；这里用 Cilium L7 规则让
+数字员工运行时只能访问 networkPolicy.aepAllowedPaths。
+该策略是运行时访问 control-service 的唯一放行（标准 NetworkPolicy 在
+aepInternalGuard=cilium 时不放行 :8080），因此 L4 规则不会覆盖 L7 限制。
+需要集群安装 Cilium 且启用 L7 代理（envoy）；否则把 aepInternalGuard 设为 none。
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.aepStack.enabled (eq .Values.networkPolicy.aepInternalGuard "cilium") }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: de-runtime-aep-l7
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  endpointSelector:
+    {{- include "zhiyuan.np.runtimeSelector" . | nindent 4 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: aep-system
+            app: aep-control-service
+      toPorts:
+        - ports: [{port: "8080", protocol: TCP}]
+          rules:
+            http:
+              {{- range .Values.networkPolicy.aepAllowedPaths }}
+              - path: {{ . | quote }}
+              {{- end }}
+{{- else if and .Values.networkPolicy.enabled (not (has .Values.networkPolicy.aepInternalGuard (list "cilium" "none"))) }}
+{{- fail (printf "networkPolicy.aepInternalGuard must be \"cilium\" or \"none\", got %q" .Values.networkPolicy.aepInternalGuard) }}
+{{- end }}

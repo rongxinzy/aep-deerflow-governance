@@ -70,6 +70,16 @@ func main() {
 	}
 
 	wakeDBSecret := envOrDefault("HIBERNATION_DB_URL_SECRET", "de-portal-db")
+	runtimeResources, err := controller.ParseRuntimeResources(os.Getenv("RUNTIME_DEFAULT_RESOURCES"))
+	if err != nil {
+		logger.Error(err, "invalid runtime default resources")
+		os.Exit(1)
+	}
+	runtimeSecurityContext, err := controller.ParseRuntimeSecurityContext(os.Getenv("RUNTIME_SECURITY_CONTEXT"))
+	if err != nil {
+		logger.Error(err, "invalid runtime security context")
+		os.Exit(1)
+	}
 	reconciler := &controller.DigitalEmployeeReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -79,10 +89,12 @@ func main() {
 		WakeDBFn: func(ctx context.Context, namespace string) (string, error) {
 			return readSecretKey(ctx, mgr.GetClient(), namespace, wakeDBSecret, "PORTAL_DB_URL")
 		},
-		DefaultIdleSeconds:     int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
-		ChannelGatewayURL:      envOrDefault("CHANNEL_GATEWAY_URL", ""),
-		ConversationAdminDBURL: envOrDefault("CONVERSATION_ADMIN_DB_URL", ""),
-		ConversationInitImage:  envOrDefault("CONVERSATION_INIT_IMAGE", "postgres:17.6-alpine"),
+		DefaultIdleSeconds:      int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
+		ChannelGatewayURL:       envOrDefault("CHANNEL_GATEWAY_URL", ""),
+		ConversationAdminDBURL:  envOrDefault("CONVERSATION_ADMIN_DB_URL", ""),
+		ConversationInitImage:   envOrDefault("CONVERSATION_INIT_IMAGE", "postgres:17.6-alpine"),
+		RuntimeDefaultResources: runtimeResources,
+		RuntimeSecurityContext:  runtimeSecurityContext,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")

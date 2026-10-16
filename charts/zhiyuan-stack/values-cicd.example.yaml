@@ -83,14 +83,15 @@ models:
 # openviking-data-lh), RWO-PVC workloads must keep `strategy: Recreate`,
 # and every image ref must render through the Harbor DNS registry above.
 images:
-  operator: { repository: rongxinzy/de-operator, tag: "0.18.0" }
-  portal: { repository: rongxinzy/de-portal, tag: "0.22.3" }
+  operator: { repository: rongxinzy/de-operator, tag: "0.21.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.23.6" }
   # 2026-10-10 起默认不部署（chatUI.enabled=false）；条目仅回滚保留。
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.14.2" }
-  # v25 = governance TypedDict fix (tool interception live); PORTAL_RUNTIME_IMAGE
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.15.0" }
+  # v26 = governance middleware constructor fix (v25 broke every turn; see
+  # zhiyuan-docs cicd-environment 2026-10-15); PORTAL_RUNTIME_IMAGE
   # (new-employee default) renders from this entry since 2026-10-06.
-  runtime: { repository: rongxinzy/deerflow-gov, tag: "v25" }
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v26" }
 
 memory:
   openviking:
@@ -125,3 +126,17 @@ employees:
     displayName: 研发助理
   - name: admin-helper
     displayName: 行政助理
+
+# 加固（P0）在 cicd 的建议起步值。先在 staging 验证，见 README「加固（P0）」。
+networkPolicy:
+  runtime:
+    # operator 发布带 component 标签的版本之前，d1-helper 的 A2A 适配器
+    # 需显式列出（否则被当作运行时，适配器 → 运行时 :8001 被拒）。
+    extraIngressApps: [de-d1-helper-a2a]
+backup:
+  postgres:
+    s3:
+      # 集群外 S3 兼容存储（不要指向本集群 rustfs / Longhorn）。凭据 Secret
+      # pg-backup-s3 需在 digital-employees 命名空间预先创建。
+      endpoint: "<off-cluster-s3-endpoint>"
+      bucket: ""

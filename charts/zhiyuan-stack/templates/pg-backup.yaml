@@ -1,0 +1,102 @@
+{{- /*
+PostgreSQL 异地逻辑备份（加固 P0）。pg_dumpall 覆盖整个实例（角色 + AEP +
+portal + 全部 de_* 对话库）；先写入 Pod 内临时卷并校验，再由 rclone 上传到
+集群外 S3 兼容存储，上传成功后才按 retentionDays 清理旧对象（新备份始终保留）。
+s3.bucket 为空时不渲染：没有异地目标就不部署“看起来像备份”的任务。
+恢复步骤见 chart README「PostgreSQL 备份与恢复」。
+*/ -}}
+{{- $b := .Values.backup.postgres }}
+{{- if and $b.enabled $b.s3.bucket }}
+{{- include "zhiyuan.assertRealValue" (dict "name" "backup.postgres.s3.endpoint" "value" $b.s3.endpoint) }}
+{{- $_ := required "backup.postgres.s3.endpoint is required when backup.postgres.s3.bucket is set" $b.s3.endpoint }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+  namespace: {{ include "zhiyuan.ns" . }}
+  labels: {app: pg-backup}
+spec:
+  schedule: {{ $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels: {app: pg-backup}
+        spec:
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: {type: RuntimeDefault}
+          initContainers:
+            - name: dump
+              image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" $b.dumpImage.repository "tag" $b.dumpImage.tag) }}
+              env:
+                - name: ADMIN_DB_URL
+                  valueFrom:
+                    secretKeyRef: {name: {{ $b.sourceSecret.name }}, key: {{ $b.sourceSecret.key }}}
+              command: ["sh", "-ec"]
+              args:
+                - |
+                  set -eu
+                  # 没有 pipefail 时，pg_dumpall 中途失败会被 gzip 的成功掩盖。
+                  set -o pipefail
+                  # pg_dumpall 不会把连接串里的口令传给子进程，改用 PG* 环境变量。
+                  export PGUSER="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://([^:]+):.*#\1#')"
+                  export PGPASSWORD="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://[^@]+:([^@]+)@.*#\1#')"
+                  export PGHOST="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#^[a-z]+://[^@]+@([^:/]+).*#\1#')"
+                  export PGPORT="$(printf '%s' "${ADMIN_DB_URL}" | sed -E 's#.*:([0-9]+)/.*#\1#')"
+                  stamp="$(date -u +%Y-%m-%dT%H%M%SZ)"
+                  target="/scratch/aep-all-${stamp}.sql.gz"
+                  pg_dumpall | gzip > "${target}.tmp"
+                  # 校验明文头，失败的导出不能被当成备份上传。
+                  gunzip -c "${target}.tmp" | sed -n '1,4p' | grep -q 'database cluster dump' \
+                    || { echo "dump validation failed"; rm -f "${target}.tmp"; exit 1; }
+                  mv "${target}.tmp" "${target}"
+                  sha256sum "${target}" | sed 's#/scratch/##' > "${target}.sha256"
+                  echo "dumped ${target} ($(du -h "${target}" | cut -f1))"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources: {{ toJson $b.resources }}
+              volumeMounts:
+                - {name: scratch, mountPath: /scratch}
+          containers:
+            - name: upload
+              image: "{{ $b.uploadImage.repository }}:{{ $b.uploadImage.tag }}"
+              env:
+                - {name: RCLONE_CONFIG_DST_TYPE, value: s3}
+                - {name: RCLONE_CONFIG_DST_PROVIDER, value: {{ $b.s3.provider | quote }}}
+                - {name: RCLONE_CONFIG_DST_ENDPOINT, value: {{ $b.s3.endpoint | quote }}}
+                - {name: RCLONE_CONFIG_DST_REGION, value: {{ $b.s3.region | quote }}}
+                - {name: RCLONE_CONFIG_DST_FORCE_PATH_STYLE, value: {{ $b.s3.forcePathStyle | quote }}}
+                - name: RCLONE_CONFIG_DST_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: {{ $b.s3.credentialsSecret.name }}, key: {{ $b.s3.credentialsSecret.accessKeyIdKey }}}
+                - name: RCLONE_CONFIG_DST_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef: {name: {{ $b.s3.credentialsSecret.name }}, key: {{ $b.s3.credentialsSecret.secretAccessKeyKey }}}
+                - {name: DEST, value: {{ printf "dst:%s/%s" $b.s3.bucket (trimSuffix "/" $b.s3.prefix) | quote }}}
+                - {name: RETENTION_DAYS, value: {{ $b.retentionDays | quote }}}
+              command: ["sh", "-ec"]
+              args:
+                - |
+                  set -eu
+                  # --immutable：同名对象已存在即失败，绝不覆盖历史备份。
+                  rclone copy /scratch "${DEST}" --immutable --include 'aep-all-*' -v
+                  # 上传成功后再清理：本次备份已在目标端，清理不会删光全部备份。
+                  rclone delete "${DEST}" --min-age "${RETENTION_DAYS}d" --include 'aep-all-*' -v
+                  rclone lsl "${DEST}" --include 'aep-all-*' | tail -n 5
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+              resources: {{ toJson $b.resources }}
+              volumeMounts:
+                - {name: scratch, mountPath: /scratch, readOnly: true}
+          volumes:
+            - name: scratch
+              emptyDir: {sizeLimit: {{ $b.scratchSize }}}
+{{- end }}
