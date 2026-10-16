@@ -187,6 +187,7 @@ func main() {
 	}
 	go portal.runModelFailover(context.Background())
 	portal.runCollaborations(context.Background())
+	portal.runSharedRuntime(context.Background())
 	slog.Info("de-portal listening", "addr", cfg.addr, "policy", cfg.policyMode, "namespace", cfg.namespace)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server stopped", "error", err)
@@ -195,7 +196,7 @@ func main() {
 }
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(sharedSpaceSchema + collaborationSchema + `
+	_, err := db.Exec(sharedSpaceSchema + collaborationSchema + sharedRuntimeSchema + `
 CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	employee_name TEXT NOT NULL,

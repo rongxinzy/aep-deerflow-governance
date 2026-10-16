@@ -282,7 +282,7 @@ func (p *portal) collaborationCall(ctx context.Context, ws *dev.PersonalWorkspac
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(collaborationTokenHeader, token)
 	req.Header.Set(workspaceTokenHeader, token)
-	resp, err := (&http.Client{Timeout: 150 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 150 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
 	if err != nil {
 		return nil, errors.New("搭档暂时未能回复")
 	}
