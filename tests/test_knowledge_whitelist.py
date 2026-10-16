@@ -9,10 +9,12 @@ venv provides langchain):
 
 Two deployed weknora MCP surfaces are covered: the PyPI bridge's kb_id
 tools plus its admin surface (default-deny under an explicit whitelist),
-and the dsh bridge's knowledge_search(knowledge_base_ids). Legacy
-employees (no whitelist) keep the unrestricted bridge. These tests
-construct the middleware with ``governed_tools=[]`` so the allow path
-never touches the network, and drive ``wrap_tool_call`` with minimal
+and the dsh bridge's knowledge_search(knowledge_base_ids). A missing
+policy (no ``knowledge_bases`` kwarg at all) is a configuration error and
+denies every knowledge tool with migration guidance for the administrator
+(the previous "absent means unrestricted" behavior was removed). These
+tests construct the middleware with ``governed_tools=[]`` so the allow
+path never touches the network, and drive ``wrap_tool_call`` with minimal
 fakes.
 """
 
@@ -89,12 +91,81 @@ def denied(result: ToolMessage | str) -> bool:
     return isinstance(result, ToolMessage)
 
 
-# ---------------------------------------------------------------- legacy
-def test_absent_kwapp_keeps_legacy_unrestricted() -> None:
+# ------------------------------------------- missing policy (default-deny)
+def test_missing_policy_denies_every_knowledge_tool_with_actionable_config_error() -> None:
+    # Intentional behavior change (was: absent policy = legacy unrestricted
+    # bridge credential). A missing policy is a configuration error: every
+    # weknora tool is denied before the handler runs, whatever its shape.
     mw = middleware(None)
-    assert outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "any"})) == "OK"
-    assert outcome(mw, FakeCall("weknora_delete_knowledge_base", {"kb_id": "any"})) == "OK"
-    assert outcome(mw, FakeCall("knowledge_search", {"query": "q"})) == "OK"
+    reached: list[str] = []
+
+    def call(name: str, args: dict[str, Any]) -> ToolMessage | str:
+        return mw.wrap_tool_call(
+            FakeRequest(FakeCall(name, args)),
+            handler=lambda request: reached.append(name) or "OK",
+        )
+
+    for name, args in (
+        ("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"}),
+        ("weknora__hybrid_search", {"kb_id": "kb-1", "query": "q"}),
+        ("mcp__weknora__hybrid_search", {"kb_id": "kb-1", "query": "q"}),
+        ("hybrid_search", {"kb_id": "kb-1", "query": "q"}),
+        ("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1"]}),
+        ("mcp__weknora__delete_knowledge_base", {"kb_id": "kb-1"}),
+        ("weknora_create_knowledge_from_text", {"kb_id": "kb-1", "content": "x"}),
+        ("weknora_list_knowledge_bases", {}),
+        ("mcp__weknora__get_knowledge", {"knowledge_id": "k1"}),
+        ("mcp__weknora__wiki_read_page", {"kb_id": "kb-1", "slug": "entity/a"}),
+        ("weknora_some_future_admin_tool", {"kb_id": "kb-1"}),  # unknown sensitive tool
+    ):
+        result = call(name, args)
+        assert denied(result), name
+        assert result.content.startswith(f"DENIED {name}:"), name
+        assert "知识库访问策略缺失" in result.content, name
+        assert "spec.knowledge.bases" in result.content, name
+    assert reached == []
+
+
+def test_missing_policy_leaves_non_knowledge_tools_untouched() -> None:
+    mw = middleware(None)
+    assert outcome(mw, FakeCall("web_search", {"query": "q"})) == "OK"
+    assert outcome(mw, FakeCall("other__hybrid_search", {"kb_id": "kb-1"})) == "OK"
+    assert outcome(mw, FakeCall("mcp__weather__hybrid_search", {})) == "OK"
+    assert outcome(mw, FakeCall("knowledge_benchmark_runner", {"kb_id": "kb-1"})) == "OK"
+
+
+def test_missing_policy_denies_before_the_online_context_gate() -> None:
+    # Default-deny is config-driven and must win over the Portal run-context
+    # check: the run has no knowledge context here, yet the administrator
+    # gets the configuration error, not "context unavailable".
+    mw = middleware(None)
+    mw.knowledge_online_authorization = True
+    reached: list[bool] = []
+    result = mw.wrap_tool_call(FakeRequest(FakeCall("mcp__weknora__hybrid_search", {"kb_id": "kb-1"})),
+                               handler=lambda request: reached.append(True) or "OK")
+    assert denied(result)
+    assert "知识库访问策略缺失" in result.content
+    assert "context unavailable" not in result.content
+    assert not reached
+
+
+def test_missing_policy_is_enforced_for_dict_shaped_tool_calls() -> None:
+    mw = middleware(None)
+    request = FakeRequestDict({"name": "mcp__weknora__hybrid_search", "args": {"kb_id": "kb-1"}, "id": "c1"})
+    result = mw.wrap_tool_call(request, handler=lambda req: "OK")
+    assert denied(result)
+    assert "spec.knowledge.bases" in result.content
+
+
+def test_missing_policy_note_forbids_attempts_and_names_the_config_key() -> None:
+    mw = middleware(None)
+    note = mw._knowledge_note()
+    assert note != ""
+    assert "知识库" in note
+    assert "spec.knowledge.bases" in note
+    assert "可用的知识库" not in note  # never advertise a usable set
+    prompt = str(mw._governance_message("u1", frozenset()).content)
+    assert "spec.knowledge.bases" in prompt
 
 
 # ------------------------------------------------------------- kb_id read
@@ -130,6 +201,7 @@ def test_kb_id_missing_or_out_of_whitelist_is_denied() -> None:
     mw = middleware(WHITELIST)
     assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"query": "q"})))
     assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-x", "query": "q"})))
+    assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"knowledge_base_id": "kb-x", "query": "q"})))
     assert denied(outcome(mw, FakeCall("hybrid_search", {"kb_id": ""})))
 
 
@@ -179,6 +251,39 @@ def test_knowledge_search_list_ids_still_enforced() -> None:
 
 
 # ------------------------------------------------- admin surface default-deny
+def test_read_write_and_delete_are_separately_authorized() -> None:
+    # Under an explicit policy the read tools are the only allow path; writes
+    # and deletes on the very same in-whitelist kb stay denied.
+    mw = middleware(WHITELIST)
+    for name in ("weknora_hybrid_search", "weknora_wiki_search", "weknora_list_knowledge",
+                 "weknora_get_knowledge_base"):
+        assert outcome(mw, FakeCall(name, {"kb_id": "kb-1", "query": "q"})) == "OK", name
+    for name in ("weknora_create_knowledge_from_text", "weknora_create_knowledge_from_file",
+                 "weknora_create_knowledge_from_url", "weknora_update_knowledge_from_text",
+                 "weknora_delete_knowledge", "weknora_delete_knowledge_base", "weknora_delete_chunk"):
+        assert denied(outcome(mw, FakeCall(name, {"kb_id": "kb-1", "content": "x"}))), name
+
+
+def test_revoked_base_denies_new_calls_immediately() -> None:
+    # After a reconcile drops a kb from the whitelist, new calls on it are
+    # denied at once (the model-visible prompt note is refreshed per run).
+    mw = middleware(WHITELIST)
+    assert outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"})) == "OK"
+    mw.knowledge_bases = {"kb-2": "产品知识库"}
+    assert denied(outcome(mw, FakeCall("weknora_hybrid_search", {"kb_id": "kb-1", "query": "q"})))
+    assert denied(outcome(mw, FakeCall("knowledge_search", {"query": "q", "knowledge_base_ids": ["kb-1"]})))
+    assert "kb-1" not in mw._knowledge_note()
+
+
+def test_unknown_weknora_tools_are_denied_under_explicit_and_deny_all_policies() -> None:
+    for policy in (WHITELIST, {}):
+        mw = middleware(policy)
+        for name in ("weknora_future_tool", "mcp__weknora__future_tool", "weknora__privileged_export"):
+            result = outcome(mw, FakeCall(name, {"kb_id": "kb-1"}))
+            assert denied(result), (policy, name)
+            assert result.content.startswith(f"DENIED {name}:"), name
+
+
 def test_admin_and_session_tools_are_denied_under_policy() -> None:
     mw = middleware(WHITELIST)
     for name, args in [
@@ -248,5 +353,13 @@ def test_governance_message_lists_bases_iff_configured() -> None:
     assert "销售知识库" in str(configured._governance_message("u1", frozenset()))
     guest = configured._governance_message(None, frozenset())
     assert "kb-1" in str(guest.content)
-    legacy = middleware(None)
-    assert "知识库" not in str(legacy._governance_message("u1", frozenset()).content)
+    deny_all = middleware({})
+    assert "未连接任何知识库" in str(deny_all._governance_message("u1", frozenset()).content)
+    # Missing policy used to render no note at all (legacy unrestricted); it
+    # now renders the missing-policy notice (intentional behavior change).
+    missing = middleware(None)
+    prompt = str(missing._governance_message("u1", frozenset()).content)
+    assert "知识库" in prompt
+    assert "spec.knowledge.bases" in prompt
+    guest_prompt = str(missing._governance_message(None, frozenset()).content)
+    assert "spec.knowledge.bases" in guest_prompt
