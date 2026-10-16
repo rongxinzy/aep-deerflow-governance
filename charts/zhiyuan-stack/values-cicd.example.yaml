@@ -125,3 +125,17 @@ employees:
     displayName: 研发助理
   - name: admin-helper
     displayName: 行政助理
+
+# 加固（P0）在 cicd 的建议起步值。先在 staging 验证，见 README「加固（P0）」。
+networkPolicy:
+  runtime:
+    # operator 发布带 component 标签的版本之前，d1-helper 的 A2A 适配器
+    # 需显式列出（否则被当作运行时，适配器 → 运行时 :8001 被拒）。
+    extraIngressApps: [de-d1-helper-a2a]
+backup:
+  postgres:
+    s3:
+      # 集群外 S3 兼容存储（不要指向本集群 rustfs / Longhorn）。凭据 Secret
+      # pg-backup-s3 需在 digital-employees 命名空间预先创建。
+      endpoint: "<off-cluster-s3-endpoint>"
+      bucket: ""
