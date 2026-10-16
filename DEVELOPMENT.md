@@ -146,8 +146,13 @@ user id）。浏览器永不接触内部 token / 模型凭证 / 集群网络。
 
 **治理身份链**（middleware `resolve_aep_user`）：IM `channel_user_id`
 → `user_map` → 运行时 user_context id（经 AEP data-scope API 正缓存
-校验后才信任）→ `default_aep_user`。网页路径靠第三级：portal 传来的
-AEP id 即运行时用户 id。离线自测：`python3 scripts/test_identity_chain.py`。
+校验后才信任）。三级都解析不出即 **fail-closed（返回 `None`，不再回退
+`default_aep_user`）**：受管工具按访客拒绝，模型层走访客提示。网页路径靠
+第三级：portal 传来的 AEP id 即运行时用户 id。记忆链是**另一条链**
+（deer-flow 的 `_resolve_scope`），不随治理的拒绝自动收口；依赖面盘点、
+残留路径与跨仓待办见
+[docs/identity-fail-closed-inventory.md](docs/identity-fail-closed-inventory.md)。
+离线自测：`python3 scripts/test_identity_chain.py`。
 
 **第三方渠道对齐**（企业微信/飞书）：AEP identity mappings
 （`/aep/v1/admin/identity-sources/{id}/mappings`，PUT 建、DELETE 撤、
