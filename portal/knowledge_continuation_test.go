@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,7 +79,7 @@ func TestKnowledgeAuditFiltersByKnowledgeBase(t *testing.T) {
 	now := time.Now().UTC()
 	rows := sqlmock.NewRows([]string{"id", "operation_id", "actor_user_id", "action", "resource_type", "resource_id", "parent_resource_id", "outcome", "status_code", "created_at"}).
 		AddRow(21, "kbop-3", "admin-user", "upload_file", "document", "doc-1", "kb-1", "succeeded", 202, now)
-	h.dbmock.ExpectQuery(`SELECT id,operation_id.*WHERE deployment_id=\$1 AND weknora_tenant_id=\$2 AND \(resource_id=\$3 OR parent_resource_id=\$3\) ORDER BY id DESC LIMIT \$4`).
+	h.dbmock.ExpectQuery(regexp.QuoteMeta(`SELECT id,operation_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,outcome,status_code,created_at FROM knowledge_audit_events WHERE deployment_id=$1 AND weknora_tenant_id=$2 AND `+knowledgeAuditBasePredicate(3)+` ORDER BY id DESC LIMIT $4`)).
 		WithArgs("demo", "10000", "kb-1", 51).WillReturnRows(rows)
 	w := httptest.NewRecorder()
 	h.handleKnowledgeAudit(w, httptest.NewRequest("GET", "/?knowledgeBaseId=kb-1", nil), adminIdentityForManagedTest())

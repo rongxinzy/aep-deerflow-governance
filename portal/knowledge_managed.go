@@ -487,8 +487,16 @@ func safeKnowledgeID(id string) (string, bool) {
 	return id, true
 }
 
-func (p *portal) beginManagedAudit(ctx context.Context, ident identity, tenant, action, resourceType, resourceID, parentResourceID string) (string, error) {
+func (p *portal) beginManagedAudit(ctx context.Context, ident identity, tenant, action, resourceType, resourceID, parentResourceID string, knowledgeBaseIDs ...string) (string, error) {
 	op := fmt.Sprintf("kbop-%d", time.Now().UnixNano())
+	if len(knowledgeBaseIDs) > 0 {
+		bases, err := json.Marshal(knowledgeBaseIDs)
+		if err != nil {
+			return "", err
+		}
+		_, err = p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,knowledge_base_ids,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'pending',0)`, op, ident.DeploymentID, tenant, ident.UserID, action, resourceType, resourceID, parentResourceID, string(bases))
+		return op, err
+	}
 	_, err := p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0)`, op, ident.DeploymentID, tenant, ident.UserID, action, resourceType, resourceID, parentResourceID)
 	return op, err
 }

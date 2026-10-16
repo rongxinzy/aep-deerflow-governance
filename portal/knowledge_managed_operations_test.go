@@ -206,7 +206,7 @@ func TestManagedChunkUpdateUsesContentRevisionCASAndExposesIndexFailure(t *testi
 			defer server.Close()
 			h.cfg.knowledgeAPIURL = server.URL
 			h.dbmock.ExpectQuery(`SELECT name_snapshot FROM knowledge_base_registry`).WithArgs("demo", "10000", "kb-1").WillReturnRows(sqlmock.NewRows([]string{"name_snapshot"}).AddRow("Docs"))
-			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1").WillReturnResult(sqlmock.NewResult(0, 1))
+			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1", `["kb-1"]`).WillReturnResult(sqlmock.NewResult(0, 1))
 			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id`).WithArgs(sqlmock.AnyArg(), "chunk-1", tc.outcome, tc.updateCode).WillReturnResult(sqlmock.NewResult(0, 1))
 
 			req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"content":"new body","expected_revision":4}`))

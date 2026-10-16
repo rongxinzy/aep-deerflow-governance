@@ -871,7 +871,7 @@ func TestManagedChunkUpdateMatchesWeKnoraRevisionSemantics(t *testing.T) {
 			})
 			expectManagedOperationsBase(h)
 			h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).
-				WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1").
+				WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1", `["kb-1"]`).
 				WillReturnResult(sqlmock.NewResult(0, 1))
 			h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id=\$2,outcome=\$3,status_code=\$4 WHERE operation_id=\$1`).
 				WithArgs(sqlmock.AnyArg(), "chunk-1", "succeeded", http.StatusOK).
@@ -915,7 +915,7 @@ func TestManagedChunkUpdateDoesNotClaimSuccessForUnexpectedRevision(t *testing.T
 	})
 	expectManagedOperationsBase(h)
 	h.dbmock.ExpectExec(`INSERT INTO knowledge_audit_events`).
-		WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1").
+		WithArgs(sqlmock.AnyArg(), "demo", "10000", "admin-user", "update_chunk", "chunk", "chunk-1", "doc-1", `["kb-1"]`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	h.dbmock.ExpectExec(`UPDATE knowledge_audit_events SET resource_id=\$2,outcome=\$3,status_code=\$4 WHERE operation_id=\$1`).
 		WithArgs(sqlmock.AnyArg(), "chunk-1", "uncertain", http.StatusOK).
