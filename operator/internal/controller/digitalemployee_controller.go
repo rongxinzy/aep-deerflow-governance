@@ -63,6 +63,12 @@ type DigitalEmployeeReconciler struct {
 	// ConversationInitImage is the psql-carrying image the db-init init
 	// container uses to CREATE DATABASE before the runtime boots.
 	ConversationInitImage string
+	// RuntimeDefaultResources is the compute envelope for runtime containers
+	// whose CR omits spec.resources (nil → no requests/limits, legacy).
+	RuntimeDefaultResources *corev1.ResourceRequirements
+	// RuntimeSecurityContext hardens every runtime container (and the
+	// db-init init container); nil keeps the legacy unhardened shape.
+	RuntimeSecurityContext *corev1.SecurityContext
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*

@@ -7,6 +7,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -385,6 +386,13 @@ type DigitalEmployeeSpec struct {
 	// credentials, auth DB survive pod restarts and image upgrades).
 	// +optional
 	Persistence PersistenceSpec `json:"persistence,omitempty"`
+
+	// Resources overrides the runtime container's compute requests/limits.
+	// Nil falls back to the operator default (RUNTIME_DEFAULT_RESOURCES,
+	// rendered from the chart's runtimeDefaults.resources); when neither is
+	// set the container carries no requests/limits (legacy behaviour).
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// ConversationStore centralizes conversation persistence (postgres)
 	// or keeps it per-employee on the home volume (sqlite, default).
