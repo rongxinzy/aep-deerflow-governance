@@ -11,15 +11,23 @@ outbound messages to /send/{employee}.
 
 Configuration:
   PORTAL_DB_URL               postgres DSN (same database as the portal)
-  CONNECTIONS_FILE            JSON {employee: {provider, bot_id, bot_secret}}
+  CONNECTIONS_FILE            JSON {employee: {provider, bot_id, bot_secret,
+                              caller_credential: {token, expires_at, operations}}}
                               (mounted from the de-channel-connections Secret)
   GATEWAY_LISTEN              uvicorn bind, default 0.0.0.0:8899
+
+Every /inbox, /ack and /send call must carry the caller credential of the
+employee named in the path (see PROTOCOL.md). Employees without a credential
+in the connections file are rejected outright: the gateway stays useful only
+as far as its callers are authenticated, and the sibling client mode in the
+runtime image is NOT implemented yet (see PROTOCOL.md "Status").
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -31,7 +39,7 @@ from typing import Any
 
 import asyncpg
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -84,6 +92,8 @@ class _SecretScrubFilter(logging.Filter):
 
 
 logger.addFilter(_SecretScrubFilter())
+OUTBOUND_IDEMPOTENCY_TTL_SECONDS = 24 * 3600
+GATEWAY_OPERATIONS = ("inbox", "ack", "send")
 
 app = FastAPI(title="de-channel-gateway")
 
@@ -220,6 +230,13 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
             acked_at   TIMESTAMPTZ
         );
         CREATE INDEX IF NOT EXISTS channel_inbox_pending ON channel_inbox (employee, id) WHERE acked_at IS NULL;
+
+        CREATE TABLE IF NOT EXISTS channel_outbound_idempotency (
+            employee        TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (employee, idempotency_key)
+        );
         """
     )
 
@@ -306,6 +323,93 @@ async def _swap_leg(name: str, config: dict[str, Any], fingerprint: str, state: 
     state.next_attempt_at = 0.0
     logger.info("leg %s connected (config %s)", name, fingerprint[:12])
 
+@dataclass(frozen=True)
+class CallerCredential:
+    """One employee's caller credential, rendered into the connections file.
+
+    The token IS the subject: it is looked up under the employee named in the
+    request path, so a token can only ever speak for the employee it was
+    issued to.
+    """
+
+    token: str
+    expires_at: float
+    operations: tuple[str, ...] = GATEWAY_OPERATIONS
+
+
+def load_credentials() -> dict[str, CallerCredential]:
+    """Per-employee caller credentials from the connections file.
+
+    Unusable entries (no token, no readable expiry, unknown operation) are
+    dropped, which leaves that employee with no credential and therefore with
+    no way to call the gateway at all — the intended fail-closed behaviour.
+    """
+    try:
+        connections = load_connections()
+    except (OSError, ValueError):
+        logger.exception("cannot read caller credentials from %s", connections_file)
+        return {}
+    credentials: dict[str, CallerCredential] = {}
+    for employee, cfg in connections.items():
+        raw = cfg.get("caller_credential")
+        if not isinstance(raw, dict):
+            continue
+        token = raw.get("token")
+        if not isinstance(token, str) or not token:
+            logger.warning("leg %s has a caller credential without a token; ignored", employee)
+            continue
+        try:
+            expires_at = float(raw.get("expires_at"))
+        except (TypeError, ValueError):
+            logger.warning("leg %s has a caller credential without a usable expires_at; ignored", employee)
+            continue
+        operations = raw.get("operations")
+        if operations is None:
+            operations = list(GATEWAY_OPERATIONS)
+        if not isinstance(operations, list) or not all(op in GATEWAY_OPERATIONS for op in operations):
+            logger.warning("leg %s has an invalid caller credential operations list; ignored", employee)
+            continue
+        credentials[employee] = CallerCredential(token=token, expires_at=expires_at, operations=tuple(operations))
+    return credentials
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
+
+
+def authorize(employee: str, authorization: str | None, operation: str) -> None:
+    """Validate the caller against the employee in the path.
+
+    Re-reads the connections file on every call: a rotated Secret must stop
+    accepting the retired token immediately, not at the next watcher tick.
+    The file is a few KB, polled about once per second per employee.
+    """
+    token = _bearer_token(authorization)
+    if token is None:
+        raise HTTPException(
+            status_code=401, detail="missing caller credential", headers={"WWW-Authenticate": "Bearer"}
+        )
+    credential = load_credentials().get(employee)
+    if credential is None:
+        raise HTTPException(status_code=403, detail=f"no caller credential configured for {employee}")
+    try:
+        matches = hmac.compare_digest(credential.token, token)
+    except TypeError:  # non-ASCII header value cannot be a credential
+        matches = False
+    if not matches:
+        raise HTTPException(status_code=403, detail=f"caller credential rejected for {employee}")
+    if credential.expires_at <= time.time():
+        raise HTTPException(
+            status_code=401, detail="caller credential expired", headers={"WWW-Authenticate": "Bearer"}
+        )
+    if operation not in credential.operations:
+        raise HTTPException(status_code=403, detail=f"caller credential may not perform {operation}")
+
 
 async def reconcile_legs() -> None:
     """Match running legs to the connections file (hot reload).
@@ -317,6 +421,10 @@ async def reconcile_legs() -> None:
     """
     assert pool is not None
     desired = load_connections()
+    credentialed = load_credentials()
+    for name in desired:
+        if name not in credentialed:
+            logger.warning("leg %s has no caller credential; its endpoints reject every caller", name)
     for name in list(legs):
         if name not in desired:
             logger.info("stopping leg %s (removed from connections)", name)
@@ -390,12 +498,15 @@ class AckBody(BaseModel):
 
 
 @app.get("/inbox/{employee}")
-async def inbox(employee: str, wait: int = POLL_WAIT_SECONDS) -> dict[str, Any]:
+async def inbox(
+    employee: str, wait: int = POLL_WAIT_SECONDS, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     """Lease pending frames for one employee.
 
     Long-polls up to `wait` seconds for new rows; leased rows are invisible
     to other pollers for INBOX_LEASE_SECONDS, then redeliver (at-least-once).
     """
+    authorize(employee, authorization, "inbox")
     assert pool is not None
     deadline = asyncio.get_event_loop().time() + max(0, min(wait, 55))
     while True:
@@ -422,9 +533,26 @@ async def inbox(employee: str, wait: int = POLL_WAIT_SECONDS) -> dict[str, Any]:
 
 
 @app.post("/ack/{employee}")
-async def ack(employee: str, body: AckBody) -> dict[str, Any]:
+async def ack(
+    employee: str, body: AckBody, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """Mark frames as processed.
+
+    Acking is scoped to the credential's own employee: the ownership check is
+    explicit (and rejects the whole batch) rather than left to the WHERE
+    clause, so a caller cannot consume another employee's rows even by id.
+    """
+    authorize(employee, authorization, "ack")
     assert pool is not None
     async with pool.acquire() as conn:
+        foreign = await conn.fetchval(
+            "SELECT employee FROM channel_inbox WHERE employee <> $1 AND id = ANY($2::bigint[]) LIMIT 1",
+            employee, body.ids,
+        )
+        if foreign is not None:
+            # Deliberately unnamed: an authenticated employee must not be able
+            # to probe other employees out of the rejection.
+            raise HTTPException(status_code=403, detail="cannot ack messages that belong to another employee")
         await conn.execute(
             "UPDATE channel_inbox SET acked_at = now() WHERE employee = $1 AND id = ANY($2::bigint[])",
             employee, body.ids,
@@ -444,16 +572,56 @@ class SendBody(BaseModel):
     owner_user_id: str | None = None
     metadata: dict[str, Any] = {}
     created_at: float = 0.0
+    idempotency_key: str | None = None
+
+
+async def _reserve_outbound(employee: str, idempotency_key: str) -> bool:
+    """Claim one outbound idempotency key; False means it was already used.
+
+    The claim is taken before the send so two concurrent redeliveries of the
+    same turn cannot both reach the platform, and dropped again if the send
+    fails so the client's retry is not swallowed. Keys expire after
+    OUTBOUND_IDEMPOTENCY_TTL_SECONDS.
+    """
+    assert pool is not None
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM channel_outbound_idempotency WHERE created_at < now() - make_interval(secs => $1)",
+            OUTBOUND_IDEMPOTENCY_TTL_SECONDS,
+        )
+        reserved = await conn.fetchval(
+            "INSERT INTO channel_outbound_idempotency (employee, idempotency_key) VALUES ($1, $2) "
+            "ON CONFLICT (employee, idempotency_key) DO NOTHING RETURNING TRUE",
+            employee, idempotency_key,
+        )
+    return reserved is not None
+
+
+async def _release_outbound(employee: str, idempotency_key: str) -> None:
+    assert pool is not None
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM channel_outbound_idempotency WHERE employee = $1 AND idempotency_key = $2",
+            employee, idempotency_key,
+        )
 
 
 @app.post("/send/{employee}")
-async def send(employee: str, body: SendBody) -> dict[str, Any]:
+async def send(
+    employee: str, body: SendBody, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     """Deliver one outbound message over the employee's platform leg.
 
     The runtime serializes its OutboundMessage; the leg's _on_outbound runs
     the full native send path (streaming chunks, attachments registry,
-    context cleanup).
+    context cleanup). `idempotency_key` (the client's turn/message id) makes
+    redelivery of the same turn a no-op: a repeat returns duplicate=True
+    instead of posting a second message.
     """
+    authorize(employee, authorization, "send")
+    idempotency_key = body.idempotency_key
+    if not idempotency_key:
+        raise HTTPException(status_code=400, detail="idempotency_key is required")
     leg = legs.get(employee)
     if leg is None:
         raise HTTPException(status_code=404, detail=f"no platform leg for {employee}")
@@ -472,8 +640,15 @@ async def send(employee: str, body: SendBody) -> dict[str, Any]:
         metadata=body.metadata,
         created_at=body.created_at,
     )
-    await leg.channel._on_outbound(msg)
-    return {"sent": True}
+    if not await _reserve_outbound(employee, idempotency_key):
+        logger.info("outbound %s/%s already sent; ignoring redelivery", employee, idempotency_key)
+        return {"sent": True, "duplicate": True}
+    try:
+        await leg.channel._on_outbound(msg)
+    except BaseException:
+        await _release_outbound(employee, idempotency_key)
+        raise
+    return {"sent": True, "duplicate": False}
 
 
 if __name__ == "__main__":
