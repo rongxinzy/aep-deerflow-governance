@@ -374,6 +374,23 @@ employees: []
 # 全部可按开关回退；滚动步骤见 chart README「加固（P0）」。
 # ---------------------------------------------------------------------------
 
+# 数字员工运行时容器默认值（operator 渲染 de-{name} 时使用；CR 的
+# spec.resources 优先）。需要 operator 带 RUNTIME_DEFAULT_RESOURCES /
+# RUNTIME_SECURITY_CONTEXT 支持的版本，旧 operator 忽略这两个 env。
+# 注意：operator 升级后首次 reconcile 会让每个员工按 Recreate 重建一次。
+runtimeDefaults:
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 4Gi}
+  # deerflow-gov 镜像没有声明 USER（2026-10-16 核对 ghcr v16 镜像配置：
+  # User 为空 → root），因此默认不强制 runAsNonRoot。镜像改为非 root 后
+  # 再加 runAsNonRoot: true / runAsUser。db-init 初始化容器继承除身份字段
+  # 外的同一配置。置为 {} 恢复旧行为（不设 securityContext）。
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: [ALL]}
+    seccompProfile: {type: RuntimeDefault}
+
 # NetworkPolicy：chart 管理的命名空间默认拒绝入站，再按调用关系放行；
 # 数字员工运行时额外限制出站。enabled=false 整体不渲染（回退路径）。
 networkPolicy:
@@ -418,4 +435,33 @@ networkPolicy:
   # WeKnora 子图命名空间：子图内部调用关系（docreader/redis/postgres）
   # 尚未盘点，默认不渲染。
   weknora: false
+
+# Pod Security Admission 命名空间标签。主命名空间在 workspaceAgent.enabled
+# 时自动 enforce=privileged（pw-node-agent 为特权 + hostNetwork + hostPath）。
+podSecurity:
+  enabled: true
+  version: latest
+  levels:
+    main: {enforce: baseline, warn: restricted, audit: restricted}
+    memory: {enforce: baseline, warn: restricted, audit: restricted}
+    aep: {enforce: baseline, warn: restricted, audit: restricted}
+    # node-exporter / fluent-bit / node-log-cap 需要 hostPath / hostNetwork。
+    monitoring: {enforce: privileged, warn: baseline, audit: baseline}
+    logging: {enforce: privileged, warn: baseline, audit: baseline}
+
+# 主命名空间资源边界。LimitRange 给未声明资源的容器补默认值（只作用于新
+# 建 Pod）；ResourceQuota 需按集群实测容量设定，默认关闭。
+resourceBoundaries:
+  limitRange:
+    enabled: true
+    defaultRequest: {cpu: 100m, memory: 128Mi}
+    default: {cpu: "2", memory: 4Gi}
+    max: {cpu: "8", memory: 16Gi}
+  resourceQuota:
+    enabled: false
+    hard:
+      requests.cpu: "16"
+      requests.memory: 32Gi
+      limits.memory: 96Gi
+      persistentvolumeclaims: "60"
 
