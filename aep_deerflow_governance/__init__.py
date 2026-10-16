@@ -151,7 +151,10 @@ class _IdentityResolver:
                 body = json.load(resp)
             if time.monotonic() >= deadline:
                 raise TimeoutError("Identity mapping pagination timed out")
-            items = body.get("items", body.get("mappings", []))
+            # ``items`` can be present but null while the same payload carries
+            # ``mappings`` (the older shape); the or-chain tolerates that
+            # instead of rejecting the page and clearing every identity.
+            items = body.get("items") or body.get("mappings") or []
             if not isinstance(items, list):
                 raise ValueError("Invalid identity mapping page")
             for item in items:

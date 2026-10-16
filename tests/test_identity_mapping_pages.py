@@ -65,6 +65,19 @@ def test_failed_or_malformed_page_discards_previous_cache(monkeypatch, second_pa
     assert subject._by_external == {}
 
 
+def test_null_items_falls_back_to_mappings(monkeypatch):
+    """``{"items": null, "mappings": [...]}`` must not discard the whole page.
+
+    Reading ``body.get("items", default)`` would return None here, reject the
+    page as malformed and clear every resolved identity — a fail-closed but
+    deployment-wide outage for already-bound users.
+    """
+    serve(monkeypatch, [{"items": None, "mappings": [mapping("ext", "user-ext")]}])
+    subject = resolver()
+    assert subject.resolve("ext") == "user-ext"
+    assert subject._by_external == {"ext": "user-ext"}
+
+
 def test_invalid_mapping_cannot_create_literal_none_identity(monkeypatch):
     serve(monkeypatch, [{"mappings": [mapping(None, "u"), mapping("ext", None), mapping("", "u")]}])
     assert resolver().resolve("None") is None
