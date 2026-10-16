@@ -172,7 +172,7 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 		})
 
 		It("renders channel-connections only for enabled IM channels", func(ctx context.Context) {
-			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true}
+			employee.Spec.Channels = &v1alpha1.ChannelsSpec{Wecom: true, Wechat: true}
 			Expect(fx.client.Update(ctx, employee)).To(Succeed())
 			reconcile(ctx)
 
@@ -180,6 +180,7 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, config)).To(Succeed())
 			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"channel_connections"`))
 			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"wecom"`))
+			Expect(config.Data["config.yaml"]).To(ContainSubstring(`"wechat"`))
 			Expect(config.Data["config.yaml"]).NotTo(ContainSubstring(`"feishu"`), "disabled providers stay unlisted")
 
 			// The first reconcile adds the memory finalizer; re-read before

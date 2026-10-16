@@ -109,6 +109,10 @@ spec:
                       unavailable (or when bot_open_id is set manually). With neither, a
                       mention is never treated as addressing the bot.
                     type: string
+                  wechat:
+                    description: Wechat enables the WeChat QR/token channel (separate
+                      from WeCom).
+                    type: boolean
                   wecom:
                     description: Wecom enables the WeCom (企业微信) smart-bot channel.
                     type: boolean

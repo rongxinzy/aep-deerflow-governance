@@ -79,6 +79,10 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/employees/{name}/email", p.auth(p.handlePutEmployeeEmail))
 	mux.HandleFunc("/api/v1/email", p.auth(p.handleEmail))
 	mux.HandleFunc("GET /api/v1/employees", p.auth(p.listEmployees))
+	mux.HandleFunc("GET /api/v1/employees/{name}/channels", p.auth(p.freshAdminOnly(p.handleEmployeeChannels)))
+	mux.HandleFunc("POST /api/v1/employees/{name}/channels/wake", p.auth(p.freshAdminOnly(p.handleWakeEmployeeChannels)))
+	mux.HandleFunc("PUT /api/v1/employees/{name}/channels/{provider}/activation", p.auth(p.freshAdminOnly(p.handleActivateEmployeeChannel)))
+	mux.HandleFunc("POST /api/v1/employees/{name}/channels/{provider}/{action}", p.auth(p.freshAdminOnly(p.handleEmployeeChannelAction)))
 	mux.HandleFunc("PATCH /api/v1/employees/{name}", p.auth(p.updateEmployee))
 	// Sidebar service-status probes for the admin console (browser never
 	// sees the OpenViking root key — the portal holds it server-side).
@@ -932,6 +936,9 @@ func summarize(item *dev1alpha1.DigitalEmployee) map[string]any {
 	channels := map[string]any{"wecom": false}
 	if item.Spec.Channels != nil {
 		channels["wecom"] = item.Spec.Channels.Wecom
+		channels["feishu"] = item.Spec.Channels.Feishu
+		channels["wechat"] = item.Spec.Channels.Wechat
+		channels["feishuName"] = item.Spec.Channels.FeishuName
 		if item.Spec.Channels.WecomName != "" {
 			channels["wecomName"] = item.Spec.Channels.WecomName
 		}
