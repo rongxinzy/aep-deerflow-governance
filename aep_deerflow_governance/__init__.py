@@ -30,6 +30,25 @@ from langchain_core.messages import SystemMessage, ToolMessage
 
 _GOVERNANCE_TAG = "aep_governance_v1"
 
+# Actionable configuration error for knowledge tools that are called while the
+# employee has no knowledge-base policy at all (no ``knowledge_bases`` kwarg —
+# the DigitalEmployee carries no ``spec.knowledge.bases``). A missing policy is
+# a configuration error, never an allow: the weknora bridge credential is
+# tenant-wide and carries admin rights, so the middleware default-denies and
+# tells the administrator exactly what to configure (and how to inventory and
+# roll back). Kept as one constant so the runtime message and the migration
+# runbook cannot drift apart.
+_KNOWLEDGE_MISSING_POLICY_REASON = (
+    "知识库访问策略缺失（配置错误）：该数字员工未配置知识库白名单（spec.knowledge.bases 缺失），"
+    "缺策略时知识库工具按默认拒绝处理，原「未配置即不受限」的放行已移除。"
+    "管理员修复：① 只读盘点该员工实际需要的 kb id（用原 WeKnora 凭据做只读查询，不要整租户照搬）；"
+    "② 在 DigitalEmployee 的 spec.knowledge.bases 显式写入这些库"
+    "（bases: [{\"id\": \"kb-1\", \"name\": \"销售知识库\"}]，可多条）；"
+    "③ 保存并等 operator reconcile 完成后，重新发起本次调用。"
+    "若该员工确实不应访问任何知识库，请显式配置 bases: []（deny-all）。"
+    "迁移、盘点与回退步骤见 docs/design/knowledge-whitelist-default-deny.md。"
+)
+
 
 def _tool_field(call: Any, key: str, default: Any = None) -> Any:
     """Read one field off a tool call. langgraph hands ToolCallRequest.tool_call
@@ -109,24 +128,53 @@ class _IdentityResolver:
         self._lock = threading.Lock()
 
     def _load(self) -> dict[str, str]:
-        path = f"/aep/v1/admin/identity-sources/{self.source_id}/mappings?subjectType=user&limit=200"
-        req = urllib.request.Request(
-            self.client.base_url + path,
-            headers={"Authorization": f"Bearer {self.client.token()}",
-                     "X-AEP-Protocol-Version": "1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            body = json.load(resp)
         out: dict[str, str] = {}
-        for item in body.get("items") or body.get("mappings") or []:
-            if item.get("status") != "active":
-                continue
-            out[str(item.get("externalId"))] = str(item.get("localSubjectId"))
-        return out
+        source = urllib.parse.quote(self.source_id, safe="")
+        cursor = None
+        seen: set[str] = set()
+        deadline = time.monotonic() + 8
+        # Build a complete snapshot before publishing it to the cache. A
+        # failing/looping page must not leave a partial authorization map.
+        for _ in range(100):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Identity mapping pagination timed out")
+            params = {"subjectType": "user", "limit": "200"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            path = f"/aep/v1/admin/identity-sources/{source}/mappings?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(
+                self.client.base_url + path,
+                headers={"Authorization": f"Bearer {self.client.token()}",
+                         "X-AEP-Protocol-Version": "1.0"})
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
+                body = json.load(resp)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Identity mapping pagination timed out")
+            # ``items`` can be present but null while the same payload carries
+            # ``mappings`` (the older shape); the or-chain tolerates that
+            # instead of rejecting the page and clearing every identity.
+            items = body.get("items") or body.get("mappings") or []
+            if not isinstance(items, list):
+                raise ValueError("Invalid identity mapping page")
+            for item in items:
+                if not isinstance(item, dict) or item.get("status") != "active":
+                    continue
+                external, local = item.get("externalId"), item.get("localSubjectId")
+                if isinstance(external, str) and external and isinstance(local, str) and local:
+                    out[external] = local
+            cursor = body.get("nextCursor")
+            if cursor is None or cursor == "":
+                return out
+            if not isinstance(cursor, str) or cursor in seen:
+                raise ValueError("Invalid or repeated identity mapping cursor")
+            seen.add(cursor)
+        raise ValueError("Identity mapping pagination exceeded 100 pages")
 
     def resolve(self, external_id: str) -> str | None:
         now = time.time()
         with self._lock:
-            if not self._by_external or now - self._loaded_at > self.cache_seconds:
+            if self._loaded_at == 0.0 or now - self._loaded_at > self.cache_seconds:
                 try:
                     self._by_external = self._load()
                     self._loaded_at = now
@@ -147,10 +195,13 @@ class AepGovernanceMiddleware(AgentMiddleware):
       mappings, unmapped senders fail closed),
       governed_tools (tool names to wrap), team_names (team id -> department
       name used by the governed tools), knowledge_bases (kb id -> display
-      name: this employee's knowledge-base whitelist — None keeps the legacy
-      unrestricted bridge credential, {} denies every knowledge_search, and
-      calls must pass explicit in-list knowledge_base_ids because omitting
-      the argument searches everything the credential sees),
+      name: this employee's explicit knowledge-base whitelist — None means the
+      operator rendered no policy, which is a configuration error and denies
+      every knowledge tool with migration guidance for the administrator;
+      {} denies every knowledge call; an explicit dict allows only in-list
+      kb ids on read tools, and calls must pass an explicit in-list kb_id /
+      knowledge_base_ids because omitting the argument searches everything
+      the credential sees),
       scope_cache_seconds.
     """
 
@@ -183,10 +234,13 @@ class AepGovernanceMiddleware(AgentMiddleware):
                                                 "benchdept__dept_revenue", "benchdept__dept_headcount"))
         self.team_names = team_names or {}
         # Employee knowledge-base whitelist (kb id -> display name). None =
-        # legacy unrestricted bridge credential; {} = deny every search.
+        # no policy configured by the operator (configuration error: default
+        # deny, see _knowledge_whitelist_denial); {} = deny every call;
+        # explicit dict = the only allow list.
         self.knowledge_bases = None if knowledge_bases is None else {str(k): str(v) for k, v in knowledge_bases.items()}
         self.knowledge_online_authorization = bool(knowledge_online_authorization)
-        print(f"[aep-governance] construct governed={sorted(self.governed)} kb={sorted(self.knowledge_bases) if self.knowledge_bases is not None else None}", flush=True)
+        kb_policy = "missing" if self.knowledge_bases is None else (sorted(self.knowledge_bases) or "deny-all")
+        print(f"[aep-governance] construct governed={sorted(self.governed)} kb_policy={kb_policy}", flush=True)
         # Display name of this employee's bot on the IM platform: @-mentions
         # of this name address the bot itself, not a delegation target.
         self.im_bot_name = (im_bot_name or "").strip() or None
@@ -388,9 +442,15 @@ class AepGovernanceMiddleware(AgentMiddleware):
         return stripped != name or name in cls._WEKNORA_KNOWN_TOOLS
 
     def _knowledge_note(self) -> str:
-        """Prompt line listing this employee's usable knowledge bases."""
+        """Prompt line for this employee's knowledge bases (or the missing-policy notice)."""
         if self.knowledge_bases is None:
-            return ""
+            # Missing policy: the middleware default-denies every knowledge
+            # tool, so the prompt must not advertise a usable set — it tells
+            # the model to refuse gracefully and name the missing config.
+            return ("本数字员工未配置知识库白名单（缺策略），知识库工具按默认拒绝处理："
+                    "不要调用 hybrid_search / wiki_search / knowledge_search 等知识库工具；"
+                    "如用户需要企业知识库内容，请说明该员工的知识库授权尚未配置，"
+                    "需联系管理员在 spec.knowledge.bases 中显式配置可访问的知识库。")
         listing = "、".join(f"{kb}（{name}）" for kb, name in sorted(self.knowledge_bases.items())) or "未连接任何知识库"
         return (f"本数字员工可用的知识库：{listing}。"
                 f"知识检索只允许使用上述知识库：检索类工具（hybrid_search / wiki_search / knowledge_search 等）"
@@ -402,19 +462,28 @@ class AepGovernanceMiddleware(AgentMiddleware):
 
         The weknora bridge credential is tenant-wide and, on the deployed
         PyPI bridge, carries admin rights (create/delete tenant, knowledge
-        base, model). Under an explicit whitelist policy the whole weknora
-        server is therefore default-deny: only kb-scoped read tools pass,
-        only with explicit in-whitelist ids (omitting the id would act on
-        everything the credential sees). Everything else on the server —
-        admin writes, session chat, kb-less listings — is refused. Legacy
-        employees (no whitelist configured) keep the unrestricted bridge.
+        base, model). The whole weknora server is therefore default-deny:
+        only kb-scoped read tools pass, only with explicit in-whitelist ids
+        (omitting the id would act on everything the credential sees).
+        Everything else on the server — admin writes, session chat, kb-less
+        listings — is refused.
+
+        Policy states, in the order decided here:
+        - no policy (``knowledge_bases is None``): a configuration error —
+          every weknora tool is denied with an actionable message naming
+          ``spec.knowledge.bases`` (never a silent allow, and never an
+          automatic grant of unknown legacy bases to the employee);
+        - ``{}``: deny every knowledge call;
+        - explicit dict: the only allow list — read tools, in-list ids only.
         """
-        if self.knowledge_bases is None:
-            return None
         name = str(_tool_field(call, "name", "") or "")
         if not self._is_weknora_tool(name):
             return None
         tool = self._strip_server_prefix(name)
+        if self.knowledge_bases is None:
+            print(f"[aep-governance] DENY weknora tool={name} (no knowledge policy configured)", flush=True)
+            return ToolMessage(content=f"DENIED {name}: {_KNOWLEDGE_MISSING_POLICY_REASON}",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
         if self.knowledge_bases == {}:
             return ToolMessage(content=f"DENIED {name}: 未连接任何知识库（deny-all whitelist）。",
                                tool_call_id=str(_tool_field(call, "id", "") or ""))
@@ -597,6 +666,15 @@ class AepGovernanceMiddleware(AgentMiddleware):
         if denial is not None:
             return denial
         name = str(_tool_field(call, "name", "") or "")
+        # Mailbox credentials belong to the employee, not to every sender who
+        # can reach its bot. Identity is the minimum gate for all three tools;
+        # per-user mailbox grants and send approval remain separate policy.
+        if name in {"email_list", "email_read", "email_send"}:
+            if self.resolve_aep_user(getattr(request, "runtime", None)) is None:
+                return ToolMessage(
+                    content="DENIED: 当前为访客身份（未绑定企业账号），无法使用员工邮箱。请联系管理员绑定企业账号。",
+                    tool_call_id=str(_tool_field(call, "id", "") or ""),
+                )
         if name not in self.governed:
             return None
         args = dict(_tool_field(call, "args", None) or {})

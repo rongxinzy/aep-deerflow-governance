@@ -179,12 +179,15 @@ type KnowledgeSpec struct {
 	// kb ids plus display-name snapshots). Non-nil means an explicit
 	// policy: the operator renders it into the governance middleware,
 	// which denies knowledge_search calls outside the list (an empty
-	// non-nil list denies every search). Nil keeps the legacy behavior of
-	// an unrestricted bridge credential.
+	// non-nil list denies every search). Nil means no policy configured:
+	// the middleware treats that as a configuration error and
+	// default-denies every knowledge tool with administrator guidance,
+	// never an unrestricted bridge credential.
 	// +optional
 	// +kubebuilder:validation:MaxItems=200
 	// No omitempty: an explicitly empty list (deny every search) must
-	// survive JSON round-trips; absent/null decodes back to nil (legacy).
+	// survive JSON round-trips; absent/null decodes back to nil (= no
+	// policy, default-deny).
 	Bases []KnowledgeBaseRef `json:"bases"`
 }
 

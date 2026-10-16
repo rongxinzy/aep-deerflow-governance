@@ -120,7 +120,10 @@ weknora:
 
 # de-channel-gateway: the always-on platform websocket leg for IM channels
 # (enables hibernation for WeCom employees). Bot credentials live in the
-# de-channel-connections Secret as JSON, never in values.
+# de-channel-connections Secret as JSON, never in values; the same file carries
+# each employee's caller credential (caller_credential: token/expires_at/
+# operations) that the gateway requires on /inbox, /ack and /send — see
+# channel-gateway/PROTOCOL.md.
 channelGateway:
   enabled: false
   image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/de-channel-gateway", tag: "0.1.0" }
