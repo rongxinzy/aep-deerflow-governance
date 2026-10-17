@@ -95,13 +95,30 @@ identity and managed configuration; caller-provided tenant/deployment filters
 are rejected. It reads only Portal metadata and works without contacting WeKnora.
 
 Optional filters: `operationId`, `actorUserId`, `action`, `resourceId`, `outcome`.
-Each occurs once and is at most 256 bytes. `limit` defaults to 50 and accepts
+Each occurs once and is at most 256 bytes. `knowledgeBaseId` narrows the page to
+one base, including base/document actions, chunk updates, and runtime operations
+whose explicit knowledge-base scope includes that base. Chunk events retain
+their document `parentResourceId`; their base membership is recorded separately.
+Runtime multi-base membership is an exact JSON array match, never a substring
+match. A value that cannot be a knowledge base id is
+rejected with the same invalid-query error instead of answering an empty page. `limit` defaults to 50 and accepts
 1–100. `cursor` is the positive decimal audit ID returned by the previous page.
 Pages are ordered by descending audit ID with `id < cursor`; results include
 `items` and `nextCursor` (string or null). Each item contains `cursor`,
 `operationId`, `actorUserId`, `action`, `resourceType`, `resourceId`,
 `parentResourceId`, `outcome`, `statusCode`, and `createdAt`. No content bodies,
 credentials, upstream response bodies, or raw database errors are exposed.
+
+The additive startup migration adds `knowledge_base_ids` (JSONB, default `[]`)
+and a scoped document-parent lookup index. Deploy the Portal before enabling the
+console's per-base audit link. Existing events are not rewritten: legacy base
+and document events retain their original matching behavior; legacy chunk
+membership is recovered from document audit history in the same deployment and
+tenant, without an upstream lookup. If that history is absent, the chunk remains
+available in the global/operation-ID audit query but cannot be assigned to a base.
+Legacy runtime scopes are matched as exact comma-separated elements; old scopes
+containing IDs that themselves include commas are intrinsically ambiguous.
+New runtime events record the actual array and do not have that ambiguity.
 
 ### Runtime audit completion
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -40,7 +41,7 @@ func (p *portal) auditKnowledgeRuntime(ctx context.Context, requester identity, 
 // Runtime callbacks may finish only the operation started by this employee and
 // this exact opaque run context. Legacy/admin audit rows have empty bindings
 // and deliberately remain unavailable to the runtime completion endpoint.
-func (p *portal) beginKnowledgeRuntimeAudit(ctx context.Context, requester identity, tenant, employee, contextHash, action, resourceType, resourceID, parentResourceID string) (string, error) {
+func (p *portal) beginKnowledgeRuntimeAudit(ctx context.Context, requester identity, tenant, employee, contextHash, action, resourceType, resourceID, parentResourceID string, knowledgeBaseIDs ...string) (string, error) {
 	validAction := false
 	for _, input := range []string{"search", "list_bases", "read_base", "list_documents", "read_document", "read_chunks", "wiki_search", "wiki_read_page", "wiki_index", "runtime_read"} {
 		if action == knowledgeRuntimeAction(input) {
@@ -52,6 +53,14 @@ func (p *portal) beginKnowledgeRuntimeAudit(ctx context.Context, requester ident
 		return "", errors.New("invalid knowledge runtime audit context")
 	}
 	op := "kbrtop-" + randomSessionToken()
+	if len(knowledgeBaseIDs) > 0 {
+		bases, err := json.Marshal(knowledgeBaseIDs)
+		if err != nil {
+			return "", err
+		}
+		_, err = p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,knowledge_base_ids,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,'pending',0)`, op, requester.DeploymentID, tenant, requester.UserID, action, resourceType, resourceID, parentResourceID, employee, contextHash, string(bases))
+		return op, err
+	}
 	_, err := p.db.ExecContext(ctx, `INSERT INTO knowledge_audit_events (operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',0)`, op, requester.DeploymentID, tenant, requester.UserID, action, resourceType, resourceID, parentResourceID, employee, contextHash)
 	return op, err
 }
@@ -226,7 +235,7 @@ func (p *portal) handleKnowledgeRuntimeAuthorize(w http.ResponseWriter, r *http.
 		return
 	}
 	resourceID := strings.Join(allowed, ",")
-	op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, p.cfg.managedKnowledge.tenantID, employeeName, contextHash, action, "knowledge_scope", resourceID, "")
+	op, err := p.beginKnowledgeRuntimeAudit(r.Context(), requester, p.cfg.managedKnowledge.tenantID, employeeName, contextHash, action, "knowledge_scope", resourceID, "", allowed...)
 	if err != nil {
 		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库操作审计", "")
 		return

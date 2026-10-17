@@ -930,7 +930,7 @@ func (p *portal) handleManagedKnowledgeChunkUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 	in.ExpectedRevision = &old.ContentRevision
-	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "update_chunk", "chunk", chunkID, doc.ID)
+	op, err := p.beginManagedAudit(r.Context(), ident, tenant, "update_chunk", "chunk", chunkID, doc.ID, doc.KnowledgeBaseID)
 	if err != nil {
 		p.managedWriteError(w, 503, "AUDIT_UNAVAILABLE", "无法记录分块更新审计", "")
 		return

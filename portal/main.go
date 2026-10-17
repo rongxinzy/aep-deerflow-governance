@@ -276,6 +276,8 @@ CREATE TABLE IF NOT EXISTS knowledge_audit_events (
 ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS parent_resource_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_employee_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS runtime_context_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_audit_events ADD COLUMN IF NOT EXISTS knowledge_base_ids JSONB NOT NULL DEFAULT '[]';
+CREATE INDEX IF NOT EXISTS knowledge_audit_document_parent ON knowledge_audit_events (deployment_id,weknora_tenant_id,resource_id,parent_resource_id) WHERE resource_type='document';
 CREATE INDEX IF NOT EXISTS knowledge_audit_events_deployment_created ON knowledge_audit_events (deployment_id, created_at DESC)`)
 	return err
 }

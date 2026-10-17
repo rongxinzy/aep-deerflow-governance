@@ -319,8 +319,8 @@ func TestKnowledgeRuntimeAuthorizeUsesOpaqueSessionAndRechecksRevocation(t *test
 		WithArgs(sessionToken).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	expectKnowledgeGrant(mock, "dep-1", "tenant-1", "kb-1", "user", "user-1", false)
 	expectKnowledgeGrant(mock, "dep-1", "tenant-1", "kb-1", "team", "team-1", true)
-	mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code\) VALUES`).
-		WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg()).
+	mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,knowledge_base_ids,outcome,status_code\) VALUES`).
+		WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg(), `["kb-1"]`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	first := request()
 	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
@@ -422,8 +422,8 @@ func TestPortalRuntimeAuthorizationWithPythonWeKnoraBridge(t *testing.T) {
 	}
 	expectOperationStart := func() {
 		t.Helper()
-		mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,outcome,status_code\) VALUES`).
-			WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg()).
+		mock.ExpectExec(`INSERT INTO knowledge_audit_events \(operation_id,deployment_id,weknora_tenant_id,actor_user_id,action,resource_type,resource_id,parent_resource_id,runtime_employee_name,runtime_context_hash,knowledge_base_ids,outcome,status_code\) VALUES`).
+			WithArgs(sqlmock.AnyArg(), "dep-1", "tenant-1", "user-1", "runtime_search", "knowledge_scope", "kb-1", "", "employee-1", sqlmock.AnyArg(), `["kb-1"]`).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
 	expectAuthorization("kb-1", true)

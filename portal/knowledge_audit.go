@@ -50,6 +50,19 @@ func (p *portal) handleKnowledgeAudit(w http.ResponseWriter, r *http.Request, id
 			continue
 		}
 		switch key {
+		case "knowledgeBaseId":
+			if value == "" {
+				continue
+			}
+			if _, valid := safeKnowledgeID(value); !valid {
+				p.managedWriteError(w, 400, "INVALID_QUERY", "审计筛选无效", "")
+				return
+			}
+			// Explicit membership preserves chunk -> document parents and multi-base
+			// scopes. Legacy rows are resolved only from this tenant's local audit
+			// history, so deletion and upstream outages cannot break audit reads.
+			args = append(args, value)
+			where = append(where, knowledgeAuditBasePredicate(len(args)))
 		case "cursor":
 			id, err := strconv.ParseInt(value, 10, 64)
 			if err != nil || id <= 0 {
@@ -99,4 +112,20 @@ func (p *portal) handleKnowledgeAudit(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "nextCursor": next})
+}
+
+func knowledgeAuditBasePredicate(parameter int) string {
+	return fmt.Sprintf(`(knowledge_base_ids ? $%[1]d OR (knowledge_base_ids='[]'::jsonb AND (
+		(resource_type IN ('knowledge_base','knowledge-base') AND resource_id=$%[1]d)
+		OR (resource_type NOT IN ('chunk','knowledge_scope') AND parent_resource_id=$%[1]d)
+		OR (resource_type='knowledge_scope' AND $%[1]d=ANY(string_to_array(resource_id, ',')))
+		OR (resource_type='chunk' AND EXISTS (
+			SELECT 1 FROM knowledge_audit_events AS document_audit
+			WHERE document_audit.deployment_id=knowledge_audit_events.deployment_id
+			AND document_audit.weknora_tenant_id=knowledge_audit_events.weknora_tenant_id
+			AND document_audit.resource_type='document'
+			AND document_audit.resource_id=knowledge_audit_events.parent_resource_id
+			AND document_audit.parent_resource_id=$%[1]d
+		))
+	)))`, parameter)
 }
