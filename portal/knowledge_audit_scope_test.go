@@ -59,7 +59,7 @@ func TestKnowledgeAuditBaseMembershipPostgres(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, migrate(db))
 	require.NoError(t, migrate(db))
-	p := &portal{db: db, cfg: config{aepDeploymentID: "demo", managedKnowledge: managedKnowledgeConfig{tenantID: "10000"}}}
+	p := &portal{db: db, cfg: config{aepDeploymentID: "demo", adminRoles: set("admin"), managedKnowledge: managedKnowledgeConfig{tenantID: "10000"}}}
 	ident := adminIdentityForManagedTest()
 	chunkOp, err := p.beginManagedAudit(t.Context(), ident, "10000", "update_chunk", "chunk", "chunk-new", "doc-deleted", "kb-1")
 	require.NoError(t, err)
@@ -87,13 +87,14 @@ func TestKnowledgeAuditBaseMembershipPostgres(t *testing.T) {
 		p.handleKnowledgeAudit(w, httptest.NewRequest("GET", "/?knowledgeBaseId="+base, nil), ident)
 		require.Equal(t, 200, w.Code, w.Body.String())
 		body := w.Body.String()
-		if base == "kb-1" {
+		switch base {
+		case "kb-1":
 			for _, op := range []string{chunkOp, scopeOp, "base", "document", "chunk-old", "scope-old"} {
 				require.Contains(t, body, `"operationId":"`+op+`"`)
 			}
-		} else if base == "kb-" {
+		case "kb-":
 			require.Contains(t, body, `"items":[]`)
-		} else {
+		default:
 			require.Contains(t, body, scopeOp)
 		}
 		for _, op := range []string{"prefix", "foreign-deployment", "foreign-tenant", "unresolved-chunk"} {
