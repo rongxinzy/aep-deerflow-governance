@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: mcp
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.weknoraMcp.repository "tag" .Values.images.weknoraMcp.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.weknoraMcp.repository "tag" .Values.images.weknoraMcp.tag "digest" .Values.images.weknoraMcp.digest) }}
           env:
             - {name: WEKNORA_BASE_URL, value: {{ .Values.weknora.mcp.baseURL | default (printf "http://app.%s.svc.cluster.local:8080/api/v1" $ns) | quote }}}
             # 两个凭据均为密值：仅来自 values-<env>.local.yaml

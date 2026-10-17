@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: admin-console
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.adminConsole.repository "tag" .Values.images.adminConsole.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.adminConsole.repository "tag" .Values.images.adminConsole.tag "digest" .Values.images.adminConsole.digest) }}
           env:
             - {name: ZHIYUAN_AEP_BASE_URL, value: {{ .Values.adminConsole.aepBaseURL | quote }}}
             - {name: ZHIYUAN_PORTAL_BASE_URL, value: {{ .Values.adminConsole.portalBaseURL | quote }}}

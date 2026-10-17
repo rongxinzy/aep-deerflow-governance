@@ -33,7 +33,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: shipper
-              image: {{ $obs.auditShipper.image.repository }}:{{ $obs.auditShipper.image.tag }}
+              image: {{ include "zhiyuan.rawImage" $obs.auditShipper.image }}
               command: ["python3", "/script/ship.py"]
               env:
                 - {name: AEP_BASE_URL, value: "http://aep-control-service.aep-system.svc.cluster.local:8080"}

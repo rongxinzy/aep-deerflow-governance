@@ -120,14 +120,16 @@ Defaults to Chart.appVersion if tag is not specified.
 Return the frontend image with tag.
 */}}
 {{- define "weknora.frontend.image" -}}
-{{- printf "%s:%s" .Values.frontend.image.repository .Values.frontend.image.tag }}
+{{- /* Vendoring patch 6: optional digest pin. */ -}}
+{{- .Values.frontend.image.repository }}{{ with .Values.frontend.image.tag }}:{{ . }}{{ end }}{{ with .Values.frontend.image.digest }}@{{ . }}{{ end }}
 {{- end }}
 
 {{/*
 Return the docreader image with tag.
 */}}
 {{- define "weknora.docreader.image" -}}
-{{- printf "%s:%s" .Values.docreader.image.repository .Values.docreader.image.tag }}
+{{- /* Vendoring patch 6: optional digest pin. */ -}}
+{{- .Values.docreader.image.repository }}{{ with .Values.docreader.image.tag }}:{{ . }}{{ end }}{{ with .Values.docreader.image.digest }}@{{ . }}{{ end }}
 {{- end }}
 
 {{/*

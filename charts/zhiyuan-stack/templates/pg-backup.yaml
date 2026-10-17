@@ -33,7 +33,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           initContainers:
             - name: dump
-              image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" $b.dumpImage.repository "tag" $b.dumpImage.tag) }}
+              image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" $b.dumpImage.repository "tag" $b.dumpImage.tag "digest" $b.dumpImage.digest) }}
               env:
                 - name: ADMIN_DB_URL
                   valueFrom:
@@ -66,7 +66,7 @@ spec:
                 - {name: scratch, mountPath: /scratch}
           containers:
             - name: upload
-              image: "{{ $b.uploadImage.repository }}:{{ $b.uploadImage.tag }}"
+              image: {{ include "zhiyuan.rawImage" $b.uploadImage | quote }}
               env:
                 - {name: RCLONE_CONFIG_DST_TYPE, value: s3}
                 - {name: RCLONE_CONFIG_DST_PROVIDER, value: {{ $b.s3.provider | quote }}}
