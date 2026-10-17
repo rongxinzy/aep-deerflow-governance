@@ -138,7 +138,9 @@ func TestSharedRuntimeDiscoveryDependencyFailures(t *testing.T) {
 			}
 			if mode == "paperclip" {
 				runtimeExpectSpace(h, "editor")
-				pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "dependency unavailable", 503) }))
+				pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "dependency unavailable", http.StatusServiceUnavailable)
+				}))
 				defer pc.Close()
 				h.cfg.paperclipBaseURL = pc.URL
 			}
