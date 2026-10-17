@@ -103,8 +103,7 @@ func loadHibernationPolicy(ctx context.Context, c client.Client, namespace strin
 
 // effectiveIdleSeconds merges the precedence chain
 // CR.idleTimeout > policy.team.<id>.idleSeconds > policy.defaultIdleSeconds
-// > operator default. The channel-gateway URL relaxes the WeCom refusal:
-// with a gateway holding the platform websocket, those employees may sleep.
+// > operator default. Resident channel workers cannot scale to zero.
 func effectiveIdleSeconds(employee *v1alpha1.DigitalEmployee, policy HibernationPolicy, defaultIdleSeconds int32) int32 {
 	if employee.Spec.Hibernation != nil {
 		if seconds, ok := durationToSeconds(employee.Spec.Hibernation.IdleTimeout); ok {
@@ -143,9 +142,9 @@ func durationToSeconds(raw string) (int32, bool) {
 	return int32(seconds), true
 }
 
-// ensureHibernation renders (or removes) the KEDA objects. Employees with an
-// outbound IM channel (WeCom) are refused: their pod must stay resident or
-// messages are lost until the channel-gateway lands.
+// ensureHibernation renders (or removes) the KEDA objects. Employees with
+// resident IM channels are refused: their pod must stay resident or messages
+// are lost. A configured gateway URL alone does not prove a consumer exists.
 func (r *DigitalEmployeeReconciler) ensureHibernation(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
 	scaledObject := &KedaScaledObject{ObjectMeta: objectMeta(scaledObjectName(employee), employee.Namespace)}
 	if !hibernationEnabled(employee) || r.hibernationBlockedByChannel(employee) {
@@ -156,12 +155,12 @@ func (r *DigitalEmployeeReconciler) ensureHibernation(ctx context.Context, emplo
 		}
 		if hibernationEnabled(employee) && r.hibernationBlockedByChannel(employee) {
 			if err := r.setStatus(ctx, employee, v1alpha1.PhaseError,
-				"hibernation is not supported for employees with the WeCom channel (outbound websocket would lose messages); remove channels.wecom or disable hibernation"); err != nil {
+				"hibernation is not supported for resident IM channels (WeCom/Feishu/WeChat); disable channels or hibernation"); err != nil {
 				return err
 			}
 			// Loud failure: silently ignoring the request would look like
 			// hibernation while the pod actually stays resident.
-			return fmt.Errorf("hibernation unsupported for %s: WeCom channel requires a resident pod", employee.Name)
+			return fmt.Errorf("hibernation unsupported for %s: IM channels (WeCom/Feishu/WeChat) require a resident pod", employee.Name)
 		}
 		return nil
 	}
@@ -203,14 +202,12 @@ func (r *DigitalEmployeeReconciler) ensureHibernation(ctx context.Context, emplo
 	return nil
 }
 
-// hibernationBlockedByChannel: WeCom holds an outbound websocket inside the
-// runtime pod; scaling it to zero severs the channel — unless a
-// channel-gateway holds the platform leg for the cluster.
+// These providers hold their websocket or poller inside the runtime pod.
+// Do not lift this guard until an external consumption mode is implemented
+// and verified end to end; merely setting ChannelGatewayURL is insufficient.
 func (r *DigitalEmployeeReconciler) hibernationBlockedByChannel(employee *v1alpha1.DigitalEmployee) bool {
-	if r.ChannelGatewayURL != "" {
-		return false
-	}
-	return employee.Spec.Channels != nil && employee.Spec.Channels.Wecom
+	channels := employee.Spec.Channels
+	return channels != nil && (channels.Wecom || channels.Feishu || channels.Wechat)
 }
 
 func scaledObjectName(employee *v1alpha1.DigitalEmployee) string {

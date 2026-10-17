@@ -88,6 +88,7 @@ func TestChatProxyStampsInternalIdentity(t *testing.T) {
 	req.SetPathValue("name", "sales-helper")
 	req.SetPathValue("rest", "threads/t1/runs/wait")
 	req.Header.Set("Authorization", "Bearer browser-token")
+	req.Header.Set(channelAdminHeader, "caller-forged-capability")
 	w := httptest.NewRecorder()
 	p.handleChat(w, req, identity{UserID: "user-1", DisplayName: "User One"})
 
@@ -98,6 +99,9 @@ func TestChatProxyStampsInternalIdentity(t *testing.T) {
 		t.Fatalf("upstream saw %d requests", len(*seen))
 	}
 	up := (*seen)[0]
+	if up.Header.Get(channelAdminHeader) != "" {
+		t.Error("chat caller forwarded a channel-management capability")
+	}
 	if got := up.Header.Get("X-DeerFlow-Internal-Token"); got != "tok-123" {
 		t.Errorf("internal token not forwarded: %q", got)
 	}

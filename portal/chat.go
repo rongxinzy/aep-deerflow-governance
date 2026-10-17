@@ -238,6 +238,8 @@ func (p *portal) handleChat(w http.ResponseWriter, r *http.Request, ident identi
 			}
 			pr.Out.Header.Set("X-DeerFlow-Internal-Token", token)
 			pr.Out.Header.Set(ownerHeaderName, ident.UserID)
+			// Never accept a channel-management capability from a chat caller.
+			pr.Out.Header.Del(channelAdminHeader)
 			pr.Out.Header.Del(knowledgeContextHeader)
 			if knowledgeContext != "" {
 				pr.Out.Header.Set(knowledgeContextHeader, knowledgeContext)

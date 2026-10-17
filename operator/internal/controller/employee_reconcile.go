@@ -349,8 +349,11 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		kwargs := config["extensions"].(map[string]any)["middlewares"].([]any)[0].(map[string]any)["kwargs"].(map[string]any)
 		kwargs["im_bot_name"] = spec.Channels.WecomName
 	}
-	if spec.Channels != nil && (spec.Channels.Wecom || spec.Channels.Feishu) {
+	if spec.Channels != nil && (spec.Channels.Wecom || spec.Channels.Feishu || spec.Channels.Wechat) {
 		providers := map[string]any{}
+		if spec.Channels.Wechat {
+			providers["wechat"] = map[string]any{"enabled": true}
+		}
 		if spec.Channels.Wecom {
 			providers["wecom"] = map[string]any{"enabled": true}
 		}
@@ -362,7 +365,7 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		// not upstream's per-user browser binding (which would gate every
 		// unbound IM sender behind a "connect from DeerFlow Settings" reply).
 		config["channel_connections"] = map[string]any{"enabled": true, "require_bound_identity": false}
-		for _, name := range []string{"feishu", "wecom"} { // deterministic order
+		for _, name := range []string{"feishu", "wecom", "wechat"} { // deterministic order
 			if entry, ok := providers[name]; ok {
 				config["channel_connections"].(map[string]any)[name] = entry
 			}

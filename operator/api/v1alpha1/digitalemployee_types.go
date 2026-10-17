@@ -289,6 +289,9 @@ type A2ASpec struct {
 // gateway's admin channel-connections API and never appear in the CR or
 // the rendered config.
 type ChannelsSpec struct {
+	// Wechat enables the WeChat QR/token channel (separate from WeCom).
+	// +optional
+	Wechat bool `json:"wechat,omitempty"`
 	// Wecom enables the WeCom (企业微信) smart-bot channel.
 	// +optional
 	Wecom bool `json:"wecom,omitempty"`
