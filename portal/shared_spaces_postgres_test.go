@@ -44,6 +44,8 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(sharedSpaceSchema)
 	require.NoError(t, err)
+	_, err = db.Exec(sharedRuntimeSchema)
+	require.NoError(t, err)
 
 	aep := newSharedSpaceAEP(t)
 	defer aep.Close()

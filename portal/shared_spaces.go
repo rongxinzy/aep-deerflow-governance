@@ -707,70 +707,83 @@ func sharedFinish(ctx context.Context, tx *sql.Tx, space, request string, receip
 	_, err = tx.ExecContext(ctx, `UPDATE shared_space_commands SET state='applied',receipt=$3 WHERE space_id=$1 AND request_id=$2`, space, request, string(raw))
 	return err
 }
+
+type sharedSubmission struct {
+	RequestID       string `json:"requestId"`
+	ExpectedVersion int    `json:"expectedVersion"`
+	Title           string `json:"title"`
+	Body            string `json:"body"`
+}
+
 func (p *portal) sharedSubmit(w http.ResponseWriter, r *http.Request, i identity) error {
-	var b struct {
-		RequestID       string `json:"requestId"`
-		ExpectedVersion int    `json:"expectedVersion"`
-		Title           string `json:"title"`
-		Body            string `json:"body"`
-	}
+	var b sharedSubmission
 	if err := sharedDecode(w, r, &b); err != nil {
 		return err
 	}
-	if b.RequestID == "" || strings.TrimSpace(b.Title) == "" || strings.TrimSpace(b.Body) == "" {
-		return sharedFail(400, "请填写成果标题和内容")
+	status, receipt, err := p.sharedSubmitInput(r.Context(), r.PathValue("space"), r.PathValue("task"), i, b)
+	if err == nil {
+		writeJSON(w, status, receipt)
 	}
-	c, release, err := p.sharedLock(r.Context(), r.PathValue("space"))
+	return err
+}
+func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, i identity, b sharedSubmission, guards ...func(context.Context, *sql.Conn) error) (int, any, error) {
+	if b.RequestID == "" || strings.TrimSpace(b.Title) == "" || strings.TrimSpace(b.Body) == "" {
+		return 0, nil, sharedFail(400, "请填写成果标题和内容")
+	}
+	c, release, err := p.sharedLock(ctx, spaceID)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer release()
-	s, err := p.sharedLoad(r.Context(), c, r.PathValue("space"), i)
+	for _, guard := range guards {
+		if err := guard(ctx, c); err != nil {
+			return 0, nil, err
+		}
+	}
+	s, err := p.sharedLoad(ctx, c, spaceID, i)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	if !sharedCaps(s.Role)["submit"] {
-		return sharedFail(403, "当前成员只能查看")
+		return 0, nil, sharedFail(403, "当前成员只能查看")
 	}
-	taskID := r.PathValue("task")
-	task, err := p.sharedCheckTask(r.Context(), s, taskID)
+	task, err := p.sharedCheckTask(ctx, s, taskID)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	hash := sharedHash([]any{taskID, b})
-	if receipt, ok, err := sharedReplay(r.Context(), c, s.ID, b.RequestID, i.UserID, "submit", hash); err != nil {
-		return err
+	if receipt, ok, err := sharedReplay(ctx, c, s.ID, b.RequestID, i.UserID, "submit", hash); err != nil {
+		return 0, nil, err
 	} else if ok {
-		writeJSON(w, 200, receipt)
-		return nil
+		return 200, receipt, nil
 	}
 	if task["status"] == "done" || task["status"] == "cancelled" {
-		return sharedFail(409, "任务已结束，不能修改成果")
+		return 0, nil, sharedFail(409, "任务已结束，不能修改成果")
 	}
-	results, err := sharedResults(r.Context(), c, s.ID, taskID)
+	results, err := sharedResults(ctx, c, s.ID, taskID)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	if len(results) != b.ExpectedVersion {
-		return sharedFail(409, "成果版本已变化，请刷新")
+		return 0, nil, sharedFail(409, "成果版本已变化，请刷新")
 	}
 	if len(results) > 0 && results[len(results)-1].State != "changes_requested" {
-		return sharedFail(409, "请先完成当前成果审阅")
+		return 0, nil, sharedFail(409, "请先完成当前成果审阅")
 	}
 	baseRevision := ""
 	if len(results) > 0 {
 		previous := results[len(results)-1]
 		var current sharedDocument
-		if err = p.sharedPC(r.Context(), "GET", "/issues/"+url.PathEscape(taskID)+"/documents/"+previous.DocumentKey, nil, &current); err != nil {
-			return err
+		if err = p.sharedPC(ctx, "GET", "/issues/"+url.PathEscape(taskID)+"/documents/"+previous.DocumentKey, nil, &current); err != nil {
+			return 0, nil, err
 		}
 		if current.ID != previous.DocumentID || current.LatestRevisionID != previous.RevisionID || sharedHash(current.Body) != previous.BodyHash {
-			return sharedFail(409, "成果版本发生变化，请先核验")
+			return 0, nil, sharedFail(409, "成果版本发生变化，请先核验")
 		}
 		baseRevision = previous.RevisionID
 	}
-	if err = sharedStart(r.Context(), c, s.ID, taskID, b.RequestID, i.UserID, "submit", hash, map[string]any{"method": "PUT", "path": "/issues/" + url.PathEscape(taskID) + "/documents/shared-space-result", "title": b.Title, "bodyHash": sharedHash(b.Body), "baseRevisionId": baseRevision, "resultId": collaborationID(s.ID, b.RequestID), "version": len(results) + 1, "submittedBy": i.UserID}); err != nil {
-		return err
+	if err = sharedStart(ctx, c, s.ID, taskID, b.RequestID, i.UserID, "submit", hash, map[string]any{"method": "PUT", "path": "/issues/" + url.PathEscape(taskID) + "/documents/shared-space-result", "title": b.Title, "bodyHash": sharedHash(b.Body), "baseRevisionId": baseRevision, "resultId": collaborationID(s.ID, b.RequestID), "version": len(results) + 1, "submittedBy": i.UserID}); err != nil {
+		return 0, nil, err
 	}
 	// The document retains Paperclip native revisions. CAS fences concurrent
 	// draft edits; a lost acknowledgement blocks and is never blindly retried.
@@ -780,30 +793,34 @@ func (p *portal) sharedSubmit(w http.ResponseWriter, r *http.Request, i identity
 	if baseRevision != "" {
 		documentRequest["baseRevisionId"] = baseRevision
 	}
-	err = p.sharedPC(r.Context(), "PUT", "/issues/"+url.PathEscape(taskID)+"/documents/"+result.DocumentKey, documentRequest, &doc)
+	err = p.sharedPC(ctx, "PUT", "/issues/"+url.PathEscape(taskID)+"/documents/"+result.DocumentKey, documentRequest, &doc)
 	if err != nil || doc.ID == "" || doc.LatestRevisionID == "" || doc.Body != b.Body || (len(results) > 0 && doc.ID != results[len(results)-1].DocumentID) {
 		_ = sharedUnknown(c, s.ID, b.RequestID)
-		return sharedFail(423, "成果写入结果待核验，请勿重试")
+		return 0, nil, sharedFail(423, "成果写入结果待核验，请勿重试")
 	}
 	result.RevisionID = doc.LatestRevisionID
 	result.DocumentID = doc.ID
-	tx, err := c.BeginTx(r.Context(), nil)
+	tx, err := c.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO shared_space_results(id,space_id,task_id,version,title,document_key,document_id,revision_id,body_hash,submitted_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, result.ID, s.ID, taskID, result.Version, result.Title, result.DocumentKey, result.DocumentID, result.RevisionID, result.BodyHash, i.UserID, result.CreatedAt); err != nil {
-		return err
+	if _, err = tx.ExecContext(ctx, `INSERT INTO shared_space_results(id,space_id,task_id,version,title,document_key,document_id,revision_id,body_hash,submitted_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, result.ID, s.ID, taskID, result.Version, result.Title, result.DocumentKey, result.DocumentID, result.RevisionID, result.BodyHash, i.UserID, result.CreatedAt); err != nil {
+		return 0, nil, err
+	}
+	if len(guards) > 0 {
+		if err = p.sharedRuntimeEnqueue(ctx, tx, s.ID, taskID, result, "submitted", ""); err != nil {
+			return 0, nil, err
+		}
 	}
 	receipt := map[string]any{"result": result}
-	if err = sharedFinish(r.Context(), tx, s.ID, b.RequestID, receipt); err != nil {
-		return err
+	if err = sharedFinish(ctx, tx, s.ID, b.RequestID, receipt); err != nil {
+		return 0, nil, err
 	}
 	if err = tx.Commit(); err != nil {
-		return err
+		return 0, nil, err
 	}
-	writeJSON(w, 201, receipt)
-	return nil
+	return 201, receipt, nil
 }
 func (p *portal) sharedReviewResult(w http.ResponseWriter, r *http.Request, i identity) error {
 	var b struct {
@@ -900,6 +917,9 @@ func (p *portal) sharedReviewResult(w http.ResponseWriter, r *http.Request, i id
 	result.State = "changes_requested"
 	if b.Decision == "accept" {
 		result.State = "accepted"
+	}
+	if err = p.sharedRuntimeEnqueue(r.Context(), tx, s.ID, taskID, result, b.Decision, b.Reason); err != nil {
+		return err
 	}
 	receipt := map[string]any{"result": result}
 	if err = sharedFinish(r.Context(), tx, s.ID, b.RequestID, receipt); err != nil {
