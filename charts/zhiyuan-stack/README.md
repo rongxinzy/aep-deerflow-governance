@@ -39,7 +39,9 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 
 ## 版本策略
 
-- ghcr.io 是版本源（CI 按 git tag 出镜像）；集群统一从集群内 Harbor 拉取
+- ghcr.io 是版本源（CI 按组件 tag 出镜像：`operator-v<SemVer>` → `de-operator`，
+  `portal-v<SemVer>` → `de-portal`；PR 只构建不推送；推送时附 SBOM、provenance，
+  digest 写入 Actions job summary，pin 用 `repo:tag@digest`）；集群统一从集群内 Harbor 拉取
   （DNS 名 `harbor.zhiyuan.local:30443/zhiyuan`，2026-10-07 标准化），Harbor
   代理回源 ghcr/dockerhub，jfrog 降级为归档回退。镜像引用一律 DNS，禁 IP。
 - 员工运行时镜像 deerflow-gov 是血统镜像：新版本由 `build-deerflow-gov`

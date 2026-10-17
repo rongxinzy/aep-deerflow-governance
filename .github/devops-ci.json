@@ -3,6 +3,22 @@
     {
       "name": "CI",
       "path": ".github/workflows/ci.yml"
+    },
+    {
+      "name": "build-operator",
+      "path": ".github/workflows/build-operator.yml",
+      "paths": [
+        "operator/**",
+        ".github/workflows/build-operator.yml"
+      ]
+    },
+    {
+      "name": "build-portal",
+      "path": ".github/workflows/build-portal.yml",
+      "paths": [
+        "portal/**",
+        ".github/workflows/build-portal.yml"
+      ]
     }
   ]
 }
