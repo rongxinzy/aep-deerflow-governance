@@ -173,3 +173,17 @@ kubectl -n digital-employees create secret generic pg-backup-s3 \
 6. 按相反顺序恢复副本数，确认 portal 登录、员工对话可读历史。
 
 RPO = 备份周期（默认 24h）；RustFS（Skill 包）与 OpenViking 记忆不在此备份范围内。
+
+## 发版 BOM
+
+`scripts/gen-release-bom.py` 先渲染 chart（或读取已渲染好的 manifest），再列出这一版实际部署的全部镜像。范围包括 Pod 的 containers 和 initContainers，以及 operator、portal 通过 `*_IMAGE` 环境变量交给子 Pod 的镜像。每个镜像记录仓库、tag、digest 和使用方，输出 JSON（`zhiyuan-release-bom/v1`）或 Markdown：
+
+```bash
+scripts/gen-release-bom.py -f values-cicd.local.yaml --format markdown -o bom.md
+scripts/gen-release-bom.py -f values-cicd.local.yaml --resolve --require-digest -o bom.json
+```
+
+- `--resolve`：用 `crane digest` 或 `docker buildx imagetools inspect` 补全缺失的 digest，需要有镜像仓库的读权限。
+- `--require-digest`：只要还有镜像没按 digest 固定，就以退出码 1 结束，可以直接用作发版门禁。
+
+这个脚本只读，不会推送镜像、打 tag，也不会部署。
