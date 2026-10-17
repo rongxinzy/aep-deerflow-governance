@@ -2,20 +2,23 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.global.namespaces.main }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "main") | nindent 4 }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.global.namespaces.memory }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "memory") | nindent 4 }}
 {{- if .Values.aepStack.enabled }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: aep-system
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "aep") | nindent 4 }}
 {{- end }}
 {{- if .Values.observability.enabled }}
 ---
@@ -23,14 +26,16 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.observability.monitoringNamespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "monitoring") | nindent 4 }}
 {{- if .Values.observability.logging.enabled }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.observability.loggingNamespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "logging") | nindent 4 }}
 {{- end }}
 {{- end }}
 {{- if .Values.weknora.enabled }}
@@ -40,6 +45,16 @@ metadata:
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.redisPassword" "value" .Values.weknora.secrets.redisPassword) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.jwtSecret" "value" .Values.weknora.secrets.jwtSecret) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.systemAesKey" "value" .Values.weknora.secrets.systemAesKey) }}
+{{/* 不允许浮动 tag：前端与 docreader 的 tag 必须显式填写（非空、非 latest），
+     或给出 digest。 */}}
+{{- range $component := list "frontend" "docreader" }}
+{{- $img := (index $.Values.weknora $component).image }}
+{{- if and (or (empty $img.tag) (eq (toString $img.tag) "latest")) (empty $img.digest) }}
+{{- fail (printf "weknora.%s.image.tag must be pinned (got %q): set the deployed version or digest in values-<env>.local.yaml — floating tags are not reproducible" $component (toString $img.tag)) }}
+{{- end }}
+{{- include "zhiyuan.assertRealValue" (dict "name" (printf "weknora.%s.image.tag" $component) "value" $img.tag) }}
+{{- $_ := include "zhiyuan.digestSuffix" $img.digest }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Namespace
@@ -47,5 +62,6 @@ metadata:
   # required：空值会让父侧模板（default "weknora" 语义）与子图 helper
   # （default .Release.Namespace 语义）分叉到两个 namespace，直接 fail。
   name: {{ required "weknora.namespace is required when weknora.enabled (e.g. \"weknora\")" .Values.weknora.namespace }}
-  labels: {app.kubernetes.io/managed-by: {{ .Release.Service }}, app.kubernetes.io/instance: {{ .Release.Name }}}
+  labels:
+    {{- include "zhiyuan.nsLabels" (dict "root" $ "key" "weknora") | nindent 4 }}
 {{- end }}

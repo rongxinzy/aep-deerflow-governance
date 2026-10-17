@@ -117,5 +117,6 @@ func (r *DigitalEmployeeReconciler) conversationInitContainer(employee *dev1alph
 				Key:                  conversationAdminURLKey,
 			}},
 		}},
+		SecurityContext: r.initSecurityContext(),
 	}
 }

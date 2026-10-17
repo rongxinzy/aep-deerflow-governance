@@ -15,7 +15,7 @@ spec:
       serviceAccountName: de-portal
       containers:
         - name: portal
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.portal.repository "tag" .Values.images.portal.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.portal.repository "tag" .Values.images.portal.tag "digest" .Values.images.portal.digest) }}
           env:
             - {name: PORTAL_AEP_BASE_URL, value: {{ .Values.aep.baseURL | quote }}}
             - {name: PORTAL_AEP_DEPLOYMENT_ID, value: {{ .Values.aep.deploymentID | quote }}}
@@ -34,7 +34,7 @@ spec:
             # Default runtime image for newly applied employees. Rendered
             # here so the chart — not an ad-hoc `kubectl set env` — is the
             # record of what new employees run.
-            - {name: PORTAL_RUNTIME_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag) | quote }}}
+            - {name: PORTAL_RUNTIME_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag "digest" .Values.images.runtime.digest) | quote }}}
             # Platform default model for applies without an explicit pick
             # (workbench form); checked against the live model catalog at
             # apply time, so a drifted value fails loudly there.

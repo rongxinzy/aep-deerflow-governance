@@ -142,12 +142,16 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 		// them too is what turns a rendered-config change into a rollout
 		// (the runtime loads config at boot; a hot-updated ConfigMap alone
 		// would leave the old policy live forever).
+		// Template labels are compared too: the component label that
+		// NetworkPolicies select on must reach pods of existing employees.
 		if reflect.DeepEqual(previous.Spec.Template.Spec, typed.Spec.Template.Spec) &&
-			reflect.DeepEqual(previous.Spec.Template.Annotations, typed.Spec.Template.Annotations) {
+			reflect.DeepEqual(previous.Spec.Template.Annotations, typed.Spec.Template.Annotations) &&
+			reflect.DeepEqual(previous.Spec.Template.Labels, typed.Spec.Template.Labels) {
 			return nil
 		}
 		previous.Spec.Template.Spec = typed.Spec.Template.Spec
 		previous.Spec.Template.Annotations = typed.Spec.Template.Annotations
+		previous.Spec.Template.Labels = typed.Spec.Template.Labels
 		return c.Update(ctx, previous)
 	case *corev1.Service:
 		previous := existing.(*corev1.Service)
@@ -542,6 +546,8 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			InitialDelaySeconds: 40,
 			PeriodSeconds:       30,
 		},
+		Resources:       r.runtimeResources(employee),
+		SecurityContext: r.runtimeSecurityContext(),
 	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: deploymentName(employee), Namespace: employee.Namespace, Labels: labels(employee)},
@@ -554,7 +560,7 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			Selector: &metav1.LabelSelector{MatchLabels: labels(employee)},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels(employee),
+					Labels: podTemplateLabels(labels(employee), componentRuntime),
 					Annotations: map[string]string{
 						configHashAnnotation: checksum,
 					},

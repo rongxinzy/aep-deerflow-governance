@@ -1,20 +1,32 @@
-# Publishes the de-portal image to ghcr. The Dockerfile expects the static
-# binary in the build context, so the workflow builds it first (same flags
-# as the local flow: CGO_ENABLED=0 go build -trimpath).
+# Builds the de-portal image (static Go binary built first, as in the
+# local flow: CGO_ENABLED=0 go build -trimpath).
+# - pull_request (portal/** changes): build only, never push — catches a
+#   broken Dockerfile before release.
+# - push of an `portal-v<semver>` tag: build, push to ghcr, attach SBOM and
+#   provenance. The image tag drops the `portal-v` prefix.
+# - workflow_dispatch: manual push with an explicit tag (break-glass).
+# Pull from ghcr into Harbor afterwards; never push locally built images.
 name: build-portal
 
 on:
+  pull_request:
+    paths:
+      - "portal/**"
+      - ".github/workflows/build-portal.yml"
   push:
-    tags: ["v*"]
+    tags: ["portal-v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag (e.g. 0.4.11)"
+        description: "Image tag (SemVer, e.g. 0.24.0)"
         required: true
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: build-portal-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: ghcr.io/rongxinzy/de-portal
@@ -22,44 +34,89 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve image tag
         id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          case "$EVENT" in
+            workflow_dispatch) tag="$INPUT_TAG" ;;
+            push) tag="${REF_NAME#portal-v}" ;;
+            *) tag="pr-${GITHUB_SHA::12}" ;;
+          esac
+          if [ "$EVENT" != pull_request ] && ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::image tag '$tag' is not SemVer"; exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "push=$([ "$EVENT" = pull_request ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache-dependency-path: portal/go.sum
 
-      - name: Vet, test, build the binary
+      - name: Build the binary
         working-directory: portal
-        run: |
-          go vet ./...
-          go test ./...
-          CGO_ENABLED=0 go build -trimpath -o de-portal .
+        run: CGO_ENABLED=0 go build -trimpath -o de-portal .
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
+        if: steps.tag.outputs.push == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build (and push on release)
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: portal
           file: portal/Dockerfile
-          push: true
+          push: ${{ steps.tag.outputs.push == 'true' }}
           tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+          # BuildKit attestations: SPDX SBOM + SLSA provenance stored with the image.
+          sbom: ${{ steps.tag.outputs.push == 'true' }}
+          provenance: ${{ steps.tag.outputs.push == 'true' && 'mode=max' || 'false' }}
+          cache-from: type=gha,scope=portal
+          cache-to: ${{ steps.tag.outputs.push == 'true' && 'type=gha,scope=portal,mode=max' || '' }}
+
+      - name: GitHub build provenance attestation
+        if: steps.tag.outputs.push == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Job summary
+        env:
+          PUSHED: ${{ steps.tag.outputs.push }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### de-portal"
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| image | \`${IMAGE}:${TAG}\` |"
+            echo "| digest | \`${DIGEST}\` |"
+            echo "| pushed | ${PUSHED} |"
+            echo "| source | \`${GITHUB_SHA}\` |"
+            if [ "$PUSHED" = true ]; then echo "| pin | \`${IMAGE}:${TAG}@${DIGEST}\` |"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -72,7 +72,7 @@ spec:
         - {operator: Exists}
       containers:
         - name: cap
-          image: {{ $cap.image.repository }}:{{ $cap.image.tag }}
+          image: {{ include "zhiyuan.rawImage" $cap.image }}
           command: ["python3", "/script/cap.py"]
           env:
             - {name: LOOP_SECONDS, value: {{ $cap.loopSeconds | quote }}}
