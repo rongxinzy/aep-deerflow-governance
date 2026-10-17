@@ -18,6 +18,8 @@ global:
 
 # 默认 tag 与 zhiyuan-docs guides/cicd-environment.md「在役版本」表（2026-10-15
 # 只读核查）一致；该表之外的组件维持原值。
+# 每个镜像条目可选 digest: "sha256:<64位十六进制>"，渲染为 repo:tag@digest
+# （按 digest 拉取，tag 仅供阅读）。发版 BOM 由 scripts/gen-release-bom.py 生成。
 images:
   operator: { repository: rongxinzy/de-operator, tag: "0.21.0" }
   portal: { repository: rongxinzy/de-portal, tag: "0.23.6" }
@@ -29,6 +31,10 @@ images:
   embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
   # AEP control plane + datastore images (ns aep-system, see templates/aep-stack.yaml)
   postgres: { repository: postgres, tag: "17.6-alpine" }
+  # operator 的 db-init 初始化容器（为每个员工 CREATE DATABASE，需要 psql）。
+  # 渲染为 operator env CONVERSATION_INIT_IMAGE；未设置时 operator 回落到
+  # 编译期默认 docker.io postgres:17.6-alpine，离线环境会拉取失败。
+  conversationInit: { repository: postgres, tag: "17.6-alpine" }
   rustfs: { repository: rustfs, tag: "1.0.0" }
   aepControlService: { repository: aep-control-service, tag: "0.12.0" }
   aepAgentControl: { repository: aep-agent-control, tag: "0.1.0" }
@@ -103,6 +109,14 @@ weknora:
   # Deployment selector label（不可变）：收编进父 release（zhiyuan）时必须
   # 保持活体的 instance=weknora，否则 selector patch 会被 API server 拒绝。
   instanceName: weknora
+  # 前端与 docreader 不再使用 latest：tag（或 digest）必须在
+  # values-<env>.local.yaml 中显式填写（在役版本未入库，2026-10-17 审计）。
+  # 取在役镜像：kubectl -n weknora get pod -l app.kubernetes.io/component=<frontend|docreader>
+  #   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+  frontend:
+    image: {tag: ""}
+  docreader:
+    image: {tag: ""}
   # app 挂 RWO data-files 卷 → Recreate（RWO 铁律，2026-10-06 事故后固化）
   app:
     strategy: {type: Recreate}

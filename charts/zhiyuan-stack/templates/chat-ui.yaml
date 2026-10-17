@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: chat-ui
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.chatUI.repository "tag" .Values.images.chatUI.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.chatUI.repository "tag" .Values.images.chatUI.tag "digest" .Values.images.chatUI.digest) }}
           env:
             - name: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL
               value: {{ .Values.chatUI.gatewayBaseURL | quote }}

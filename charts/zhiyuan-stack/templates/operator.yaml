@@ -15,7 +15,7 @@ spec:
       serviceAccountName: de-operator
       containers:
         - name: operator
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.operator.repository "tag" .Values.images.operator.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.operator.repository "tag" .Values.images.operator.tag "digest" .Values.images.operator.digest) }}
           # 渲染 per-员工对话库 DSN 需要 CONVERSATION_ADMIN_DB_URL（平台凭据）。
           # 此前线上是手工 kubectl patch 补的 envFrom——chart 版本一旦接管即被
           # 覆盖丢失（2026-10-15 事故：全体员工 reconcile 失败）。
@@ -23,6 +23,8 @@ spec:
             - secretRef: {name: de-platform-creds}
           env:
             - {name: HIBERNATION_DB_URL_SECRET, value: de-portal-db}
+            # db-init 镜像走 Harbor（离线可安装），不依赖 operator 编译期的 docker.io 默认。
+            - {name: CONVERSATION_INIT_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.conversationInit.repository "tag" .Values.images.conversationInit.tag "digest" .Values.images.conversationInit.digest) | quote }}}
             {{- if .Values.workspaceGateway.image }}
             # 未钉 spec.image 的新建 PersonalWorkspace 走此默认（覆盖编译期
             # 的 0.4.2 老默认——无 rooms/email 能力，见 2026-10-15 协作群事故）

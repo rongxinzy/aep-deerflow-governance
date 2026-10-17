@@ -210,7 +210,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.postgres.repository "tag" .Values.images.postgres.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.postgres.repository "tag" .Values.images.postgres.tag "digest" .Values.images.postgres.digest) }}
           # 压测调优（loadgen FINDINGS）：默认 16MB → 512MB
           args: ["-c", "shared_buffers=512MB"]
           env:
@@ -237,7 +237,7 @@ spec:
       securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
       containers:
         - name: rustfs
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.rustfs.repository "tag" .Values.images.rustfs.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.rustfs.repository "tag" .Values.images.rustfs.tag "digest" .Values.images.rustfs.digest) }}
           env:
             - {name: RUSTFS_ACCESS_KEY, value: {{ .Values.aepStack.minioAccessKey | quote }}}
             - {name: RUSTFS_SECRET_KEY, value: {{ .Values.aepStack.minioSecretKey | quote }}}
@@ -264,7 +264,7 @@ spec:
       serviceAccountName: aep-control-service
       containers:
         - name: control
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepControlService.repository "tag" .Values.images.aepControlService.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepControlService.repository "tag" .Values.images.aepControlService.tag "digest" .Values.images.aepControlService.digest) }}
           env:
             # 外部广播地址（桌面端 metadata.agentControl.baseUrl）——产品决策
             # 待定（应换稳定入口域名）；cicd 现值见 values-cicd.example。
@@ -289,7 +289,7 @@ spec:
     spec:
       containers:
         - name: agent-control
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepAgentControl.repository "tag" .Values.images.aepAgentControl.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepAgentControl.repository "tag" .Values.images.aepAgentControl.tag "digest" .Values.images.aepAgentControl.digest) }}
           env:
             - {name: AEP_AGENT_CONTROL_BASE_URL, value: {{ .Values.aepStack.agentControlAdvertiseUrl | quote }}}
           envFrom:
@@ -316,7 +316,7 @@ spec:
     spec:
       containers:
         - name: authorizer
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayAuthorizer.repository "tag" .Values.images.aepGatewayAuthorizer.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayAuthorizer.repository "tag" .Values.images.aepGatewayAuthorizer.tag "digest" .Values.images.aepGatewayAuthorizer.digest) }}
           envFrom:
             - configMapRef: {name: aep-gateway-authorizer-config}
           ports: [{containerPort: 8090}]
@@ -334,7 +334,7 @@ spec:
       serviceAccountName: aep-gateway-reconciler
       containers:
         - name: reconciler
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayReconciler.repository "tag" .Values.images.aepGatewayReconciler.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.aepGatewayReconciler.repository "tag" .Values.images.aepGatewayReconciler.tag "digest" .Values.images.aepGatewayReconciler.digest) }}
           envFrom:
             - configMapRef: {name: aep-gateway-reconciler-config}
           ports: [{containerPort: 8091, name: health}]

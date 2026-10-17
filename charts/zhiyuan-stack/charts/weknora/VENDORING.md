@@ -31,6 +31,10 @@ the touched file):
    selectors are immutable: adopting the live objects into the umbrella
    release ("zhiyuan") must keep the label at "weknora" — the umbrella pins
    `weknora.instanceName: weknora`.
+6. **Image digest pin**（2026-10-17）— `weknora.frontend.image` and
+   `weknora.docreader.image` helpers append `@<digest>` when
+   `<component>.image.digest` is set (marked `Vendoring patch 6`). The umbrella requires both tags to be
+   pinned (non-empty, not `latest`) or a digest to be given.
 
 To re-vendor after a fork update: copy `helm/` over this directory and
-re-apply the five patches above (the inline comments mark every site).
+re-apply the six patches above (the inline comments mark every site).

@@ -58,6 +58,12 @@ weknora:
     persistence: {existingClaim: weknora-postgres-lh}
   redis:
     persistence: {existingClaim: weknora-redis-lh}
+  # 前端与 docreader 的在役版本（浮动 latest 已禁止）：从集群 imageID 取
+  # digest 填入，或填写确认过的 tag。
+  frontend:
+    image: {tag: "<deployed-weknora-ui-tag>"}
+  docreader:
+    image: {tag: "<deployed-weknora-docreader-tag>"}
   dataFiles:
     persistence: {existingClaim: weknora-data-files-lh}
   mcp:

@@ -18,5 +18,23 @@
 {{- if hasSuffix "/zhiyuan" .registry -}}
 {{- $repo = regexReplaceAll "^[^/]+/" .repo "" -}}
 {{- end -}}
-{{ .registry }}/{{ $repo }}:{{ .tag }}
+{{ .registry }}/{{ $repo }}:{{ .tag }}{{ include "zhiyuan.digestSuffix" .digest }}
+{{- end }}
+
+{{/* Optional digest pin: "sha256:<64 hex>" renders as "@sha256:..." after
+     the tag (repo:tag@digest — the runtime pulls by digest, the tag stays
+     for humans). Anything else fails rendering. */}}
+{{- define "zhiyuan.digestSuffix" -}}
+{{- if . -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .) -}}
+{{- fail (printf "image digest %q must look like sha256:<64 hex chars>" .) -}}
+{{- end -}}
+@{{ . }}
+{{- end -}}
+{{- end }}
+
+{{/* Fully-qualified image values ({repository, tag, digest?}) that do not go
+     through global.registry. */}}
+{{- define "zhiyuan.rawImage" -}}
+{{ .repository }}:{{ .tag }}{{ include "zhiyuan.digestSuffix" .digest }}
 {{- end }}

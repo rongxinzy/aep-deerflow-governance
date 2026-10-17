@@ -39,7 +39,7 @@ spec:
         {{- $root := . }}
         {{- range $index, $template := prepend .Values.workspaceAgent.additionalTemplates .Values.workspaceAgent.templateImage }}
         - name: template-materialize-{{ $index }}
-          image: {{ include "zhiyuan.image" (dict "registry" $root.Values.global.registry "repo" $template.repository "tag" $template.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" $root.Values.global.registry "repo" $template.repository "tag" $template.tag "digest" $template.digest) }}
           imagePullPolicy: {{ $root.Values.workspaceAgent.imagePullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
@@ -54,7 +54,7 @@ spec:
         {{- end }}
       containers:
         - name: agent
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.workspaceAgent.image.repository "tag" .Values.workspaceAgent.image.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.workspaceAgent.image.repository "tag" .Values.workspaceAgent.image.tag "digest" .Values.workspaceAgent.image.digest) }}
           imagePullPolicy: {{ .Values.workspaceAgent.imagePullPolicy }}
           args:
             - --namespace={{ include "zhiyuan.ns" . }}

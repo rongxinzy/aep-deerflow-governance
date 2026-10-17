@@ -45,6 +45,16 @@ metadata:
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.redisPassword" "value" .Values.weknora.secrets.redisPassword) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.jwtSecret" "value" .Values.weknora.secrets.jwtSecret) }}
 {{- include "zhiyuan.assertRealValue" (dict "name" "weknora.secrets.systemAesKey" "value" .Values.weknora.secrets.systemAesKey) }}
+{{/* 不允许浮动 tag：前端与 docreader 的 tag 必须显式填写（非空、非 latest），
+     或给出 digest。 */}}
+{{- range $component := list "frontend" "docreader" }}
+{{- $img := (index $.Values.weknora $component).image }}
+{{- if and (or (empty $img.tag) (eq (toString $img.tag) "latest")) (empty $img.digest) }}
+{{- fail (printf "weknora.%s.image.tag must be pinned (got %q): set the deployed version or digest in values-<env>.local.yaml — floating tags are not reproducible" $component (toString $img.tag)) }}
+{{- end }}
+{{- include "zhiyuan.assertRealValue" (dict "name" (printf "weknora.%s.image.tag" $component) "value" $img.tag) }}
+{{- $_ := include "zhiyuan.digestSuffix" $img.digest }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Namespace
