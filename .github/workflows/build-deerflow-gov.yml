@@ -30,6 +30,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 env:
   IMAGE: ghcr.io/rongxinzy/deerflow-gov
@@ -57,6 +59,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (governance variant)
+        id: build_governance
         if: inputs.variant != 'backend'
         uses: docker/build-push-action@v7
         with:
@@ -64,10 +67,13 @@ jobs:
           file: k3s/Dockerfile.deerflow-gov-governance
           push: true
           tags: ${{ env.IMAGE }}:${{ inputs.tag }}
+          sbom: true
+          provenance: mode=max
           build-args: |
             BASE=${{ env.IMAGE }}:${{ inputs.base }}
 
       - name: Build and push (backend variant)
+        id: build_backend
         if: inputs.variant == 'backend'
         uses: docker/build-push-action@v7
         with:
@@ -75,5 +81,40 @@ jobs:
           file: k3s/Dockerfile.deerflow-gov
           push: true
           tags: ${{ env.IMAGE }}:${{ inputs.tag }}
+          sbom: true
+          provenance: mode=max
           build-args: |
             BASE=${{ env.IMAGE }}:${{ inputs.base }}
+
+      - name: Resolve digest
+        id: digest
+        env:
+          GOV: ${{ steps.build_governance.outputs.digest }}
+          BACKEND: ${{ steps.build_backend.outputs.digest }}
+        run: echo "digest=${GOV:-$BACKEND}" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Job summary
+        env:
+          TAG: ${{ inputs.tag }}
+          BASE_TAG: ${{ inputs.base }}
+          VARIANT: ${{ inputs.variant }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          {
+            echo "### deerflow-gov"
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| image | \`${IMAGE}:${TAG}\` |"
+            echo "| digest | \`${DIGEST}\` |"
+            echo "| pin | \`${IMAGE}:${TAG}@${DIGEST}\` |"
+            echo "| base | \`${IMAGE}:${BASE_TAG}\` (lineage image, not reproducible from source) |"
+            echo "| variant | ${VARIANT} |"
+            echo "| source | \`${GITHUB_SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
