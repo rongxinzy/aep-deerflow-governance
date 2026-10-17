@@ -16,22 +16,30 @@ global:
     main: digital-employees
     memory: memory-system
 
+# 默认 tag 与 zhiyuan-docs guides/cicd-environment.md「在役版本」表（2026-10-15
+# 只读核查）一致；该表之外的组件维持原值。
+# 每个镜像条目可选 digest: "sha256:<64位十六进制>"，渲染为 repo:tag@digest
+# （按 digest 拉取，tag 仅供阅读）。发版 BOM 由 scripts/gen-release-bom.py 生成。
 images:
-  operator: { repository: rongxinzy/de-operator, tag: "0.14.0" }
-  portal: { repository: rongxinzy/de-portal, tag: "0.13.0" }
-  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.8" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.8.3" }
+  operator: { repository: rongxinzy/de-operator, tag: "0.21.0" }
+  portal: { repository: rongxinzy/de-portal, tag: "0.23.6" }
+  chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.15.0" }
   # runtime images are big and version rarely; the lineage lives on ghcr
-  runtime: { repository: rongxinzy/deerflow-gov, tag: "v18" }
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v26" }
   openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
   embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
   # AEP control plane + datastore images (ns aep-system, see templates/aep-stack.yaml)
   postgres: { repository: postgres, tag: "17.6-alpine" }
+  # operator 的 db-init 初始化容器（为每个员工 CREATE DATABASE，需要 psql）。
+  # 渲染为 operator env CONVERSATION_INIT_IMAGE；未设置时 operator 回落到
+  # 编译期默认 docker.io postgres:17.6-alpine，离线环境会拉取失败。
+  conversationInit: { repository: postgres, tag: "17.6-alpine" }
   rustfs: { repository: rustfs, tag: "1.0.0" }
-  aepControlService: { repository: aep-control-service, tag: "0.8.0" }
+  aepControlService: { repository: aep-control-service, tag: "0.12.0" }
   aepAgentControl: { repository: aep-agent-control, tag: "0.1.0" }
   aepGatewayAuthorizer: { repository: aep-gateway-authorizer, tag: "0.2.0" }
-  aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.4.3" }
+  aepGatewayReconciler: { repository: aep-gateway-reconciler, tag: "0.6.0" }
   # zhiyuan's MCP bridge in front of WeKnora (see templates/weknora-mcp.yaml)
   weknoraMcp: { repository: weknora-mcp, tag: "0.1.0" }
 
@@ -101,6 +109,14 @@ weknora:
   # Deployment selector label（不可变）：收编进父 release（zhiyuan）时必须
   # 保持活体的 instance=weknora，否则 selector patch 会被 API server 拒绝。
   instanceName: weknora
+  # 前端与 docreader 不再使用 latest：tag（或 digest）必须在
+  # values-<env>.local.yaml 中显式填写（在役版本未入库，2026-10-17 审计）。
+  # 取在役镜像：kubectl -n weknora get pod -l app.kubernetes.io/component=<frontend|docreader>
+  #   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+  frontend:
+    image: {tag: ""}
+  docreader:
+    image: {tag: ""}
   # app 挂 RWO data-files 卷 → Recreate（RWO 铁律，2026-10-06 事故后固化）
   app:
     strategy: {type: Recreate}
@@ -337,11 +353,11 @@ workspaceAgent:
   microvmSubnet: 192.168.77.0/24
   image:
     repository: rongxinzy/pw-node-agent
-    tag: 0.1.0
+    tag: 0.1.3
   # pw-rootfs 模板镜像（pi-durable-bench 构建，独立版本线 0.5.x）
   templateImage:
     repository: rongxinzy/pw-rootfs
-    tag: 0.5.0
+    tag: 0.5.1
   # Additional immutable versions available for per-workspace templateTag.
   # Keep pinned versions here during upgrades; never replace content under a tag.
   additionalTemplates: []
@@ -368,3 +384,126 @@ employees: []
 #    displayName: 销售助理
 #    wecom: false
 #    wecomName: ""
+
+# ---------------------------------------------------------------------------
+# 加固（P0）：网络隔离、Pod 安全、资源边界、PostgreSQL 异地备份。
+# 全部可按开关回退；滚动步骤见 chart README「加固（P0）」。
+# ---------------------------------------------------------------------------
+
+# 数字员工运行时容器默认值（operator 渲染 de-{name} 时使用；CR 的
+# spec.resources 优先）。需要 operator 带 RUNTIME_DEFAULT_RESOURCES /
+# RUNTIME_SECURITY_CONTEXT 支持的版本，旧 operator 忽略这两个 env。
+# 注意：operator 升级后首次 reconcile 会让每个员工按 Recreate 重建一次。
+runtimeDefaults:
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 4Gi}
+  # deerflow-gov 镜像没有声明 USER（2026-10-16 核对 ghcr v16 镜像配置：
+  # User 为空 → root），因此默认不强制 runAsNonRoot。镜像改为非 root 后
+  # 再加 runAsNonRoot: true / runAsUser。db-init 初始化容器继承除身份字段
+  # 外的同一配置。置为 {} 恢复旧行为（不设 securityContext）。
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: [ALL]}
+    seccompProfile: {type: RuntimeDefault}
+
+# NetworkPolicy：chart 管理的命名空间默认拒绝入站，再按调用关系放行；
+# 数字员工运行时额外限制出站。enabled=false 整体不渲染（回退路径）。
+networkPolicy:
+  enabled: true
+  # AEP /internal 与 /aep/v1 同端口（control-service :8080），L3/L4 策略
+  # 无法区分路径。cilium = 渲染 CiliumNetworkPolicy，对运行时 → control-service
+  # 只放行 /aep/v1/*（需集群为 Cilium 且启用 L7 代理）；none = 只渲染标准
+  # NetworkPolicy，运行时可访问 control-service 全部路径（/internal 仅靠令牌）。
+  aepInternalGuard: cilium
+  # 运行时允许访问的 control-service 路径（Cilium L7 正则，匹配完整路径）。
+  aepAllowedPaths: ["/aep/v1/.*", "/healthz", "/readyz"]
+  # Pod/Service 网段：运行时“访问外网”规则从 0.0.0.0/0 中排除，避免绕过
+  # 集群内白名单（cicd：podCIDR 10.42.0.0/16、serviceCIDR 10.43.0.0/16）。
+  clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16]
+  dns:
+    namespace: kube-system
+    podLabels: {k8s-app: kube-dns}
+  # Prometheus 所在命名空间（抓取 /metrics 的入站放行）；默认取
+  # observability.monitoringNamespace。
+  monitoringNamespace: ""
+  higressNamespace: higress-system
+  # 需要直连 aep-system/postgres 的其他命名空间：KEDA 的 postgresql 唤醒
+  # 触发器（员工休眠/唤醒）从 keda 命名空间轮询 portal 库。
+  postgresExtraFromNamespaces: [keda]
+  runtime:
+    # 运行时访问集群外地址（Web 工具、邮件、外部 MCP 等）。false = 只允许
+    # 集群内白名单 + 模型网关。
+    allowExternalEgress: true
+    # 外网出站端口；空 = 全部端口。
+    externalEgressPorts: []
+    # 额外允许调用运行时 :8001 的 Pod（主命名空间内的 app 标签）。operator
+    # 升级出 component 标签之前，带 A2A 的员工需在此列出其 de-<name>-a2a。
+    extraIngressApps: []
+    # 额外出站规则（原样拼入运行时出站策略的 egress 列表）。
+    extraEgress: []
+  # 主命名空间内非本 chart 管理的 Pod（zhiyuanBotUI、pi-companion、个人工作区
+  # 等）是否保持入站全开。默认 true 以免默认拒绝误伤；用 Hubble 盘点调用
+  # 关系并补齐规则后再置 false。
+  openUnmanagedMainNamespacePods: true
+  # 观测命名空间（monitoring/logging）的默认拒绝与放行规则。
+  observability: true
+  # WeKnora 子图命名空间：子图内部调用关系（docreader/redis/postgres）
+  # 尚未盘点，默认不渲染。
+  weknora: false
+
+# Pod Security Admission 命名空间标签。主命名空间在 workspaceAgent.enabled
+# 时自动 enforce=privileged（pw-node-agent 为特权 + hostNetwork + hostPath）。
+podSecurity:
+  enabled: true
+  version: latest
+  levels:
+    main: {enforce: baseline, warn: restricted, audit: restricted}
+    memory: {enforce: baseline, warn: restricted, audit: restricted}
+    aep: {enforce: baseline, warn: restricted, audit: restricted}
+    # node-exporter / fluent-bit / node-log-cap 需要 hostPath / hostNetwork。
+    monitoring: {enforce: privileged, warn: baseline, audit: baseline}
+    logging: {enforce: privileged, warn: baseline, audit: baseline}
+
+# 主命名空间资源边界。LimitRange 给未声明资源的容器补默认值（只作用于新
+# 建 Pod）；ResourceQuota 需按集群实测容量设定，默认关闭。
+resourceBoundaries:
+  limitRange:
+    enabled: true
+    defaultRequest: {cpu: 100m, memory: 128Mi}
+    default: {cpu: "2", memory: 4Gi}
+    max: {cpu: "8", memory: 16Gi}
+  resourceQuota:
+    enabled: false
+    hard:
+      requests.cpu: "16"
+      requests.memory: 32Gi
+      limits.memory: 96Gi
+      persistentvolumeclaims: "60"
+
+# PostgreSQL 逻辑备份（pg_dumpall，覆盖 AEP、portal 与全部 de_* 对话库）
+# 上传到集群外 S3 兼容存储。s3.bucket 为空时不渲染（没有异地目标就不假装
+# 有备份）。恢复步骤见 chart README「PostgreSQL 备份与恢复」。
+backup:
+  postgres:
+    enabled: true
+    schedule: "23 2 * * *"
+    # 超过该天数的备份对象在本次上传成功后删除。
+    retentionDays: 14
+    # 连接串来源（主命名空间内 Secret；需要可连维护库的管理员 DSN）。
+    sourceSecret: {name: de-platform-creds, key: CONVERSATION_ADMIN_DB_URL}
+    s3:
+      endpoint: ""          # 例：https://s3.example.com（不要指向本集群 rustfs）
+      region: us-east-1
+      bucket: ""
+      prefix: zhiyuan/postgres
+      provider: Other       # rclone S3 provider：AWS / Minio / Ceph / Other …
+      forcePathStyle: true
+      # 凭据只通过已有 Secret 引用（主命名空间），不在 values 中写明文。
+      credentialsSecret: {name: pg-backup-s3, accessKeyIdKey: AWS_ACCESS_KEY_ID, secretAccessKeyKey: AWS_SECRET_ACCESS_KEY}
+    dumpImage: {repository: postgres, tag: "17.6-alpine"}
+    uploadImage: {repository: "harbor.zhiyuan.local:30443/zhiyuan/rclone/rclone", tag: "1.71.1"}
+    scratchSize: 10Gi
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 1Gi}

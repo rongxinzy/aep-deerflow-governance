@@ -8,7 +8,7 @@ spec:
   displayName: {{ .displayName | default .name | quote }}
   runtime:
     type: deerflow
-    image: {{ include "zhiyuan.image" (dict "registry" $.Values.global.registry "repo" $.Values.images.runtime.repository "tag" $.Values.images.runtime.tag) }}
+    image: {{ include "zhiyuan.image" (dict "registry" $.Values.global.registry "repo" $.Values.images.runtime.repository "tag" $.Values.images.runtime.tag "digest" $.Values.images.runtime.digest) }}
     model: {{ $.Values.models.anthropic.wireName }}
     modelBaseURL: http://higress-gateway.higress-system.svc.cluster.local
     provider: anthropic

@@ -1,4 +1,4 @@
-FROM debian:12.12-slim
+FROM debian:13.6-slim
 RUN set -eux; \
     printf 'deb http://mirrors.aliyun.com/debian/ bookworm main\ndeb http://mirrors.aliyun.com/debian-security/ bookworm-security main\n' > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/*.sources; \

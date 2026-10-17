@@ -215,6 +215,12 @@ func (p *portal) collaborationAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ident := identity{UserID: ws.Spec.Owner, Username: owner.Username, DisplayName: owner.DisplayName, Kind: "human"}
+	if strings.HasPrefix(r.PathValue("action"), "space-") {
+		if err := p.sharedRuntimeAgent(w, r, ident, &ws, companion); err != nil {
+			sharedWriteError(w, err)
+		}
+		return
+	}
 	switch r.PathValue("action") {
 	case "directory":
 		if r.Method == "GET" {

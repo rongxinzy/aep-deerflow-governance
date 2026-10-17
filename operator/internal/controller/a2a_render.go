@@ -59,7 +59,7 @@ func renderA2ADeployment(employee *v1alpha1.DigitalEmployee) *appsv1.Deployment 
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: a2aLabels(employee)},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: a2aLabels(employee)},
+				ObjectMeta: metav1.ObjectMeta{Labels: podTemplateLabels(a2aLabels(employee), componentA2A)},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{container},
 					Volumes: []corev1.Volume{{

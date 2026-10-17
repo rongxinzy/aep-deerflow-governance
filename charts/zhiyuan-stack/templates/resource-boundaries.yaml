@@ -1,0 +1,28 @@
+{{- /* 主命名空间资源边界（加固 P0）。LimitRange 只作用于之后创建的 Pod。 */ -}}
+{{- $rb := .Values.resourceBoundaries }}
+{{- if $rb.limitRange.enabled }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: zhiyuan-container-defaults
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {{ toJson $rb.limitRange.defaultRequest }}
+      default: {{ toJson $rb.limitRange.default }}
+      {{- with $rb.limitRange.max }}
+      max: {{ toJson . }}
+      {{- end }}
+{{- end }}
+{{- if $rb.resourceQuota.enabled }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: zhiyuan-quota
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  hard:
+    {{- toYaml $rb.resourceQuota.hard | nindent 4 }}
+{{- end }}

@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: {{ .Values.channelGateway.image.repository }}:{{ .Values.channelGateway.image.tag }}
+          image: {{ include "zhiyuan.rawImage" .Values.channelGateway.image }}
           imagePullPolicy: IfNotPresent
           env:
             - name: PORTAL_DB_URL
@@ -76,7 +76,7 @@ spec:
         - {key: rtl.ai/externally-managed, operator: Exists, effect: NoSchedule}
       containers:
         - name: prepull
-          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag) }}
+          image: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.runtime.repository "tag" .Values.images.runtime.tag "digest" .Values.images.runtime.digest) }}
           # Hold the (already-pulled) image resident so node image GC keeps it.
           command: ["/bin/sh", "-c", "exec sleep 365d"]
           resources:

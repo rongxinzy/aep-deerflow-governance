@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: elasticsearch
-          image: {{ $obs.logging.elasticsearch.image.repository }}:{{ $obs.logging.elasticsearch.image.tag }}
+          image: {{ include "zhiyuan.rawImage" $obs.logging.elasticsearch.image }}
           env:
             - {name: discovery.type, value: single-node}
             - {name: xpack.security.enabled, value: "false"}
@@ -68,7 +68,7 @@ spec:
     spec:
       containers:
         - name: kibana
-          image: {{ $obs.logging.kibana.image.repository }}:{{ $obs.logging.kibana.image.tag }}
+          image: {{ include "zhiyuan.rawImage" $obs.logging.kibana.image }}
           env:
             - {name: ELASTICSEARCH_HOSTS, value: "http://elasticsearch.{{ $ln }}.svc.cluster.local:9200"}
           ports: [{containerPort: 5601}]
@@ -178,7 +178,7 @@ spec:
         - {key: node-role.kubernetes.io/controlplane, operator: Exists, effect: NoSchedule}
       containers:
         - name: fluent-bit
-          image: {{ $obs.logging.fluentBit.image.repository }}:{{ $obs.logging.fluentBit.image.tag }}
+          image: {{ include "zhiyuan.rawImage" $obs.logging.fluentBit.image }}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 192Mi}

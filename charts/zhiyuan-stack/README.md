@@ -39,7 +39,9 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 
 ## 版本策略
 
-- ghcr.io 是版本源（CI 按 git tag 出镜像）；集群统一从集群内 Harbor 拉取
+- ghcr.io 是版本源（CI 按组件 tag 出镜像：`operator-v<SemVer>` → `de-operator`，
+  `portal-v<SemVer>` → `de-portal`；PR 只构建不推送；推送时附 SBOM、provenance，
+  digest 写入 Actions job summary，pin 用 `repo:tag@digest`）；集群统一从集群内 Harbor 拉取
   （DNS 名 `harbor.zhiyuan.local:30443/zhiyuan`，2026-10-07 标准化），Harbor
   代理回源 ghcr/dockerhub，jfrog 降级为归档回退。镜像引用一律 DNS，禁 IP。
 - 员工运行时镜像 deerflow-gov 是血统镜像：新版本由 `build-deerflow-gov`
@@ -107,3 +109,81 @@ helm rollback zhiyuan <rev> -n digital-employees      # 一键回退
 4. cicd 的 systemd 版 node-log-cap 与 DaemonSet 版**二选一**（避免双写者）：
    收编时在 local values 关掉 DS（`observability.nodeLogCap.enabled: false`）
    或先卸载主机单元。
+
+## 加固（P0）：网络隔离、Pod 安全、资源边界、异地备份
+
+全部为增量配置，旧 values 无需修改即可升级；每一项都有开关可回退。
+
+| 项 | values | 默认 | 回退 |
+|---|---|---|---|
+| NetworkPolicy（默认拒绝入站 + 白名单；运行时出站白名单） | `networkPolicy.*` | 开 | `networkPolicy.enabled=false` |
+| AEP `/internal` 对运行时不可达（Cilium L7） | `networkPolicy.aepInternalGuard` | `cilium` | `none`（仅 L4，/internal 只靠令牌） |
+| 运行时默认 requests/limits 与 securityContext | `runtimeDefaults.*` | 开 | 置为 `{}` |
+| PSA 命名空间标签 | `podSecurity.*` | baseline enforce / restricted warn+audit | `podSecurity.enabled=false` |
+| LimitRange / ResourceQuota（主命名空间） | `resourceBoundaries.*` | LimitRange 开 / Quota 关 | 各自 `enabled=false` |
+| PostgreSQL 异地备份 CronJob | `backup.postgres.*` | 配了 `s3.bucket` 才渲染 | 清空 `s3.bucket` |
+
+### 网络策略说明
+
+- 默认拒绝入站覆盖：`aep-system`、主命名空间、记忆命名空间；`observability.enabled` 时含 monitoring/logging（`networkPolicy.observability`）；WeKnora 命名空间默认不覆盖（`networkPolicy.weknora`，子图内部调用未盘点）。
+- 已通过 NodePort 对集群外开放的端口（control-service 8080、agent-control 8080、gateway-authorizer 8090、portal 8090、管理后台 5173/5174、chat-ui 3000、grafana、kibana、a2a 8102）入站不限来源：这些端口本来就面向集群外，访问控制在应用层。
+- 数字员工运行时（`digitalemployee.zhiyuan.io/name` 存在且 component≠a2a）：
+  - 入站 :8001 只接受 portal、operator、channel-gateway、a2a 适配器、监控命名空间（以及 `networkPolicy.runtime.extraIngressApps`）；员工之间不能直连。
+  - 出站只允许：DNS、aep-system/postgres:5432、gateway-authorizer:8090、Higress 命名空间、openviking:1933、WeKnora 命名空间、channel-gateway、a2a 适配器:8102、集群外地址（排除 `clusterCIDRs`，`allowExternalEgress=false` 可关）。rustfs、其他员工、portal 不在白名单。
+  - control-service 只经 CiliumNetworkPolicy 放行 `aepAllowedPaths`（默认 `/aep/v1/.*`、`/healthz`、`/readyz`），`/internal/*` 被 L7 代理拒绝（HTTP 403）。
+- 主命名空间里不由本 chart 渲染的 Pod（zhiyuanBotUI、pi-companion、个人工作区等）默认保留入站全开（`openUnmanagedMainNamespacePods=true`），用 Hubble 盘点后再收紧。
+- KEDA 唤醒触发器从 `keda` 命名空间直连 postgres，已在 `postgresExtraFromNamespaces` 放行。
+
+### 运行时 Pod 安全
+
+- operator 读取 `RUNTIME_DEFAULT_RESOURCES` / `RUNTIME_SECURITY_CONTEXT`（chart 从 `runtimeDefaults` 渲染），CR 的 `spec.resources` 优先。需要包含该功能的 operator 版本；旧 operator 忽略这两个 env。
+- operator 升级后首次 reconcile 会让**每个员工按 Recreate 重建一次**（Pod 模板变化），请安排窗口。
+- deerflow-gov 镜像未声明 `USER`（以 root 运行，2026-10-16 核对 ghcr v16 镜像配置），所以默认不加 `runAsNonRoot`；镜像改为非 root 后再在 `runtimeDefaults.securityContext` 加 `runAsNonRoot: true` 与 `runAsUser`。
+- 主命名空间在 `workspaceAgent.enabled=true` 时 PSA enforce 自动为 `privileged`（pw-node-agent 是特权 + hostNetwork + hostPath）。
+
+### 滚动顺序（先 staging）
+
+1. `helm diff upgrade`（或 `helm template` 对比）确认只新增 NetworkPolicy/LimitRange/CronJob、Namespace 标签与镜像 tag 变化。
+2. 先以 `networkPolicy.enabled=false` 升级，确认镜像版本与 PSA warn 输出（`kubectl label --dry-run=server` 可预览违规 Pod）。
+3. 打开 `networkPolicy.enabled=true`，用 Hubble 观察 `verdict=DROPPED`：`hubble observe -n digital-employees --verdict DROPPED`（另看 aep-system、memory-system）。
+4. 按下方连通性清单逐项验证，通过后再上生产。
+
+连通性清单：portal 登录与对话（portal→运行时）；员工记忆读写（运行时→openviking）；知识库检索（运行时→weknora-mcp）；模型调用两条路径（运行时→authorizer→Higress、Anthropic 透传）；对话持久化（运行时→postgres）；新建员工（operator→运行时账号开通、db-init→postgres）；休眠/唤醒（KEDA→postgres）；A2A 委托；IM 通道（channel-gateway）；Prometheus targets 全部 up；从运行时 Pod `curl control-service:8080/internal/gateway/identity` 返回 403（L7 拒绝）、`/aep/v1/...` 正常；从运行时 Pod 访问其他员工 `de-<x>:8001`、`rustfs:9000` 超时。
+
+## PostgreSQL 备份与恢复（backup.postgres.*）
+
+CronJob `pg-backup`（主命名空间）每天 `pg_dumpall`（角色 + AEP + portal + 全部 `de_*` 对话库）→ gzip → 校验文件头 → rclone 上传到集群外 S3 `s3://<bucket>/<prefix>/aep-all-<UTC时间>.sql.gz`（附 `.sha256`），上传成功后删除超过 `retentionDays` 的旧对象；`--immutable` 保证不覆盖历史文件。替代 `k3s/pg-backup.yaml`（同节点 local-path，非异地）；启用后可删除旧 CronJob 与 `pg-backups` PVC。
+
+准备：在主命名空间创建凭据 Secret（只引用，不进 values）：
+
+```bash
+kubectl -n digital-employees create secret generic pg-backup-s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+```
+
+然后在 `values-<env>.local.yaml` 设置 `backup.postgres.s3.endpoint/bucket`，并把 rclone 镜像同步进 Harbor（`backup.postgres.uploadImage`）。手动触发一次：`kubectl -n digital-employees create job pg-backup-manual --from=cronjob/pg-backup`。
+
+恢复（在演练环境先做一遍）：
+
+1. 下载并校验：`rclone copy dst:<bucket>/<prefix>/aep-all-<stamp>.sql.gz{,.sha256} .`，`sha256sum -c aep-all-<stamp>.sql.gz.sha256`。
+2. 停写（启用休眠的员工先暂停 KEDA：`kubectl -n digital-employees annotate scaledobject --all autoscaling.keda.sh/paused=true`）：`kubectl -n digital-employees scale deploy de-operator de-portal --replicas=0`，各员工运行时 `kubectl -n digital-employees scale deploy -l digitalemployee.zhiyuan.io/name --replicas=0`；`kubectl -n aep-system scale deploy aep-control-service aep-agent-control aep-gateway-reconciler --replicas=0`。
+3. 准备空实例：在新 PVC 上起同版本 postgres（17.6），或在原实例上逐个 `DROP DATABASE`（不含 `postgres`/模板库）。`pg_dumpall` 的输出会 `CREATE ROLE`，已存在的角色会报错但不影响继续。
+4. 导入：`gunzip -c aep-all-<stamp>.sql.gz | kubectl -n aep-system exec -i deploy/postgres -- psql -U <超级用户> -d postgres -v ON_ERROR_STOP=0`，检查输出里除 “role already exists” 外没有错误。
+5. 核对：`\l` 中 `aep`、portal 库与全部 `de_*` 存在；抽查 AEP 用户数、portal 员工记录、某员工最近对话。
+6. 按相反顺序恢复副本数，确认 portal 登录、员工对话可读历史。
+
+RPO = 备份周期（默认 24h）；RustFS（Skill 包）与 OpenViking 记忆不在此备份范围内。
+
+## 发版 BOM
+
+`scripts/gen-release-bom.py` 先渲染 chart（或读取已渲染好的 manifest），再列出这一版实际部署的全部镜像。范围包括 Pod 的 containers 和 initContainers，以及 operator、portal 通过 `*_IMAGE` 环境变量交给子 Pod 的镜像。每个镜像记录仓库、tag、digest 和使用方，输出 JSON（`zhiyuan-release-bom/v1`）或 Markdown：
+
+```bash
+scripts/gen-release-bom.py -f values-cicd.local.yaml --format markdown -o bom.md
+scripts/gen-release-bom.py -f values-cicd.local.yaml --resolve --require-digest -o bom.json
+```
+
+- `--resolve`：用 `crane digest` 或 `docker buildx imagetools inspect` 补全缺失的 digest，需要有镜像仓库的读权限。
+- `--require-digest`：只要还有镜像没按 digest 固定，就以退出码 1 结束，可以直接用作发版门禁。
+
+这个脚本只读，不会推送镜像、打 tag，也不会部署。

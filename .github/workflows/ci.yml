@@ -25,8 +25,8 @@ jobs:
           --health-cmd "pg_isready -U aep_test -d portal_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache: true
@@ -47,26 +47,28 @@ jobs:
       # the new fields silently.
       - name: chart CRD sync
         run: python scripts/sync-crds.py --check
-      - name: PostgreSQL knowledge deletion and binding concurrency
+      - name: PostgreSQL knowledge and collaboration workflows
         working-directory: portal
         env:
           PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
-        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)|TestCollaborationPostgres' -v ./...
+        run: go test -race -run 'TestKnowledge(LifecyclePostgres|RuntimeAuditPostgres)|TestCollaborationPostgres|TestSharedSpacesPostgres' -v ./...
       - name: golangci-lint (operator)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: operator
           args: --timeout=5m
       - name: golangci-lint (portal)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: portal
           args: --timeout=5m
       - name: Coverage floors (portal, operator ≥ 80%)
+        env:
+          PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
         run: |
           scripts/check-coverage.sh portal 80
           scripts/check-coverage.sh operator 80
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: channel-gateway tests (coverage ≥ 80%)
@@ -89,19 +91,32 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash >/dev/null 2>&1 || true
           helm lint charts/zhiyuan-stack
-          python -m unittest scripts/test_managed_knowledge_chart.py scripts/test_audit_shipper.py
+          python -m pip install --quiet pyyaml
+          python -m unittest scripts/test_managed_knowledge_chart.py scripts/test_audit_shipper.py scripts/test_hardening_chart.py scripts/test_image_pinning_chart.py scripts/test_gen_release_bom.py
 
   # Coverage ratchet: compare against the latest verified main ancestor.
   # A broken main must not prevent its repair; head tests and floors remain mandatory.
   coverage-ratchet:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aep_test
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: portal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aep_test -d portal_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Pull in enough history to reach the base commit.
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache: true
@@ -112,6 +127,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_BRANCH: ${{ github.base_ref }}
+          PORTAL_TEST_POSTGRES_URL: postgres://aep_test:disposable-ci-password@127.0.0.1:5432/portal_test?sslmode=disable
         run: |
           extract() {
             dir="$1"; rev="$2"

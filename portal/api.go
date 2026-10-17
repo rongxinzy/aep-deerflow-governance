@@ -44,6 +44,7 @@ const applyNoteAnnotation = "digitalemployee.zhiyuan.io/apply-note"
 
 func (p *portal) routes() http.Handler {
 	mux := http.NewServeMux()
+	p.registerSharedSpaces(mux)
 	mux.HandleFunc("GET /api/v1/colleague-companions", p.auth(p.colleagueDirectory))
 	mux.HandleFunc("PUT /api/v1/colleague-companions/{workspace}/{companion}", p.auth(p.updateCompanionContact))
 	mux.HandleFunc("GET /api/v1/collaborations", p.auth(p.listCollaborations))
