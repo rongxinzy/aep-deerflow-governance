@@ -4,6 +4,9 @@ k3s/*.local.yaml
 portal/de-portal
 portal/portal
 operator/de-operator
+# go build writes the .exe next to the package on Windows too
+portal/portal.exe
+operator/de-operator.exe
 operator/image/
 bin/
 
