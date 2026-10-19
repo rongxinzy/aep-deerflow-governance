@@ -31,3 +31,18 @@ func TestRuntimeModelDeepCopy(t *testing.T) {
 		t.Fatal("RuntimeSpec.DeepCopy() aliased the models slice")
 	}
 }
+
+// DeepCopy of the assets field must not alias the original spec (in-package
+// coverage: cross-package deepcopy tests do not credit this package).
+func TestDigitalEmployeeSpecAssetsDeepCopy(t *testing.T) {
+	employee := &DigitalEmployee{Spec: DigitalEmployeeSpec{Assets: &AssetsSpec{Enabled: true}}}
+	clone := employee.DeepCopy()
+	clone.Spec.Assets.Enabled = false
+	if !employee.Spec.Assets.Enabled || clone.Spec.Assets == employee.Spec.Assets {
+		t.Fatal("Assets deepcopy aliased the original")
+	}
+	withoutAssets := (&DigitalEmployee{}).DeepCopy()
+	if withoutAssets.Spec.Assets != nil {
+		t.Fatal("nil Assets must stay nil through deepcopy")
+	}
+}
