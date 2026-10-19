@@ -70,7 +70,10 @@ var _ = Describe("config checksum and the channel block", func() {
 		first := checksum(ctx, fx, employee)
 		Expect(first).NotTo(BeEmpty())
 		before := renderedConfig(ctx, fx, employee)
-		Expect(before).NotTo(ContainSubstring(`"channel_connections"`))
+		// The subsystem block is always rendered; only the per-provider entries
+		// follow the CR.
+		Expect(before).To(ContainSubstring(`"channel_connections"`))
+		Expect(before).NotTo(ContainSubstring(`"wecom"`))
 
 		// Portal activation: only the CR booleans flip.
 		mutate(ctx, fx, employee, func(e *dev1alpha1.DigitalEmployee) {
@@ -97,7 +100,11 @@ var _ = Describe("config checksum and the channel block", func() {
 
 		// Disabling every provider again leaves the fingerprint where it was.
 		mutate(ctx, fx, employee, func(e *dev1alpha1.DigitalEmployee) { e.Spec.Channels = nil })
-		Expect(renderedConfig(ctx, fx, employee)).NotTo(ContainSubstring(`"channel_connections"`))
+		// The block itself is now rendered unconditionally (the channel service
+		// has to exist for a hot enable to start a leg); the fingerprint still
+		// ignores it.
+		Expect(renderedConfig(ctx, fx, employee)).To(ContainSubstring(`"channel_connections"`))
+		Expect(renderedConfig(ctx, fx, employee)).NotTo(ContainSubstring(`"wecom"`))
 		Expect(checksum(ctx, fx, employee)).To(Equal(first))
 	})
 
@@ -162,7 +169,7 @@ var _ = Describe("config checksum and the channel block", func() {
 
 		// An employee with channels enabled fingerprints exactly like the same
 		// employee with none, so the toggle cannot move the pod template …
-		channelFree := marshalConfig(renderConfigData(plain, ""))
+		channelFree := fingerprintPayload(renderConfigData(plain, ""))
 		Expect(fingerprinted).To(Equal(channelFree))
 		Expect(configChecksum(fingerprinted, renderExtensions(channelled))).
 			To(Equal(configChecksum(channelFree, renderExtensions(plain))))

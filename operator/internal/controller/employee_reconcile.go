@@ -357,8 +357,14 @@ func renderConfigData(employee *v1alpha1.DigitalEmployee, conversationURLKey str
 		kwargs := config["extensions"].(map[string]any)["middlewares"].([]any)[0].(map[string]any)["kwargs"].(map[string]any)
 		kwargs["im_bot_name"] = spec.Channels.WecomName
 	}
-	if spec.Channels != nil && (spec.Channels.Wecom || spec.Channels.Feishu || spec.Channels.Wechat) {
-		providers := map[string]any{}
+	// The IM channel subsystem itself is always rendered: enabling or disabling
+	// one provider is applied on the live runtime (the control service calls PUT
+	// /api/channels/{provider}/enabled), so the service has to be available from
+	// the employee's first boot — otherwise the very first channel would still
+	// need a rollout. The per-provider entries below only keep the declared ones
+	// on, because the runtime config schema defaults every provider to disabled.
+	providers := map[string]any{}
+	if spec.Channels != nil {
 		if spec.Channels.Wechat {
 			providers["wechat"] = map[string]any{"enabled": true}
 		}
@@ -368,15 +374,15 @@ func renderConfigData(employee *v1alpha1.DigitalEmployee, conversationURLKey str
 		if spec.Channels.Feishu {
 			providers["feishu"] = map[string]any{"enabled": true}
 		}
-		// require_bound_identity=false: identity resolution is the platform
-		// governance middleware's job (AEP identity mappings + guest mode),
-		// not upstream's per-user browser binding (which would gate every
-		// unbound IM sender behind a "connect from DeerFlow Settings" reply).
-		config[channelConnectionsKey] = map[string]any{"enabled": true, "require_bound_identity": false}
-		for _, name := range []string{"feishu", "wecom", "wechat"} { // deterministic order
-			if entry, ok := providers[name]; ok {
-				config[channelConnectionsKey].(map[string]any)[name] = entry
-			}
+	}
+	// require_bound_identity=false: identity resolution is the platform
+	// governance middleware's job (AEP identity mappings + guest mode),
+	// not upstream's per-user browser binding (which would gate every
+	// unbound IM sender behind a "connect from DeerFlow Settings" reply).
+	config[channelConnectionsKey] = map[string]any{"enabled": true, "require_bound_identity": false}
+	for _, name := range []string{"feishu", "wecom", "wechat"} { // deterministic order
+		if entry, ok := providers[name]; ok {
+			config[channelConnectionsKey].(map[string]any)[name] = entry
 		}
 	}
 	// Declarative channel keys the runtime cannot take from the runtime store:
