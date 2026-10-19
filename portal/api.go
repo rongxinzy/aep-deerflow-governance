@@ -113,6 +113,8 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeBases)))
 	mux.HandleFunc("POST /api/v1/knowledge/managed/bases", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeCreateBase)))
 	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeGetBase)))
+	mux.HandleFunc("POST /api/v1/knowledge/managed/bases/{baseID}/search", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeSearch)))
+	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/documents/{documentID}/source", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeSource)))
 	mux.HandleFunc("PATCH /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeUpdateBase)))
 	mux.HandleFunc("DELETE /api/v1/knowledge/managed/bases/{baseID}", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeDeleteBase)))
 	mux.HandleFunc("GET /api/v1/knowledge/managed/bases/{baseID}/documents", p.auth(p.freshAdminOnly(p.handleManagedKnowledgeDocuments)))

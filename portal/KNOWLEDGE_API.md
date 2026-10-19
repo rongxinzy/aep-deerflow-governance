@@ -6,6 +6,31 @@ This documents the implementation in Draft PR #45, paired with
 deployment or business acceptance. Product scope remains in
 [FR-KB-03](https://github.com/rongxinzy/zhiyuan-docs/blob/main/product/README.md#fr-kb-03).
 
+## Administrator retrieval inspection
+
+`POST /api/v1/knowledge/managed/bases/{baseID}/search` accepts only
+`{"query":"question","mode":"hybrid","limit":10}` (limit 1–30). The path
+selects one active registered knowledge base. Caller-supplied tenant, deployment,
+employee and knowledge-base lists are not accepted. Results use the same bounded
+search DTO and upstream document ownership verification as employee retrieval.
+
+`GET /api/v1/knowledge/managed/bases/{baseID}/documents/{documentID}/source`
+accepts `page` (1–1,000,000) and `page_size` (1–100, default 20). It independently
+rechecks the current administrator role, trusted deployment/tenant, active base
+registration, document parent and each chunk's document/base/tenant ownership.
+Its response is the same document/chunks/page DTO as employee source retrieval.
+
+These are management capabilities for inspecting ingestion and retrieval: a
+current administrator needs neither a personal grant nor an employee binding.
+This does not change the employee/runtime routes, which continue to enforce the
+requester's grants intersected with the employee's bindings. Both management
+routes verify the live AEP role on every request, keep the WeKnora key server-side,
+and return `Cache-Control: private, no-store`. They persist `admin_search` or
+`admin_read_source` audit intent with the real actor and deployment/tenant/resource
+scope before fetching data, then persist the actual succeeded/failed outcome
+before returning content. Audit failure prevents content disclosure. Queries,
+snippets and full source text are not stored in the audit event.
+
 ## Base creation
 
 These fixed administrator-only routes do not adopt pre-existing upstream bases
