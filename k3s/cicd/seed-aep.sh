@@ -49,7 +49,7 @@ fi
 echo "team: $TEAM"
 
 ROLE="$(curl -s -X POST "$AEP_BASE/aep/v1/admin/roles" "${auth[@]}" \
-  -d '{"id":"gov-service","name":"治理服务","permissions":["identity.read","data_scope.read"]}' \
+  -d '{"id":"gov-service","name":"治理服务","permissions":["identity.read","data_scope.read","assets.read","assets.write"]}' \
   | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 print(d.get("id") or d.get("role", {}).get("id", ""))' 2>/dev/null || true)"
