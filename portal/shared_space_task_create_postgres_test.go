@@ -18,7 +18,7 @@ import (
 
 // Uses only a disposable local PostgreSQL schema and a synthetic task service.
 // Reopening the pool checks that receipt recovery needs no process memory.
-func TestSharedTaskCreationPostgres(t *testing.T) {
+func TestSharedSpacesPostgresTaskCreation(t *testing.T) {
 	dsn := os.Getenv("PORTAL_TEST_POSTGRES_URL")
 	if dsn == "" {
 		t.Skip("requires disposable localhost PORTAL_TEST_POSTGRES_URL")
