@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -208,7 +209,69 @@ func TestDepartmentProvisioningRecordAndRetry(t *testing.T) {
 	})
 }
 
-// failingWeKnoraRecover puts the WeKnora stub back to its healthy behaviour.
+// brokenProvisioningStore fails on demand: the retry must refuse rather than
+// guess what is already provisioned when it cannot read the record.
+type brokenProvisioningStore struct{}
+
+func (brokenProvisioningStore) Save(context.Context, departmentProvision) error { return nil }
+
+func (brokenProvisioningStore) Load(context.Context) (map[string]departmentProvision, error) {
+	return nil, fmt.Errorf("database unreachable")
+}
+
+func TestDepartmentProvisioningStoreFailures(t *testing.T) {
+	t.Run("retry refuses when the record cannot be read", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+		h.provisioningStore = brokenProvisioningStore{}
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("rd-dept"), adminIdentity())
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+		assert.Contains(t, w.Body.String(), "retry later")
+	})
+
+	t.Run("retry reports an unknown department as not found", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("ghost"), adminIdentity())
+		assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	})
+
+	t.Run("retry reports a failing AEP listing instead of guessing the name", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		original := stubs.aep.Config.Handler
+		stubs.aep.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/aep/v1/admin/teams" && r.Method == http.MethodGet {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			original.ServeHTTP(w, r)
+		})
+		h := newDepartmentHarness(t, stubs)
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("ghost"), adminIdentity())
+		assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	})
+
+	t.Run("creating without a store still provisions and lists", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+		h.provisioningStore = nil
+
+		status := createDepartment(t, h)
+		assert.Equal(t, "ready", status.Phase)
+
+		// The listing keeps working with no records to merge in.
+		w := httptest.NewRecorder()
+		h.handleListDepartments(w, httptest.NewRequest(http.MethodGet, "/api/v1/departments", nil), adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "\"phase\"", "no record, no invented phase")
+	})
+}
 func failingWeKnoraRecover(stubs *departmentStubUpstreams) {
 	stubs.weknora.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
