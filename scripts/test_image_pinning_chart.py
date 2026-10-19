@@ -55,7 +55,7 @@ class ImagePinningTests(unittest.TestCase):
 
     def test_digest_pins_harbor_image(self):
         docs = self.ok(f"images.operator.digest={DIGEST}")
-        self.assertIn(f"harbor.zhiyuan.local:30443/zhiyuan/de-operator:0.21.0@{DIGEST}", images(docs))
+        self.assertIn(f"harbor.zhiyuan.local:30443/zhiyuan/de-operator:0.23.0@{DIGEST}", images(docs))
 
     def test_digest_pins_raw_image(self):
         docs = self.ok(f"channelGateway.image.digest={DIGEST}", sets=["channelGateway.enabled=true"])

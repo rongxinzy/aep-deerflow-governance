@@ -104,6 +104,15 @@ docker build -t ${REG}/deerflow-gov:vN . && docker push ${REG}/deerflow-gov:vN
 sudo k3s kubectl apply -f k3s/deployment.yaml
 ```
 
+**本地构建的 tag 必须回填 ghcr**：`build-deerflow-gov` 的 `BASE` 从
+`ghcr.io/<owner>/deerflow-gov` 拉取，而本地构建只推 Harbor。新 tag 作为
+下一版基座前先镜像过去，否则 workflow 以 `...:<base>: not found` 失败：
+
+```bash
+scripts/mirror-deerflow-gov-base.sh vN          # Harbor -> ghcr（需 crane + GH_TOKEN/gh 登录）
+scripts/mirror-deerflow-gov-base.sh vN --check  # 只比对两端 digest
+```
+
 **本地裸跑（调试治理包）**：
 
 ```bash
