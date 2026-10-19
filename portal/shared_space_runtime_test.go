@@ -36,10 +36,10 @@ func (expected runtimeReturnPayload) Match(value driver.Value) bool {
 }
 
 func runtimeTestBinding() runtimeBinding {
-	return runtimeBinding{ParticipantID: "participant", ParticipantVersion: 1, ID: "binding", SpaceID: "space", TaskID: "task", Workspace: "ws-source", WorkspaceUID: "runtime-test-uid", Owner: "u-x", Companion: "assistant", SourceConversationID: 42, PiTaskID: "pi-task", Generation: 1, ExecutionID: "execution", ExpectedVersion: 0, BindHash: "bind-hash", AssignmentHash: runtimeAssignment(map[string]any{"assigneeAgentId": "agent"})}
+	return runtimeBinding{BindingState: "active", AssignmentEpoch: 0, ParticipantID: "participant", ParticipantVersion: 1, ID: "binding", SpaceID: "space", TaskID: "task", Workspace: "ws-source", WorkspaceUID: "runtime-test-uid", Owner: "u-x", Companion: "assistant", SourceConversationID: 42, PiTaskID: "pi-task", Generation: 1, ExecutionID: "execution", ExpectedVersion: 0, BindHash: "bind-hash", AssignmentHash: runtimeAssignment(map[string]any{"assigneeAgentId": "agent"})}
 }
 func runtimeTestRows(b runtimeBinding) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "space_id", "task_id", "workspace_name", "workspace_uid", "owner_id", "companion", "source_conversation_id", "pi_task_id", "generation", "execution_id", "expected_version", "bind_hash", "assignment_hash", "participant_id", "participant_version"}).AddRow(b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.PiTaskID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash, b.ParticipantID, b.ParticipantVersion)
+	return sqlmock.NewRows([]string{"id", "space_id", "task_id", "workspace_name", "workspace_uid", "owner_id", "companion", "source_conversation_id", "pi_task_id", "generation", "execution_id", "expected_version", "bind_hash", "assignment_hash", "participant_id", "participant_version", "binding_state", "assignment_epoch"}).AddRow(b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.PiTaskID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash, b.ParticipantID, b.ParticipantVersion, b.BindingState, b.AssignmentEpoch)
 }
 func runtimeExpectBinding(h *apiTestPortal, b runtimeBinding) {
 	h.dbmock.ExpectQuery("SELECT id,space_id,task_id,workspace_name").WithArgs(b.ID).WillReturnRows(runtimeTestRows(b))
@@ -65,6 +65,9 @@ func runtimeWorkspace(t *testing.T, h *apiTestPortal) *dev.PersonalWorkspace {
 }
 func runtimeExpectUnlock(h *apiTestPortal) {
 	h.dbmock.ExpectQuery("SELECT pg_advisory_unlock").WillReturnRows(sqlmock.NewRows([]string{"unlocked"}).AddRow(true))
+}
+func runtimeExpectTaskEpoch(h *apiTestPortal, space, task string, epoch int) {
+	h.dbmock.ExpectQuery("SELECT epoch FROM shared_space_task_epochs WHERE space_id=\\$1 AND task_id=\\$2").WithArgs(space, task).WillReturnRows(sqlmock.NewRows([]string{"epoch"}).AddRow(epoch))
 }
 
 func TestSharedRuntimeLoadAndCommandGate(t *testing.T) {
@@ -102,10 +105,16 @@ func TestSharedRuntimeEnqueuePreservesExactReviewAndSkipsManualResults(t *testin
 			tx, err := h.db.Begin()
 			require.NoError(t, err)
 			result := sharedResult{ID: "result", Title: "成果标题", Version: 1, RevisionID: "revision", SubmittedBy: b.Owner}
-			if stage == "unbound" {
-				h.dbmock.ExpectQuery("SELECT id FROM shared_space_runtime_bindings").WillReturnError(sql.ErrNoRows)
-			} else {
+			switch stage {
+			case "unbound":
+				h.dbmock.ExpectQuery("SELECT binding_id FROM shared_space_result_bindings WHERE result_id=\\$1").WithArgs("result").WillReturnError(sql.ErrNoRows)
+			case "submitted":
 				h.dbmock.ExpectQuery("SELECT id FROM shared_space_runtime_bindings").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(b.ID))
+				h.dbmock.ExpectExec("INSERT INTO shared_space_result_bindings").WithArgs("result", b.ID).WillReturnResult(sqlmock.NewResult(0, 1))
+			default:
+				h.dbmock.ExpectQuery("SELECT binding_id FROM shared_space_result_bindings WHERE result_id=\\$1").WithArgs("result").WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(b.ID))
+			}
+			if stage != "unbound" {
 				runtimeExpectBinding(h, b)
 				if stage == "foreign" {
 					result.SubmittedBy = "other"
@@ -152,6 +161,7 @@ func TestSharedRuntimeAuthorizationFences(t *testing.T) {
 			case "missing-companion":
 				b.Companion = "removed"
 			}
+			runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 			if mode == "viewer" || mode == "assignment" || mode == "ok" || mode == "revoked" {
 				role := "editor"
 				if mode == "viewer" {
@@ -245,8 +255,10 @@ func TestSharedRuntimeWorkerUnknownOnlyQueriesReceipt(t *testing.T) {
 			h.dbmock.ExpectExec("UPDATE shared_space_runtime_outbox SET next_attempt_at").WillReturnResult(sqlmock.NewResult(0, 1))
 			h.dbmock.ExpectQuery("SELECT state FROM shared_space_runtime_outbox").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(state))
 			if mode == "temporary" {
+				runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 				h.dbmock.ExpectQuery("SELECT id,deployment_id,company_id,project_id,name").WillReturnError(errors.New("temporary db"))
 			} else {
+				runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 				runtimeExpectSpace(h, "editor")
 				runtimeExpectParticipant(h, current)
 			}
@@ -331,6 +343,7 @@ func TestSharedRuntimeStatusReceiptAndSubmitFences(t *testing.T) {
 				companion = "forged"
 			}
 			if mode != "missing" && mode != "companion" {
+				runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 				runtimeExpectSpace(h, "editor")
 				runtimeExpectParticipant(h, b)
 			}

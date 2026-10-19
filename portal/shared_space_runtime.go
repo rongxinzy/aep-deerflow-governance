@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"time"
+	"unicode/utf16"
 )
 
 const sharedRuntimeSchema = `
@@ -28,9 +29,15 @@ CREATE TABLE IF NOT EXISTS shared_space_runtime_outbox (
  receipt JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
  );
 ALTER TABLE shared_space_runtime_bindings ADD COLUMN IF NOT EXISTS participant_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE shared_space_runtime_bindings ADD COLUMN IF NOT EXISTS participant_version INTEGER NOT NULL DEFAULT 0;`
+ALTER TABLE shared_space_runtime_bindings ADD COLUMN IF NOT EXISTS participant_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE shared_space_runtime_bindings ADD COLUMN IF NOT EXISTS binding_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE shared_space_runtime_bindings ADD COLUMN IF NOT EXISTS assignment_epoch INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE shared_space_runtime_bindings DROP CONSTRAINT IF EXISTS shared_space_runtime_bindings_space_id_task_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS shared_runtime_active_task ON shared_space_runtime_bindings(space_id,task_id) WHERE binding_state='active';` + sharedHandoffSchema
 
 type runtimeBinding struct {
+	BindingState         string `json:"bindingState"`
+	AssignmentEpoch      int    `json:"assignmentEpoch"`
 	ParticipantID        string `json:"participantId"`
 	ParticipantVersion   int    `json:"participantVersion"`
 	ID                   string `json:"bindingId"`
@@ -52,7 +59,7 @@ type runtimeBinding struct {
 func runtimeLoad(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, id string) (b runtimeBinding, err error) {
-	err = q.QueryRowContext(ctx, `SELECT id,space_id,task_id,workspace_name,workspace_uid,owner_id,companion,source_conversation_id,pi_task_id,generation,execution_id,expected_version,bind_hash,assignment_hash,participant_id,participant_version FROM shared_space_runtime_bindings WHERE id=$1`, id).Scan(&b.ID, &b.SpaceID, &b.TaskID, &b.Workspace, &b.WorkspaceUID, &b.Owner, &b.Companion, &b.SourceConversationID, &b.PiTaskID, &b.Generation, &b.ExecutionID, &b.ExpectedVersion, &b.BindHash, &b.AssignmentHash, &b.ParticipantID, &b.ParticipantVersion)
+	err = q.QueryRowContext(ctx, `SELECT id,space_id,task_id,workspace_name,workspace_uid,owner_id,companion,source_conversation_id,pi_task_id,generation,execution_id,expected_version,bind_hash,assignment_hash,participant_id,participant_version,binding_state,assignment_epoch FROM shared_space_runtime_bindings WHERE id=$1`, id).Scan(&b.ID, &b.SpaceID, &b.TaskID, &b.Workspace, &b.WorkspaceUID, &b.Owner, &b.Companion, &b.SourceConversationID, &b.PiTaskID, &b.Generation, &b.ExecutionID, &b.ExpectedVersion, &b.BindHash, &b.AssignmentHash, &b.ParticipantID, &b.ParticipantVersion, &b.BindingState, &b.AssignmentEpoch)
 	return
 }
 func runtimeEnqueue(ctx context.Context, tx *sql.Tx, b runtimeBinding, id, action string, payload map[string]any) error {
@@ -65,7 +72,15 @@ func runtimeEnqueue(ctx context.Context, tx *sql.Tx, b runtimeBinding, id, actio
 }
 func (p *portal) sharedRuntimeEnqueue(ctx context.Context, tx *sql.Tx, space, task string, result sharedResult, stage, reason string) error {
 	var id string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM shared_space_runtime_bindings WHERE space_id=$1 AND task_id=$2`, space, task).Scan(&id)
+	var err error
+	if stage == "submitted" {
+		err = tx.QueryRowContext(ctx, `SELECT id FROM shared_space_runtime_bindings WHERE space_id=$1 AND task_id=$2 AND binding_state='active'`, space, task).Scan(&id)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES($1,$2)`, result.ID, id)
+		}
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT binding_id FROM shared_space_result_bindings WHERE result_id=$1`, result.ID).Scan(&id)
+	}
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -108,6 +123,13 @@ func (p *portal) sharedRuntimeEnqueue(ctx context.Context, tx *sql.Tx, space, ta
 	return runtimeEnqueue(ctx, tx, b, "return:"+result.ID+":"+stage, "return", map[string]any{"bindingId": b.ID, "generation": b.Generation, "executionId": b.ExecutionID, "conversationId": b.SourceConversationID, "resultId": result.ID, "revisionId": result.RevisionID, "stage": stage, "text": text})
 }
 func (p *portal) runtimeAuthorize(ctx context.Context, b runtimeBinding, ws *dev.PersonalWorkspace, i identity) error {
+	epoch, e := p.sharedTaskEpoch(ctx, p.db, b.SpaceID, b.TaskID)
+	if e != nil {
+		return e
+	}
+	if b.BindingState != "active" || b.AssignmentEpoch != epoch {
+		return sharedFail(409, "执行已交接，旧绑定不可继续写入")
+	}
 	if b.Workspace != ws.Name || b.WorkspaceUID != string(ws.UID) || b.Owner != ws.Spec.Owner {
 		return sharedFail(403, "执行来源已失效")
 	}
@@ -251,7 +273,7 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if err := sharedDecode(w, r, &in); err != nil {
 			return err
 		}
-		if in.SourceConversationID <= 0 || in.RequestID == "" || in.Title == "" || in.Instruction == "" {
+		if in.SourceConversationID <= 0 || in.RequestID == "" || in.Title == "" || in.Instruction == "" || len(utf16.Encode([]rune(in.Title))) > 200 || len(utf16.Encode([]rune(in.Instruction))) > 32000 {
 			return sharedFail(400, "交办内容不完整")
 		}
 		c, release, err := p.sharedLock(r.Context(), in.SpaceID)
@@ -280,7 +302,14 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if source, sourceErr := p.collaborationCall(r.Context(), ws, companion, "/api/conversations/"+fmt.Sprint(in.SourceConversationID), nil); sourceErr != nil || source["conversationId"] != float64(in.SourceConversationID) {
 			return sharedFail(409, "原对话无法确认")
 		}
+		epoch, err := p.sharedTaskEpoch(r.Context(), c, in.SpaceID, in.TaskID)
+		if err != nil {
+			return err
+		}
 		id := collaborationID(in.SpaceID, in.TaskID)
+		if epoch > 0 {
+			id = collaborationID(in.SpaceID, in.TaskID, fmt.Sprint(epoch))
+		}
 		hash := sharedHash(in)
 		old, err := runtimeLoad(r.Context(), c, id)
 		if err == nil {
@@ -303,8 +332,43 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if err != nil {
 			return err
 		}
+		if len(results) > 0 && results[len(results)-1].State != "changes_requested" {
+			return sharedFail(409, "已有待审成果的任务不能重新绑定")
+		}
 		if len(results) > 0 {
-			return sharedFail(409, "已有成果的任务不能重新绑定")
+			in.Instruction += "\n共享成果已退回，请基于以下成果修订（不包含私聊）：\n" + results[len(results)-1].Title
+			var reviews []string
+			rows, e := c.QueryContext(r.Context(), `SELECT v.reason FROM shared_space_reviews v JOIN shared_space_results r ON r.id=v.result_id WHERE r.space_id=$1 AND r.task_id=$2 AND v.decision='request_changes' ORDER BY r.version DESC LIMIT 1`, s.ID, in.TaskID)
+			if e != nil {
+				return e
+			}
+			for rows.Next() {
+				var reason string
+				if e = rows.Scan(&reason); e != nil {
+					_ = rows.Close()
+					return e
+				}
+				reviews = append(reviews, reason)
+			}
+			_ = rows.Close()
+			in.Instruction += "\n退回意见：" + fmt.Sprint(reviews)
+			latest := results[len(results)-1]
+			var doc sharedDocument
+			if e = p.sharedPC(r.Context(), "GET", "/issues/"+url.PathEscape(in.TaskID)+"/documents/"+url.PathEscape(latest.DocumentKey), nil, &doc); e != nil {
+				return e
+			}
+			if doc.ID != latest.DocumentID || doc.LatestRevisionID != latest.RevisionID || sharedHash(doc.Body) != latest.BodyHash {
+				return sharedFail(409, "共享成果版本无法核验")
+			}
+			content := []rune(doc.Body)
+			if len(content) > 20000 {
+				content = content[:20000]
+			}
+			in.Instruction += "\n已共享成果：\n" + string(content)
+
+		}
+		if len(utf16.Encode([]rune(in.Instruction))) > 32000 {
+			return sharedFail(400, "交办内容与共享成果合计过长，请精简交办说明")
 		}
 		assignment, err := p.sharedAssignmentDTO(r.Context(), s, task, i)
 		if err != nil {
@@ -348,17 +412,17 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 				return sharedFail(409, "任务已有未知原生执行")
 			}
 		}
-		b := runtimeBinding{ParticipantID: participant.ID, ParticipantVersion: participant.Version, ID: id, SpaceID: in.SpaceID, TaskID: in.TaskID, Workspace: ws.Name, WorkspaceUID: string(ws.UID), Owner: i.UserID, Companion: companion, SourceConversationID: in.SourceConversationID, Generation: 1, ExecutionID: collaborationID(id, "1"), ExpectedVersion: 0, BindHash: hash, AssignmentHash: runtimeAssignment(task)}
+		b := runtimeBinding{BindingState: "active", AssignmentEpoch: epoch, ParticipantID: participant.ID, ParticipantVersion: participant.Version, ID: id, SpaceID: in.SpaceID, TaskID: in.TaskID, Workspace: ws.Name, WorkspaceUID: string(ws.UID), Owner: i.UserID, Companion: companion, SourceConversationID: in.SourceConversationID, Generation: 1, ExecutionID: collaborationID(id, "1"), ExpectedVersion: len(results), BindHash: hash, AssignmentHash: runtimeAssignment(task)}
 		tx, err := c.BeginTx(r.Context(), nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO shared_space_runtime_bindings(id,space_id,task_id,workspace_name,workspace_uid,owner_id,companion,source_conversation_id,generation,execution_id,expected_version,bind_hash,assignment_hash,participant_id,participant_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash, b.ParticipantID, b.ParticipantVersion)
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO shared_space_runtime_bindings(id,space_id,task_id,workspace_name,workspace_uid,owner_id,companion,source_conversation_id,generation,execution_id,expected_version,bind_hash,assignment_hash,participant_id,participant_version,binding_state,assignment_epoch) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash, b.ParticipantID, b.ParticipantVersion, b.BindingState, b.AssignmentEpoch)
 		if err != nil {
 			return err
 		}
-		payload := map[string]any{"bindingId": id, "spaceId": b.SpaceID, "taskId": b.TaskID, "sourceConversationId": b.SourceConversationID, "generation": 1, "executionId": b.ExecutionID, "expectedVersion": 0, "title": in.Title, "instruction": in.Instruction}
+		payload := map[string]any{"bindingId": id, "spaceId": b.SpaceID, "taskId": b.TaskID, "sourceConversationId": b.SourceConversationID, "generation": 1, "executionId": b.ExecutionID, "expectedVersion": b.ExpectedVersion, "assignmentEpoch": epoch, "title": in.Title, "instruction": in.Instruction}
 		if err = runtimeEnqueue(r.Context(), tx, b, "start:"+id, "start", payload); err != nil {
 			return err
 		}
@@ -461,6 +525,7 @@ func (p *portal) runSharedRuntime(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				p.processSharedHandoffs(ctx)
 				p.processSharedRuntime(ctx)
 			}
 		}
