@@ -43,12 +43,38 @@ type ovStub struct {
 	regens     int
 	deletes    int
 	forceFound bool // behave as if the user pre-exists (returns no key)
+	// missingAccounts are accounts OpenViking answers "Account not found" for,
+	// the way it does for a department whose provisioning step never ran.
+	missingAccounts map[string]bool
+	// accountCreates records every admin account creation, in order.
+	accountCreates []string
+	// failAccountCreate makes account creation fail (the retry then reports
+	// both the original 404 and the creation error).
+	failAccountCreate bool
 }
 
-func newOVStub() *ovStub { return &ovStub{users: map[string]string{}} }
+func newOVStub() *ovStub {
+	return &ovStub{users: map[string]string{}, missingAccounts: map[string]bool{}}
+}
 
 func (s *ovStub) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/admin/accounts", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var body struct {
+			AccountID string `json:"account_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		s.accountCreates = append(s.accountCreates, body.AccountID)
+		if s.failAccountCreate {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, "account creation failed")
+			return
+		}
+		delete(s.missingAccounts, body.AccountID)
+		w.WriteHeader(http.StatusCreated)
+	})
 	mux.HandleFunc("POST /api/v1/admin/accounts/{account}/users", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -56,6 +82,11 @@ func (s *ovStub) handler() http.Handler {
 			UserID string `json:"user_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s.missingAccounts[r.PathValue("account")] {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprintf(w, "Account not found: %s", r.PathValue("account"))
+			return
+		}
 		s.registers++
 		if _, ok := s.users[body.UserID]; ok || s.forceFound {
 			writeOVError(w, "ALREADY_EXISTS", "user exists")

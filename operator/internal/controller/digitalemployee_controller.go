@@ -93,18 +93,25 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 		return r.finalize(ctx, &employee)
 	}
 
-	// 1. Memory user + key + internal access token (idempotent; persisted
+	// 1. Configuration the runtime would only reject at startup is rejected
+	// here first, so an unsatisfiable model credential surfaces on the CR
+	// instead of as a crash-looping pod.
+	if err := r.validateModelAPIKeyEnvs(ctx, &employee); err != nil {
+		return ctrl.Result{}, r.fail(ctx, &employee, err)
+	}
+
+	// 2. Memory user + key + internal access token (idempotent; persisted
 	// in a child Secret — the key is minted once, the token never rotates).
 	if err := r.ensureMemorySecret(ctx, &employee); err != nil {
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
 
-	// 2. Child resources.
+	// 3. Child resources.
 	if err := r.ensureChildren(ctx, &employee); err != nil {
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
 
-	// 3. Wait for availability.
+	// 4. Wait for availability.
 	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: deploymentName(&employee)}, deployment); err != nil {
 		if errors.IsNotFound(err) {
@@ -135,7 +142,7 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	employee.Status.ObservedGeneration = employee.Generation
 	employee.Status.Message = ""
 
-	// 4. Runtime account bootstrap (instance admin + owner PAT). The HTTP
+	// 5. Runtime account bootstrap (instance admin + owner PAT). The HTTP
 	// API is up by now (deployment available); outcomes land in
 	// status.runtimeAccount and the requeue merges into one return.
 	account, err := r.ensureRuntimeAccount(ctx, &employee)
@@ -237,7 +244,7 @@ func (r *DigitalEmployeeReconciler) ensureMemorySecret(ctx context.Context, empl
 	}
 	key := string(existing.Data[memkeySecretKey])
 	if !haveMemoryKey {
-		minted, found, err := ov.RegisterUser(ctx, accountID, employee.Name)
+		minted, found, err := ov.RegisterUserEnsuringAccount(ctx, accountID, employee.Name)
 		if err != nil {
 			return errWrap("register memory user: ", err)
 		}
