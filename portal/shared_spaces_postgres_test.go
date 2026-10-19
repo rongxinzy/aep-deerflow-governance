@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	dev "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,6 +56,7 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, schemeAddK8s(scheme))
+	require.NoError(t, dev.AddToScheme(scheme))
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "portal-test-credentials", Namespace: "digital-employees"}, Data: map[string][]byte{
 		"AEP_ADMIN_USER": []byte("synthetic-directory-admin"), "AEP_ADMIN_PASSWORD": []byte("synthetic-only"),
 	}}
@@ -69,10 +71,14 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 	h.cfg.paperclipToken = "synthetic-paperclip-service-token"
 	h.aep = &aepAuthenticator{baseURL: aep.URL, http: aep.Client()}
 	h.k8s = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(secret).Build()
-	agentWorkspace := runningWorkspace("ws-shared-agent", "owner-synthetic", "assistant")
-	agentWorkspace.UID = types.UID("uid-ws-shared-agent")
-	initializeContacts(agentWorkspace, nil)
-	require.NoError(t, h.k8s.Create(t.Context(), agentWorkspace))
+	for _, agentWorkspace := range []*dev.PersonalWorkspace{
+		runningWorkspace("ws-shared-agent", "editor-synthetic", "assistant"),
+		runningWorkspace("ws-owner-agent", "owner-synthetic", "assistant"),
+	} {
+		agentWorkspace.UID = types.UID("uid-" + agentWorkspace.Name)
+		initializeContacts(agentWorkspace, nil)
+		require.NoError(t, h.k8s.Create(t.Context(), agentWorkspace))
+	}
 	clearSharedSpaceAdminTokenCache(t)
 	routes := h.routes()
 	call := func(token, method, route string, body any) (int, map[string]any) {
@@ -102,7 +108,9 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, status, out)
 	spaceID = out["space"].(map[string]any)["id"].(string)
-	_, err = db.Exec(`INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state) VALUES('workflow-agent','` + spaceID + `','companion','ws-shared-agent/assistant','Assistant','owner-synthetic','uid-ws-shared-agent','editor','active',1,'synthetic-agent','ready')`)
+	_, err = db.Exec(`INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state) VALUES
+('workflow-agent','` + spaceID + `','companion','ws-shared-agent/assistant','Assistant','editor-synthetic','uid-ws-shared-agent','editor','active',1,'synthetic-agent','ready'),
+('workflow-owner-agent','` + spaceID + `','companion','ws-owner-agent/assistant','Assistant','owner-synthetic','uid-ws-owner-agent','editor','active',1,'synthetic-owner-agent','ready')`)
 	require.NoError(t, err)
 	base := "/api/v1/shared-spaces/" + url.PathEscape(spaceID)
 
@@ -311,8 +319,8 @@ func newSharedSpacePaperclip(t *testing.T) *sharedSpaceFakePaperclip {
 	f := &sharedSpaceFakePaperclip{docs: map[string]sharedSpaceFakeDoc{}, docWrites: map[string]int{}, patchCount: map[string]int{}, tasks: map[string]map[string]any{
 		"task-main":       {"id": "task-main", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress", "assigneeAgentId": "synthetic-agent"},
 		"task-second":     {"id": "task-second", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress"},
-		"task-owner-self": {"id": "task-owner-self", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress"},
-		"task-unknown":    {"id": "task-unknown", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress"},
+		"task-owner-self": {"id": "task-owner-self", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress", "assigneeAgentId": "synthetic-owner-agent"},
+		"task-unknown":    {"id": "task-unknown", "companyId": "company-synthetic", "projectId": "project-synthetic", "status": "in_progress", "assigneeAgentId": "synthetic-agent"},
 		"task-foreign":    {"id": "task-foreign", "companyId": "company-synthetic", "projectId": "other-project", "status": "in_progress"},
 	}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))

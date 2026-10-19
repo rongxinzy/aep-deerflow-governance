@@ -66,9 +66,14 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 	inviteWorkspace.UID = "uid-invite-owner"
 	initializeContacts(inviteWorkspace, nil)
 	require.NoError(t, h.k8s.Create(t.Context(), inviteWorkspace))
+	revokeWorkspace := runningWorkspace("ws-revoke-owner", "u-x", "assistant")
+	revokeWorkspace.UID = "uid-revoke-owner"
+	initializeContacts(revokeWorkspace, nil)
+	require.NoError(t, h.k8s.Create(t.Context(), revokeWorkspace))
 
 	var mu sync.Mutex
 	var registeredAgents []map[string]any
+	dropRegistrationAck := false
 	tasks := map[string]map[string]any{
 		"task":           {"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
 		"external":       {"id": "external", "companyId": "company", "projectId": "project", "status": "todo", "assigneeAgentId": "outside-agent", "updatedAt": "v1"},
@@ -89,6 +94,11 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 				agent["companyId"] = "company"
 				agent["id"] = fmt.Sprintf("registered-agent-%d", len(registeredAgents)+1)
 				registeredAgents = append(registeredAgents, agent)
+				if dropRegistrationAck {
+					dropRegistrationAck = false
+					http.Error(w, "agent registration acknowledgement lost", http.StatusServiceUnavailable)
+					return
+				}
 				writeJSON(w, http.StatusCreated, agent)
 				return
 			}
@@ -165,7 +175,15 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 	if winner == "agent-a" {
 		wrongParticipant = "participant-b"
 	}
+	winnerParticipant := "participant-a"
+	if winner == "agent-b" {
+		winnerParticipant = "participant-b"
+	}
 	currentToken := sharedHash([]any{"task", winner, nil, "in_progress", tasks["task"]["updatedAt"], 1})
+	noop := claim("u-x", winnerParticipant, "same-agent-noop", currentToken, "task")
+	require.Equal(t, http.StatusOK, noop.status, noop.body)
+	require.EqualValues(t, 1, checkouts.Load(), "claim by the existing assigned Agent is an idempotent no-op")
+	currentToken = sharedHash([]any{"task", winner, nil, "in_progress", tasks["task"]["updatedAt"], 2})
 	wrong := claim("u-x", wrongParticipant, "wrong-agent", currentToken, "task")
 	require.Equal(t, http.StatusConflict, wrong.status, wrong.body)
 	stale := claim("u-x", wrongParticipant, "stale-token", token, "task")
@@ -256,6 +274,28 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 	require.NotEqual(t, firstAgentID, rejoinedAgentID, "rejoin registers a new native Agent marker")
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM shared_space_members WHERE space_id='space-invite' AND user_id='u-x'`).Scan(&humanMemberships))
 	require.Zero(t, humanMemberships)
+
+	unknownInvite := participantCall("space-owner", "space-invite", "", "", 0, "invite-unknown-registration", map[string]any{"kind": "companion", "target": "ws-revoke-owner/assistant", "role": "editor", "requestId": "invite-unknown-registration"}, false)
+	require.Equal(t, http.StatusOK, unknownInvite.status, unknownInvite.body)
+	unknownParticipantID := unknownInvite.body["participant"].(map[string]any)["id"].(string)
+	mu.Lock()
+	dropRegistrationAck = true
+	mu.Unlock()
+	unknownAccept := participantCall("u-x", "space-invite", "accept", unknownParticipantID, 1, "accept-unknown-registration", map[string]any{"requestId": "accept-unknown-registration", "expectedVersion": 1}, true)
+	require.Equal(t, http.StatusLocked, unknownAccept.status, unknownAccept.body)
+	var registrationState, participantState string
+	require.NoError(t, db.QueryRow(`SELECT registration_state,state FROM shared_space_participants WHERE id=$1`, unknownParticipantID).Scan(&registrationState, &participantState))
+	require.Equal(t, "unknown", registrationState)
+	require.Equal(t, "pending", participantState)
+	unknownRevoked := participantCall("space-owner", "space-invite", "revoke", unknownParticipantID, 1, "revoke-unknown-registration", map[string]any{"requestId": "revoke-unknown-registration", "expectedVersion": 1}, false)
+	require.Equal(t, http.StatusOK, unknownRevoked.status, unknownRevoked.body)
+	require.Equal(t, "revoked", unknownRevoked.body["participant"].(map[string]any)["state"])
+	oldAcceptReplay := participantCall("u-x", "space-invite", "accept", unknownParticipantID, 1, "accept-unknown-registration", map[string]any{"requestId": "accept-unknown-registration", "expectedVersion": 1}, true)
+	require.Equal(t, http.StatusOK, oldAcceptReplay.status, oldAcceptReplay.body)
+	require.Equal(t, "revoked", oldAcceptReplay.body["participant"].(map[string]any)["state"], "a superseded unknown registration request cannot reactivate a revoked grant")
+	require.NoError(t, db.QueryRow(`SELECT registration_state,state FROM shared_space_participants WHERE id=$1`, unknownParticipantID).Scan(&registrationState, &participantState))
+	require.Equal(t, "unknown", registrationState)
+	require.Equal(t, "revoked", participantState)
 
 	oldBinding := runtimeTestBinding()
 	oldBinding.SpaceID = "space-invite"

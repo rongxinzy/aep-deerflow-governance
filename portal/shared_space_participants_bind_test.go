@@ -73,18 +73,18 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 	h := collaborationHarness(t)
 	h.db = db
 	h.cfg.aepDeploymentID = "deployment-acme"
-	ws := runningWorkspace("ws-source", "u-x", "assistant")
+	ws := runtimeWorkspace(t, h)
 	ws.UID = types.UID("bind-uid")
-	initializeContacts(ws, nil)
 	require.NoError(t, h.k8s.Update(t.Context(), ws))
 	require.NoError(t, h.k8s.Update(t.Context(), workspaceMemkey(ws.Name, "assistant")))
 
 	tasks := map[string]map[string]any{
-		"task":          {"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
-		"terminal":      {"id": "terminal", "companyId": "company", "projectId": "project", "status": "done", "updatedAt": "v1"},
-		"wrong-source":  {"id": "wrong-source", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
-		"already-bound": {"id": "already-bound", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
-		"unknown":       {"id": "unknown", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
+		"task":            {"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
+		"terminal":        {"id": "terminal", "companyId": "company", "projectId": "project", "status": "done", "updatedAt": "v1"},
+		"wrong-source":    {"id": "wrong-source", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
+		"already-bound":   {"id": "already-bound", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
+		"unknown-command": {"id": "unknown-command", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
+		"unknown":         {"id": "unknown", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
 	}
 	var checkouts atomic.Int32
 	pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,10 +135,13 @@ CREATE TRIGGER fail_binding_insert BEFORE INSERT ON shared_space_runtime_binding
 	_, err = db.Exec(`DROP TRIGGER fail_binding_insert ON shared_space_runtime_bindings`)
 	require.NoError(t, err)
 	require.NoError(t, bind("task", "bind-once", 42))
+	require.NoError(t, bind("task", "bind-once", 42))
 	require.EqualValues(t, 1, checkouts.Load(), "retry must reuse the durable claim receipt without checking out twice")
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM shared_space_runtime_bindings WHERE space_id='space' AND task_id='task'`).Scan(&count))
 	require.Equal(t, 1, count)
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM shared_space_runtime_outbox WHERE binding_id=$1`, collaborationID("space", "task")).Scan(&count))
+	require.Equal(t, 1, count, "same-request retry must not enqueue a second start command")
 
 	var rejected *sharedError
 	err = bind("terminal", "bind-terminal", 42)
@@ -153,9 +156,15 @@ CREATE TRIGGER fail_binding_insert BEFORE INSERT ON shared_space_runtime_binding
 	require.ErrorAs(t, err, &rejected)
 	require.Equal(t, 409, rejected.code)
 	require.EqualValues(t, 1, checkouts.Load(), "invalid bind attempts must not call checkout")
+	_, err = db.Exec(`INSERT INTO shared_space_commands(space_id,request_id,task_id,actor_id,action,payload_hash,state) VALUES('space','unknown-command-receipt','unknown-command','u-x','claim','unknown-hash','unknown')`)
+	require.NoError(t, err)
+	err = bind("unknown-command", "bind-command-unknown", 42)
+	var pending *sharedError
+	require.ErrorAs(t, err, &pending)
+	require.Equal(t, 423, pending.code)
+	require.EqualValues(t, 1, checkouts.Load(), "unknown command gate must prevent checkout")
 	for range 2 {
 		err = bind("unknown", "bind-unknown", 42)
-		var pending *sharedError
 		require.ErrorAs(t, err, &pending)
 		require.Equal(t, 423, pending.code)
 	}
