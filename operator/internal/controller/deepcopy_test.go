@@ -204,7 +204,7 @@ func TestRenderConfigVariants(t *testing.T) {
 	employee.Spec.Governance.DeploymentName = "示例企业"
 	employee.Spec.TeamName = "研发部"
 	employee.Spec.NodePort = 30300
-	cfg := renderConfig(employee, conversationURLKey(employee))
+	cfg := marshalConfig(renderConfigData(employee, conversationURLKey(employee)))
 	assert.Contains(t, cfg, "ChatAnthropic")
 	assert.Contains(t, cfg, "AepGovernanceMiddleware")
 	var decoded map[string]any

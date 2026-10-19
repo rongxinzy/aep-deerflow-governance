@@ -42,7 +42,8 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		}
 	}
 
-	configPayload := renderConfig(employee, conversationURLKey(employee))
+	configData := renderConfigData(employee, conversationURLKey(employee))
+	configPayload := marshalConfig(configData)
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configName(employee), Namespace: employee.Namespace}}
 	configMap.Data = map[string]string{"config.yaml": configPayload}
 	if err := controllerutil.SetControllerReference(employee, configMap, r.Scheme); err != nil {
@@ -68,7 +69,12 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 		}
 	}
 
-	deployment, err := r.renderDeployment(employee, configChecksum(configPayload, extensionsPayload))
+	// The channel block stays out of the pod-template fingerprint: enabling
+	// or disabling a channel is applied on the live runtime (the portal's
+	// PUT /api/channels/{provider}/enabled) and the CR booleans only record
+	// intent/audit, so a toggle must not roll the employee — the rollout
+	// takes conversations, memory and knowledge down with it.
+	deployment, err := r.renderDeployment(employee, configChecksum(fingerprintPayload(configData), extensionsPayload))
 	if err != nil {
 		return err
 	}
@@ -180,7 +186,6 @@ func safeCreateOrUpdate(ctx context.Context, c client.Client, object client.Obje
 	return fmt.Errorf("unsupported type %T", object)
 }
 
-// renderConfig produces the DeerFlow config.yaml (JSON form) from the CR.
 // databaseConfig renders the DeerFlow database section for the selected
 // conversation store backend.
 // renderModelEntry shapes one route for the runtime config: the wire name
@@ -261,7 +266,10 @@ func conversationURLKey(employee *v1alpha1.DigitalEmployee) string {
 	return ""
 }
 
-func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string) string {
+// renderConfigData builds the runtime config the employee's ConfigMap carries.
+// The pod-template fingerprint hashes a channel-free view of this same map
+// (fingerprintPayload), so both readings share one builder.
+func renderConfigData(employee *v1alpha1.DigitalEmployee, conversationURLKey string) map[string]any {
 	spec := employee.Spec
 	// The runtime picks models by name; models[0] is the default. Legacy
 	// singular fields synthesize a one-entry list so existing CRs render
@@ -364,10 +372,10 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 		// governance middleware's job (AEP identity mappings + guest mode),
 		// not upstream's per-user browser binding (which would gate every
 		// unbound IM sender behind a "connect from DeerFlow Settings" reply).
-		config["channel_connections"] = map[string]any{"enabled": true, "require_bound_identity": false}
+		config[channelConnectionsKey] = map[string]any{"enabled": true, "require_bound_identity": false}
 		for _, name := range []string{"feishu", "wecom", "wechat"} { // deterministic order
 			if entry, ok := providers[name]; ok {
-				config["channel_connections"].(map[string]any)[name] = entry
+				config[channelConnectionsKey].(map[string]any)[name] = entry
 			}
 		}
 	}
@@ -439,6 +447,12 @@ func renderConfig(employee *v1alpha1.DigitalEmployee, conversationURLKey string)
 			"backend_config":                 backendConfig,
 		}
 	}
+	return config
+}
+
+// marshalConfig is the one encoder for the rendered config: map-key-sorted
+// MarshalIndent, so equal maps always produce equal payloads.
+func marshalConfig(config map[string]any) string {
 	encoded, _ := json.MarshalIndent(config, "", "  ")
 	return string(encoded)
 }
@@ -465,10 +479,42 @@ func renderExtensions(employee *v1alpha1.DigitalEmployee) string {
 const configHashAnnotation = "zhiyuan.io/config-hash"
 
 // configChecksum fingerprints both rendered payloads; map-key-sorted JSON
-// keeps it stable across reconciles.
+// keeps it stable across reconciles. Callers hand in the payload they want
+// fingerprinted: employee_reconcile drops the channel block first (see
+// fingerprintPayload), workspace_reconcile hashes its manifest as is.
 func configChecksum(configPayload, extensionsPayload string) string {
 	digest := sha256.Sum256([]byte(configPayload + "\x00" + extensionsPayload))
 	return hex.EncodeToString(digest[:])[:16]
+}
+
+// channelConnectionsKey is the config key renderConfigData renders the IM
+// channel block under (feature gate plus the enabled providers).
+const channelConnectionsKey = "channel_connections"
+
+// fingerprintPayload renders the config the pod-template fingerprint covers:
+// the ConfigMap payload minus the channel block.
+//
+// Channel enable/disable is a hot operation on the runtime itself — the
+// portal flips the CR booleans as intent/audit and applies them through the
+// runtime's admin API (PUT /api/channels/{provider}/enabled). Fingerprinting
+// the block instead rolled the whole employee on every toggle (Deployment
+// Recreate), so conversations, memory and knowledge went unreachable for a
+// change the runtime takes live.
+//
+// The rendered payload itself keeps channel_connections: a booting runtime
+// reads it as its startup default. Every other key is fingerprinted exactly
+// as rendered, and a channel-free employee hashes the very payload it did
+// before. That includes the declarative channel keys the runtime can only
+// read at boot — the `channels` block mergeChannelConfig writes (bot_name,
+// domain, ws_url) and the middleware's im_bot_name: editing those still rolls
+// the employee so the edit takes effect.
+func fingerprintPayload(config map[string]any) string {
+	fingerprinted := make(map[string]any, len(config))
+	for key, value := range config {
+		fingerprinted[key] = value
+	}
+	delete(fingerprinted, channelConnectionsKey)
+	return marshalConfig(fingerprinted)
 }
 
 func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalEmployee, checksum string) (*appsv1.Deployment, error) {
