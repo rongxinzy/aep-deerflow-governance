@@ -28,6 +28,8 @@ from typing import Any, Callable
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage, ToolMessage
 
+from .asset_tools import ASSET_REQUESTER_ARG, SSH_EXEC_TOOL
+
 _GOVERNANCE_TAG = "aep_governance_v1"
 
 # Actionable configuration error for knowledge tools that are called while the
@@ -91,6 +93,52 @@ class _AepClient:
             if self._token is None or time.time() - self._token_at > 600:
                 return self._login()
             return self._token
+
+    def runtime_assets(self, subject_type: str, subject_id: str) -> dict[str, Any]:
+        path = ("/aep/v1/admin/assets/runtime?subjectType=" + urllib.parse.quote(subject_type)
+                + "&subjectId=" + urllib.parse.quote(subject_id))
+        return self._get(path)
+
+    def asset_execute(self, asset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        path = "/aep/v1/admin/assets/" + urllib.parse.quote(asset_id, safe="") + "/execute"
+        return self._post(path, body)
+
+    def _get(self, path: str) -> dict[str, Any]:
+        for attempt in (1, 2):
+            req = urllib.request.Request(
+                self.base_url + path,
+                headers={"Authorization": f"Bearer {self.token()}",
+                         "X-AEP-Protocol-Version": "1.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt == 1:
+                    with self._lock:
+                        self._token = None
+                    continue
+                raise
+        raise RuntimeError("unreachable")
+
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        payload = json.dumps(body).encode()
+        for attempt in (1, 2):
+            req = urllib.request.Request(
+                self.base_url + path, data=payload,
+                headers={"Authorization": f"Bearer {self.token()}",
+                         "Content-Type": "application/json",
+                         "X-AEP-Protocol-Version": "1.0"},
+                method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt == 1:
+                    with self._lock:
+                        self._token = None
+                    continue
+                raise
+        raise RuntimeError("unreachable")
 
     def data_scope(self, user_id: str) -> dict[str, Any]:
         path = "/aep/v1/admin/data-scope/context?userId=" + urllib.parse.quote(user_id)
@@ -258,6 +306,16 @@ class AepGovernanceMiddleware(AgentMiddleware):
         self.tools = build_email_tools()
         if self.tools:
             print(f"[aep-governance] email tools registered: {sorted(t.name for t in self.tools)}", flush=True)
+        # Governed asset tools: registered iff the operator rendered
+        # ASSET_TOOLS_ENABLED + ASSET_SUBJECT_ID from the employee CR. The
+        # subject is deployment config (unforgeable); the requester is
+        # resolved per call and injected in wrap_tool_call — see
+        # asset_tools for the trust notes.
+        from .asset_tools import build_asset_tools
+        asset_tools = build_asset_tools()
+        if asset_tools:
+            self.tools = list(self.tools) + list(asset_tools)
+            print(f"[aep-governance] asset tools registered: {sorted(t.name for t in asset_tools)}", flush=True)
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:
@@ -577,6 +635,34 @@ class AepGovernanceMiddleware(AgentMiddleware):
         cloned.tool_call = normalized
         return cloned
 
+    def _asset_context_request(self, request: Any) -> Any | ToolMessage:
+        """Inject the trusted requester into asset tool calls.
+
+        The requester is resolved from the run context exactly as the data
+        scope chain resolves it; an unresolved requester denies the call
+        (fail closed). A model-supplied ``asset_requester_user_id`` is
+        overwritten here, never trusted.
+        """
+        call = getattr(request, "tool_call", None) or {}
+        runtime = getattr(request, "runtime", None)
+        requester = self.resolve_aep_user(runtime)
+        if not requester:
+            return ToolMessage(content="DENIED: asset execution requires a requester bound to an AEP account on this conversation.",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
+        args = dict(_tool_field(call, "args", None) or {})
+        args[ASSET_REQUESTER_ARG] = str(requester)
+        normalized = dict(call) if isinstance(call, dict) else {
+            "name": _tool_field(call, "name", ""),
+            "id": _tool_field(call, "id", ""),
+        }
+        normalized["args"] = args
+        override = getattr(request, "override", None)
+        if callable(override):
+            return override(tool_call=normalized)
+        cloned = copy.copy(request)
+        cloned.tool_call = normalized
+        return cloned
+
     # ------------------------------------------------------------ hooks
     def _governance_message(self, aep_user: str | None, visible: frozenset[str]) -> SystemMessage:
         note = self._knowledge_note()
@@ -698,8 +784,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         denied = self._check(request)
         if denied is not None:
             return denied
-        if self.knowledge_online_authorization and self._is_weknora_tool(str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))):
+        name = str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))
+        if self.knowledge_online_authorization and self._is_weknora_tool(name):
             enriched = self._knowledge_context_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
+        if name == SSH_EXEC_TOOL:
+            enriched = self._asset_context_request(request)
             if isinstance(enriched, ToolMessage):
                 return enriched
             request = enriched
@@ -709,8 +801,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         denied = self._check(request)
         if denied is not None:
             return denied
-        if self.knowledge_online_authorization and self._is_weknora_tool(str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))):
+        name = str(_tool_field(getattr(request, "tool_call", None) or {}, "name", ""))
+        if self.knowledge_online_authorization and self._is_weknora_tool(name):
             enriched = self._knowledge_context_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
+        if name == SSH_EXEC_TOOL:
+            enriched = self._asset_context_request(request)
             if isinstance(enriched, ToolMessage):
                 return enriched
             request = enriched
