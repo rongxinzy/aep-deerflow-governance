@@ -132,7 +132,7 @@ func sharedDecode(w http.ResponseWriter, r *http.Request, v any) error {
 	return nil
 }
 func sharedCaps(role string) map[string]bool {
-	return map[string]bool{"manageMembers": role == "owner", "submit": role == "owner" || role == "editor", "review": role == "owner"}
+	return map[string]bool{"createTask": role == "owner" || role == "editor", "manageMembers": role == "owner", "submit": role == "owner" || role == "editor", "review": role == "owner"}
 }
 
 func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
@@ -162,6 +162,8 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}", wrap(p.sharedDetail))
 	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/members/{user}", wrap(p.sharedSetMember))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks", wrap(p.sharedTasks))
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks", wrap(p.sharedCreateTask))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/task-commands/{request}", wrap(p.sharedTaskCommand))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}", wrap(p.sharedTaskDetail))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/results/{result}", wrap(p.sharedResultBody))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/results", wrap(p.sharedSubmit))
