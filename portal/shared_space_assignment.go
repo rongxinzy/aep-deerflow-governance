@@ -35,7 +35,7 @@ func (p *portal) sharedAssignmentDTO(ctx context.Context, s sharedSpace, t map[s
 		}
 	}
 	var epoch int
-	e = p.db.QueryRowContext(ctx, `SELECT count(*) FROM shared_space_commands WHERE space_id=$1 AND ((task_id=$2 AND action IN ('assign','claim')) OR action='participant')`, s.ID, t["id"]).Scan(&epoch)
+	e = p.db.QueryRowContext(ctx, `SELECT count(*) FROM shared_space_commands WHERE space_id=$1 AND ((task_id=$2 AND action IN ('assign','claim')) OR action='participant' OR (task_id=$2 AND action='handoff'))`, s.ID, t["id"]).Scan(&epoch)
 	a.Token = sharedAssignmentToken(t, epoch)
 	return
 }
@@ -128,7 +128,7 @@ func (p *portal) sharedAssignmentLocked(ctx context.Context, c *sql.Conn, s shar
 			return nil, e
 		}
 		var epoch int
-		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM shared_space_commands WHERE space_id=$1 AND ((task_id=$2 AND action IN ('assign','claim')) OR action='participant')`, s.ID, id).Scan(&epoch); e != nil {
+		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM shared_space_commands WHERE space_id=$1 AND ((task_id=$2 AND action IN ('assign','claim')) OR action='participant' OR (task_id=$2 AND action='handoff'))`, s.ID, id).Scan(&epoch); e != nil {
 			return nil, e
 		}
 		a.Token = sharedAssignmentToken(t, epoch)
@@ -142,7 +142,7 @@ func (p *portal) sharedAssignmentLocked(ctx context.Context, c *sql.Conn, s shar
 		return receipt, nil
 	}
 	var bound bool
-	if e = c.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=$1 AND task_id=$2)`, s.ID, id).Scan(&bound); e != nil {
+	if e = c.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=$1 AND task_id=$2 AND binding_state='active')`, s.ID, id).Scan(&bound); e != nil {
 		return nil, e
 	}
 	if bound || t["status"] == "in_progress" || human != "" || claim && agent != "" && agent != x.AgentID {

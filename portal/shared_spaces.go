@@ -157,6 +157,7 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 			}
 		})
 	}
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/handoff", wrap(p.sharedHandoffTask))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/{assignmentAction}", wrap(p.sharedAssignmentChange))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/participants", wrap(p.sharedParticipants))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/agent-candidates", wrap(p.sharedAgentCandidates))
@@ -629,10 +630,29 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	}
 	caps["assign"] = sharedCaps(s.Role)["submit"] && !blocked && !assignment.External && !assignment.Claimed && (task["status"] == "todo" || task["status"] == "backlog")
 	caps["claim"] = caps["assign"]
+	handoff, err := p.sharedHandoffDTO(r.Context(), s.ID, r.PathValue("task"))
+	if err != nil {
+		return err
+	}
+	history, err := p.sharedHandoffHistory(r.Context(), s.ID, r.PathValue("task"))
+	if err != nil {
+		return err
+	}
+	caps["handoff"] = !blocked && handoff == nil && !assignment.External && assignment.Participant != nil && (s.Role == "owner" || assignment.Participant.CanClaim) && task["status"] != "done" && task["status"] != "cancelled" && task["status"] != "in_review"
+	if len(results) > 0 && results[len(results)-1].State != "changes_requested" {
+		caps["handoff"] = false
+	}
+	if handoff != nil {
+		caps["submit"] = false
+		caps["review"] = false
+		caps["assign"] = false
+		caps["claim"] = false
+	}
+
 	if agent, _ := task["assigneeAgentId"].(string); agent != "" {
 		caps["submit"] = caps["submit"] && assignment.Participant != nil && assignment.Participant.CanClaim
 	}
-	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": caps})
+	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": caps, "handoff": handoff, "handoffs": history})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {
@@ -785,6 +805,9 @@ func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, 
 			return 0, nil, sharedFail(403, "仅当前Agent管理者可代表提交")
 		}
 	}
+	if err = p.sharedHandoffGate(ctx, c, s.ID, taskID); err != nil {
+		return 0, nil, err
+	}
 	hash := sharedHash([]any{taskID, b})
 	if receipt, ok, err := sharedReplay(ctx, c, s.ID, b.RequestID, i.UserID, "submit", hash); err != nil {
 		return 0, nil, err
@@ -887,6 +910,9 @@ func (p *portal) sharedReviewResult(w http.ResponseWriter, r *http.Request, i id
 	taskID := r.PathValue("task")
 	task, err := p.sharedCheckTask(r.Context(), s, taskID)
 	if err != nil {
+		return err
+	}
+	if err = p.sharedHandoffGate(r.Context(), c, s.ID, taskID); err != nil {
 		return err
 	}
 	hash := sharedHash([]any{taskID, r.PathValue("result"), b})

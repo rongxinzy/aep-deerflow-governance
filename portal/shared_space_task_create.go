@@ -141,6 +141,14 @@ func (p *portal) sharedTaskCommand(w http.ResponseWriter, r *http.Request, i ide
 	if !sharedCaps(s.Role)["createTask"] {
 		return sharedFail(403, "当前成员只能查看")
 	}
+	if h, e := handoffScan(c.QueryRowContext(r.Context(), handoffSelect+` AND request_id=$2`, s.ID, r.PathValue("request"))); e == nil {
+		if h.Actor != i.UserID {
+			return sharedFail(403, "无权读取操作回执")
+		}
+		return p.handoffResponse(w, r.Context(), s, h, i)
+	} else if e != sql.ErrNoRows {
+		return e
+	}
 	receipt, ok, err := sharedCreationReceipt(r.Context(), c, s.ID, r.PathValue("request"), i.UserID, "")
 	if err != nil {
 		return err
