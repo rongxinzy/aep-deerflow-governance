@@ -86,6 +86,20 @@ spec:
                 required:
                 - image
                 type: object
+              assets:
+                description: |-
+                  Assets enables the governed asset tools on this employee's runtime.
+                  The operator renders the env the governance middleware gates on;
+                  bindings, capabilities, and execution enforcement all live in the
+                  AEP asset catalog, not here.
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled turns the asset tools on. The runtime stays tool-less
+                      otherwise — an employee without the toggle never sees them.
+                    type: boolean
+                type: object
               channels:
                 description: |-
                   Channels toggles IM channel providers; credentials arrive at runtime
