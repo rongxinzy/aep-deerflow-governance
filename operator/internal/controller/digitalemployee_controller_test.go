@@ -192,7 +192,13 @@ var _ = Describe("DigitalEmployee reconciler", func() {
 			reconcile(ctx)
 			fresh := &corev1.ConfigMap{}
 			Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: employee.Namespace, Name: configName(employee)}, fresh)).To(Succeed())
-			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"channel_connections"`))
+			// The subsystem block stays rendered (a hot enable needs a live
+			// channel service to start a leg on); only the declared provider
+			// entries disappear.
+			Expect(fresh.Data["config.yaml"]).To(ContainSubstring(`"channel_connections"`))
+			Expect(fresh.Data["config.yaml"]).To(ContainSubstring(`"enabled": true`))
+			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"wecom"`))
+			Expect(fresh.Data["config.yaml"]).NotTo(ContainSubstring(`"wechat"`))
 		})
 
 		It("renders the feishu bot name for the group mention gate", func(ctx context.Context) {
