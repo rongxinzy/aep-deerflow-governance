@@ -545,6 +545,43 @@ var _ = Describe("DigitalEmployee hibernation P2", func() {
 		Expect(env["DEERFLOW_CHANNEL_GATEWAY_URL"]).To(Equal("http://gw:8899"))
 		Expect(env["DEERFLOW_EMPLOYEE_NAME"]).To(Equal("wecom-helper"))
 	})
+
+	It("omits asset tool env when assets are unset", func(ctx context.Context) {
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+			Expect(e.Name).NotTo(HavePrefix("ASSET_"))
+		}
+	})
+
+	It("renders asset tool env when assets are enabled", func(ctx context.Context) {
+		employee.Spec.Assets = &v1alpha1.AssetsSpec{Enabled: true}
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		env := map[string]string{}
+		for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		Expect(env["ASSET_TOOLS_ENABLED"]).To(Equal("1"))
+		Expect(env["ASSET_SUBJECT_ID"]).To(Equal("wecom-helper"))
+	})
+
+	It("stays tool-less when assets are explicitly disabled", func(ctx context.Context) {
+		employee.Spec.Assets = &v1alpha1.AssetsSpec{Enabled: false}
+		Expect(fx.client.Update(ctx, employee)).To(Succeed())
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+			Expect(e.Name).NotTo(HavePrefix("ASSET_"))
+		}
+	})
 })
 
 var _ = Describe("DigitalEmployee runtime model list", func() {

@@ -72,6 +72,7 @@ func fullEmployee() *v1alpha1.DigitalEmployee {
 			},
 			NodePort:    30200,
 			Hibernation: &v1alpha1.HibernationSpec{Enabled: &on, IdleTimeout: "30m"},
+			Assets:      &v1alpha1.AssetsSpec{Enabled: true},
 		},
 		Status: v1alpha1.DigitalEmployeeStatus{
 			Phase:          v1alpha1.PhaseReady,

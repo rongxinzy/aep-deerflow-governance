@@ -500,6 +500,16 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			corev1.EnvVar{Name: "DEERFLOW_EMPLOYEE_NAME", Value: employee.Name},
 		)
 	}
+	// Governed asset tools: the middleware registers asset_list /
+	// asset_ssh_exec iff both env vars are present. The subject is the
+	// employee name — the same identifier the AEP asset catalog's
+	// de_employee bindings key on.
+	if spec.Assets != nil && spec.Assets.Enabled {
+		environment = append(environment,
+			corev1.EnvVar{Name: "ASSET_TOOLS_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "ASSET_SUBJECT_ID", Value: employee.Name},
+		)
+	}
 	var secretRefs []corev1.LocalObjectReference
 	if spec.Credentials.Name != "" {
 		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: spec.Credentials.Name})

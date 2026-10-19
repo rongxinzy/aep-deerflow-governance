@@ -458,6 +458,22 @@ type DigitalEmployeeSpec struct {
 	// channel-gateway lands.
 	// +optional
 	Hibernation *HibernationSpec `json:"hibernation,omitempty"`
+	// Assets enables the governed asset tools on this employee's runtime.
+	// The operator renders the env the governance middleware gates on;
+	// bindings, capabilities, and execution enforcement all live in the
+	// AEP asset catalog, not here.
+	// +optional
+	Assets *AssetsSpec `json:"assets,omitempty"`
+}
+
+// AssetsSpec toggles governed asset tooling (asset_list / asset_ssh_exec)
+// on the employee runtime. The binding subject is the employee name.
+type AssetsSpec struct {
+	// Enabled turns the asset tools on. The runtime stays tool-less
+	// otherwise — an employee without the toggle never sees them.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // EmailSpec references the employee's mailbox configuration secret.
