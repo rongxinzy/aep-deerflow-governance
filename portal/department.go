@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -154,6 +155,13 @@ func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (str
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// The account id is derived from the department, so "already exists" is the
+	// same answer as "created": recording it instead of reporting a 409 partial
+	// is what lets a department whose account predates the provisioning record
+	// be repaired, and what keeps the row's ov_account_id non-empty.
+	if resp.StatusCode == http.StatusConflict || strings.Contains(string(raw), "ALREADY_EXISTS") || strings.Contains(string(raw), "already exists") {
+		return "tenant-" + accountID, nil
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("openviking returned %d: %s", resp.StatusCode, string(raw))
 	}

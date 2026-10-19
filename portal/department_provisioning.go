@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -192,6 +193,24 @@ func retryMessage(partials []string) string {
 	return fmt.Sprintf("partially provisioned: %v", partials)
 }
 
+// provisionStepFailed reports whether this record says the named step never
+// succeeded. A "failed" record retries everything; "partial" retries only the
+// steps it names; a record that carries no phase yet has nothing to go by.
+func provisionStepFailed(record departmentProvision, step string) bool {
+	if record.Phase == "" || record.Phase == "failed" {
+		return true
+	}
+	if record.Phase != "partial" {
+		return false
+	}
+	for _, partial := range record.Partials {
+		if strings.HasPrefix(partial, step+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // handleProvisionDepartment retries the parts of a department's provisioning
 // that never succeeded — and only those, which makes it idempotent: an account
 // or tenant that already exists is not touched, and running it twice on a ready
@@ -268,19 +287,26 @@ func (p *portal) handleProvisionDepartment(w http.ResponseWriter, r *http.Reques
 	}
 
 	partials := []string{}
-	if record.OvAccountID == "" {
+	// Only a step the stored record says never succeeded is retried: one that
+	// is not named there succeeded — even if the upstream reported no id — and
+	// retrying it would create a second WeKnora tenant. An unknown record (a
+	// department provisioned before this one existed) has nothing to go by, so
+	// both steps are attempted.
+	if record.OvAccountID == "" && provisionStepFailed(record, "openviking") {
 		ovAccount, ovErr := p.createOpenVikingAccount(r, id)
 		if ovErr != nil {
 			partials = append(partials, fmt.Sprintf("openviking: %v", ovErr))
-		} else {
+		} else if ovAccount != "" {
 			record.OvAccountID = ovAccount
 		}
 	}
-	if p.cfg.knowledgeAPIURL != "" && record.WeKnoraTenant == "" {
+	if p.cfg.knowledgeAPIURL != "" && record.WeKnoraTenant == "" && provisionStepFailed(record, "weknora") {
 		tenant, tenantErr := p.createWeKnoraTenant(r, departmentRequest{Name: record.Name})
 		if tenantErr != nil {
 			partials = append(partials, fmt.Sprintf("weknora: %v", tenantErr))
-		} else {
+		} else if tenant != "" {
+			// An empty id must not overwrite a value that is already there; a
+			// ready record then keeps it from being created again.
 			record.WeKnoraTenant = tenant
 		}
 	}

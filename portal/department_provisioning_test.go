@@ -284,3 +284,60 @@ func failingWeKnoraRecover(stubs *departmentStubUpstreams) {
 		}
 	})
 }
+
+// The retry endpoint must not turn "the account already existed" into a
+// permanent partial (it would POST on every retry), and it must not re-create
+// a step that already succeeded just because that upstream reported no id.
+func TestDepartmentProvisioningRetryOutcomes(t *testing.T) {
+	t.Run("an account that already exists is recorded as the deterministic id", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		stubs.ov.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/admin/accounts" {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":"ALREADY_EXISTS","message":"account exists"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+		h := newDepartmentHarness(t, stubs)
+		// The shape the console arrives at for a department provisioned before
+		// the record existed: the account is upstream, the row's id is empty.
+		require.NoError(t, h.provisioningStore.Save(context.Background(), departmentProvision{
+			ID: "rd-dept", Name: "研发部", Phase: "partial",
+			Partials: []string{"openviking: openviking returned 409: ALREADY_EXISTS"},
+		}))
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("rd-dept"), adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		status := decodeDepartmentStatus(t, w)
+		assert.Equal(t, "ready", status.Phase, "an existing account is the same answer as a created one")
+		assert.Empty(t, status.Message)
+		assert.Equal(t, "tenant-rd-dept", status.OvAccountID)
+
+		records, err := h.provisioningStore.Load(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-rd-dept", records["rd-dept"].OvAccountID)
+	})
+
+	t.Run("a step that already succeeded is not retried into a second tenant", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		stubs.ov.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		h := newDepartmentHarness(t, stubs)
+		// WeKnora answered once (its own response carries no id), so the record
+		// is partial only because of OpenViking.
+		require.NoError(t, h.provisioningStore.Save(context.Background(), departmentProvision{
+			ID: "rd-dept", Name: "研发部", Phase: "partial",
+			Partials: []string{"openviking: openviking returned 500: unavailable"},
+		}))
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("rd-dept"), adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Equal(t, "partial", decodeDepartmentStatus(t, w).Phase)
+		assert.Equal(t, 0, stubs.wkCalls, "a succeeded step must not be created again")
+	})
+}
