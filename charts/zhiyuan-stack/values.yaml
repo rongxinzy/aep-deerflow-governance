@@ -353,7 +353,7 @@ workspaceAgent:
   microvmSubnet: 192.168.77.0/24
   image:
     repository: rongxinzy/pw-node-agent
-    tag: 0.1.3
+    tag: 0.1.5
   # pw-rootfs 模板镜像（pi-durable-bench 构建，独立版本线 0.5.x）
   templateImage:
     repository: rongxinzy/pw-rootfs
