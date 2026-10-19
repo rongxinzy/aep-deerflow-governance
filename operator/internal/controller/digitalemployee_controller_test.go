@@ -607,6 +607,12 @@ var _ = Describe("DigitalEmployee runtime model list", func() {
 			{Name: "bench-qwen", Provider: "openai", NativeModel: "Qwen3.6-35B-A3B", BaseURL: "http://higress-gateway.higress-system.svc.cluster.local/v1", ApiKeyEnv: "DEER_BENCH_API_KEY", Reasoning: &v1alpha1.RuntimeReasoning{Thinking: "optional", History: "preserve"}},
 		}
 		employee.Spec.Runtime.Model = ""
+		// Declared route envs must be satisfiable: the runtime refuses to start
+		// without them, so the operator rejects the CR before rendering one.
+		Expect(fx.client.Create(ctx, credentialsSecret(employee.Spec.Credentials.Name, map[string]string{
+			"BIGMODEL_API_KEY":   "secret",
+			"DEER_BENCH_API_KEY": "secret",
+		}))).To(Succeed())
 
 		config := reconcileAndGetConfig(ctx, employee)
 		var parsed struct {

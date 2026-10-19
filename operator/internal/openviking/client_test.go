@@ -2,6 +2,7 @@ package openviking
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,4 +70,83 @@ func TestPostTransportFailures(t *testing.T) {
 func TestTruncate(t *testing.T) {
 	assert.Equal(t, "abc", truncate([]byte("abcdef"), 3))
 	assert.Equal(t, "abcdef", truncate([]byte("abcdef"), 10))
+}
+
+func TestRegisterUserEnsuringAccount(t *testing.T) {
+	t.Run("a missing account is created before the register is retried", func(t *testing.T) {
+		var calls []string
+		client := newOVStub(t, func(w http.ResponseWriter, r *http.Request) {
+			calls = append(calls, r.Method+" "+r.URL.Path)
+			switch r.URL.Path {
+			case "/api/v1/admin/accounts":
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.Equal(t, "tenant-all-users", body["account_id"])
+				assert.Equal(t, "portal", body["admin_user_id"], "same admin contract as the portal's department provisioning")
+				w.WriteHeader(http.StatusCreated)
+			case "/api/v1/admin/accounts/tenant-all-users/users":
+				if len(calls) == 1 {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte("Account not found: tenant-all-users"))
+					return
+				}
+				_, _ = w.Write([]byte(`{"result":{"user_key":"minted"}}`))
+			default:
+				t.Errorf("unexpected path %s", r.URL.Path)
+			}
+		})
+
+		key, found, err := client.RegisterUserEnsuringAccount(context.Background(), "tenant-all-users", "whz-test")
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Equal(t, "minted", key)
+		assert.Equal(t, []string{
+			"POST /api/v1/admin/accounts/tenant-all-users/users",
+			"POST /api/v1/admin/accounts",
+			"POST /api/v1/admin/accounts/tenant-all-users/users",
+		}, calls)
+	})
+
+	t.Run("an account that already exists is not an error", func(t *testing.T) {
+		client := newOVStub(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/admin/accounts" {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":"ALREADY_EXISTS","message":"account exists"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"result":{"user_key":"minted"}}`))
+		})
+		_, _, err := client.RegisterUserEnsuringAccount(context.Background(), "acc", "u")
+		require.NoError(t, err)
+	})
+
+	t.Run("another failure is never retried as a missing account", func(t *testing.T) {
+		calls := 0
+		client := newOVStub(t, func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("boom"))
+		})
+		_, _, err := client.RegisterUserEnsuringAccount(context.Background(), "acc", "u")
+		require.Error(t, err)
+		assert.Equal(t, 1, calls, "only an Account-not-found answer triggers account creation")
+	})
+
+	t.Run("a failed account creation keeps the original error", func(t *testing.T) {
+		client := newOVStub(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/admin/accounts" {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("nope"))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("Account not found: acc"))
+		})
+		key, found, err := client.RegisterUserEnsuringAccount(context.Background(), "acc", "u")
+		require.Error(t, err)
+		assert.Empty(t, key)
+		assert.False(t, found)
+		assert.Contains(t, err.Error(), "Account not found")
+		assert.Contains(t, err.Error(), `creating OpenViking account "acc" failed`)
+	})
 }

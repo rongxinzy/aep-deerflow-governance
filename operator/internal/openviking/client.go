@@ -35,10 +35,42 @@ func (c *Client) RegisterUser(ctx context.Context, accountID, userID string) (ke
 	if err == nil {
 		return key, false, nil
 	}
-	if strings.Contains(err.Error(), "ALREADY_EXISTS") || strings.Contains(err.Error(), "already exists") {
+	if isAlreadyExists(err) {
 		return "", true, nil
 	}
 	return "", false, err
+}
+
+// EnsureAccount creates accountID when OpenViking does not have it yet
+// (idempotent: an ALREADY_EXISTS style answer counts as success). It is the
+// same admin contract the portal uses to provision a department account.
+func (c *Client) EnsureAccount(ctx context.Context, accountID string) error {
+	body, _ := json.Marshal(map[string]any{"account_id": accountID, "admin_user_id": "portal"})
+	if _, err := c.postRaw(ctx, "/api/v1/admin/accounts", body); err != nil {
+		if isAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// RegisterUserEnsuringAccount registers userID under accountID, creating the
+// account first when OpenViking reports that it does not exist.
+//
+// Department accounts are provisioned by the portal's department
+// orchestration, but that step can be skipped or can fail partially. A bare
+// RegisterUser then answers "Account not found" on every reconcile forever, so
+// the employee never leaves Error and nothing retries the missing account.
+func (c *Client) RegisterUserEnsuringAccount(ctx context.Context, accountID, userID string) (string, bool, error) {
+	key, found, err := c.RegisterUser(ctx, accountID, userID)
+	if err == nil || !isAccountMissing(err) {
+		return key, found, err
+	}
+	if ensureErr := c.EnsureAccount(ctx, accountID); ensureErr != nil {
+		return "", false, fmt.Errorf("%w (creating OpenViking account %q failed: %v)", err, accountID, ensureErr)
+	}
+	return c.RegisterUser(ctx, accountID, userID)
 }
 
 // RegenerateKey mints a fresh key for an existing user (the create response
@@ -69,23 +101,46 @@ func (c *Client) DeleteUser(ctx context.Context, accountID, userID string) error
 }
 
 func (c *Client) post(ctx context.Context, path string, body []byte) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	payload, err := c.postRaw(ctx, path, body)
 	if err != nil {
 		return "", err
+	}
+	var result struct {
+		UserKey string `json:"user_key"`
+	}
+	if err := json.Unmarshal(payload, &result); err != nil || result.UserKey == "" {
+		return "", fmt.Errorf("POST %s: response carries no user_key", path)
+	}
+	return result.UserKey, nil
+}
+
+// postRaw is the shared admin transport: it posts body to path and returns the
+// decoded "result" payload (or the raw body when the response carries no
+// envelope). Admin calls that do not mint a user key use this directly.
+func (c *Client) postRaw(ctx context.Context, path string, body []byte) (json.RawMessage, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
 	c.auth(request)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.http.Do(request)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("POST %s returned %d: %s", path, response.StatusCode, truncate(raw, 300))
+		return nil, fmt.Errorf("POST %s returned %d: %s", path, response.StatusCode, truncate(raw, 300))
+	}
+	// Some admin creates answer 2xx with no body at all: for those the status
+	// is the whole answer, and the callers below decide whether they still need
+	// something (post) or not (EnsureAccount).
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return json.RawMessage(nil), nil
 	}
 	var envelope struct {
 		Error *struct {
@@ -95,22 +150,27 @@ func (c *Client) post(ctx context.Context, path string, body []byte) (string, er
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return "", err
+		return nil, err
 	}
 	if envelope.Error != nil {
-		return "", fmt.Errorf("POST %s: %s: %s", path, envelope.Error.Code, envelope.Error.Message)
+		return nil, fmt.Errorf("POST %s: %s: %s", path, envelope.Error.Code, envelope.Error.Message)
 	}
-	payload := envelope.Result
-	if len(payload) == 0 {
-		payload = raw
+	if len(envelope.Result) == 0 {
+		return json.RawMessage(raw), nil
 	}
-	var result struct {
-		UserKey string `json:"user_key"`
-	}
-	if err := json.Unmarshal(payload, &result); err != nil || result.UserKey == "" {
-		return "", fmt.Errorf("POST %s: response carries no user_key", path)
-	}
-	return result.UserKey, nil
+	return envelope.Result, nil
+}
+
+// isAlreadyExists reports the admin API's answer for "this object is already
+// there", which every create call in this package treats as success.
+func isAlreadyExists(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "ALREADY_EXISTS") || strings.Contains(err.Error(), "already exists"))
+}
+
+// isAccountMissing reports the answer for "the account does not exist": the
+// 404 the portal's department provisioning is expected to have created first.
+func isAccountMissing(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Account not found")
 }
 
 func (c *Client) auth(request *http.Request) {

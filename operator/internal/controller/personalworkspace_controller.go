@@ -239,7 +239,7 @@ func (r *PersonalWorkspaceReconciler) ensureCompanionMemkeys(ctx context.Context
 		}
 		key, token := string(existing.Data[workspaceMemkeyKey]), string(existing.Data[workspaceTokenKey])
 		if key == "" {
-			minted, found, err := ov.RegisterUser(ctx, accountID, userID)
+			minted, found, err := ov.RegisterUserEnsuringAccount(ctx, accountID, userID)
 			if err != nil {
 				return errWrap("register memory user: ", err)
 			}
