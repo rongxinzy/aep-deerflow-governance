@@ -76,7 +76,6 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 	ws := runtimeWorkspace(t, h)
 	ws.UID = types.UID("bind-uid")
 	require.NoError(t, h.k8s.Update(t.Context(), ws))
-	require.NoError(t, h.k8s.Update(t.Context(), workspaceMemkey(ws.Name, "assistant")))
 
 	tasks := map[string]map[string]any{
 		"task":            {"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "updatedAt": "v1"},
