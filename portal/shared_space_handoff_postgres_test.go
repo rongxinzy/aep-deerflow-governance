@@ -59,8 +59,10 @@ VALUES('binding-source-change','space','task-source-change','ws-a','uid-ws-a','u
 ('binding-target-change','space','task-target-change','ws-a','uid-ws-a','u-x','assistant',731,'pi-target-change',1,'execution-target-change',4,'bind-hash-3','assignment-hash-3','participant-a',1,'active',9);
 INSERT INTO shared_space_runtime_outbox(command_id,binding_id,action,payload,payload_hash,state) VALUES('late-submit','binding-a','submit','{}','hash','pending')`)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO shared_space_results(id,space_id,task_id,version,title,document_key,document_id,revision_id,body_hash,submitted_by) VALUES('result-from-a','space','task',1,'A的成果','review-doc','doc-a','rev-a','bodyhash','agent-a');
-INSERT INTO shared_space_reviews(id,result_id,decision,reason,actor_id) VALUES('review-from-a','result-from-a','request_changes','补充证据','u-x');
+	sharedBody := "已经共享并退回的成果内容"
+	_, err = db.Exec(`INSERT INTO shared_space_results(id,space_id,task_id,version,title,document_key,document_id,revision_id,body_hash,submitted_by) VALUES('result-from-a','space','task',1,'A的成果','review-doc','doc-a','rev-a',$1,'agent-a')`, sharedHash(sharedBody))
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO shared_space_reviews(id,result_id,decision,reason,actor_id) VALUES('review-from-a','result-from-a','request_changes','补充证据','u-x');
 INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-from-a','binding-a')`)
 	require.NoError(t, err)
 
@@ -79,13 +81,25 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	}
 	var pcMu sync.Mutex
 	patches := 0
-	checkouts := 0
+	checkoutsByTask := map[string]int{}
 	patchesByTask := map[string]int{}
 	dropPatchAck := true
+	documentMode := ""
 	pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		pcMu.Lock()
 		defer pcMu.Unlock()
+		if r.Method == http.MethodGet && r.URL.Path == "/issues/task/documents/review-doc" {
+			doc := sharedDocument{ID: "doc-a", LatestRevisionID: "rev-a", Body: sharedBody}
+			switch documentMode {
+			case "revision":
+				doc.LatestRevisionID = "external-revision"
+			case "body":
+				doc.Body = "外部修改后的成果"
+			}
+			_ = json.NewEncoder(w).Encode(doc)
+			return
+		}
 		taskID := partsID(r.URL.Path)
 		task, ok := pcTasks[taskID]
 		if !ok || !strings.HasPrefix(r.URL.Path, "/issues/") {
@@ -98,11 +112,11 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 				http.Error(w, "bad checkout", 400)
 				return
 			}
-			checkouts++
+			checkoutsByTask[taskID]++
 			task["assigneeAgentId"] = body["agentId"]
 			task["assigneeUserId"] = nil
 			task["status"] = "in_progress"
-			task["updatedAt"] = fmt.Sprintf("checkout-%d", checkouts)
+			task["updatedAt"] = fmt.Sprintf("checkout-%d", checkoutsByTask[taskID])
 			_ = json.NewEncoder(w).Encode(task)
 			return
 		}
@@ -171,6 +185,12 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 			writeJSON(w, 200, stopReceipts[commandID])
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/assistant/api/conversations/") {
+			var conversationID int
+			_, _ = fmt.Sscanf(strings.TrimPrefix(r.URL.Path, "/assistant/api/conversations/"), "%d", &conversationID)
+			writeJSON(w, http.StatusOK, map[string]any{"conversationId": conversationID})
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	defer pi.Close()
@@ -184,8 +204,8 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	}
 
 	// Keep an exact stop receipt and only expose it to the GET recovery path.
-	identity := identity{UserID: "u-x", DeploymentID: "deployment-acme"}
-	assignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task"], identity)
+	actorIdentity := identity{UserID: "u-x", DeploymentID: "deployment-acme"}
+	assignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task"], actorIdentity)
 	require.NoError(t, err)
 	handoff := func(taskID, requestID, target, token string) (int, map[string]any) {
 		t.Helper()
@@ -201,7 +221,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 		req.SetPathValue("space", "space")
 		req.SetPathValue("task", taskID)
 		w := httptest.NewRecorder()
-		err := h.sharedHandoffTask(w, req, identity)
+		err := h.sharedHandoffTask(w, req, actorIdentity)
 		if err != nil {
 			sharedWriteError(w, err)
 		}
@@ -231,9 +251,65 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	require.Equal(t, "agent-b", pcTasks["task"]["assigneeAgentId"])
 	pcMu.Unlock()
 
+	// The new Agent can bind the handed-off task after a changes_requested
+	// result. The replacement binding uses the advanced epoch and latest result
+	// version, while keeping its source conversation separate from Agent A's.
+	var wsB dev.PersonalWorkspace
+	require.NoError(t, h.k8s.Get(t.Context(), types.NamespacedName{Namespace: h.cfg.namespace, Name: "ws-b"}, &wsB))
+	bindBody, err := json.Marshal(map[string]any{"spaceId": "space", "taskId": "task", "sourceConversationId": 842, "requestId": "bind-after-handoff", "title": "继续处理退回成果", "instruction": "按共享成果修订"})
+	require.NoError(t, err)
+	bindAfterHandoff := func() (*httptest.ResponseRecorder, error) {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(bindBody)))
+		req.SetPathValue("action", "space-bind")
+		response := httptest.NewRecorder()
+		return response, h.sharedRuntimeAgent(response, req, identity{UserID: "u-x"}, &wsB, "assistant")
+	}
+	for _, mode := range []string{"revision", "body"} {
+		pcMu.Lock()
+		documentMode = mode
+		pcMu.Unlock()
+		_, bindErr := bindAfterHandoff()
+		var rejected *sharedError
+		require.ErrorAs(t, bindErr, &rejected)
+		require.Equal(t, http.StatusConflict, rejected.code)
+		pcMu.Lock()
+		require.Zero(t, checkoutsByTask["task"], "an unverifiable shared result must be rejected before checkout")
+		documentMode = ""
+		pcMu.Unlock()
+	}
+	bindResponse, bindErr := bindAfterHandoff()
+	require.NoError(t, bindErr)
+	var newBinding runtimeBinding
+	require.NoError(t, json.Unmarshal(bindResponse.Body.Bytes(), &newBinding), bindResponse.Body.String())
+	require.Equal(t, http.StatusAccepted, bindResponse.Code)
+	require.Equal(t, collaborationID("space", "task", "1"), newBinding.ID, "handoff advances the binding identity epoch")
+	require.Equal(t, 1, newBinding.AssignmentEpoch)
+	require.Equal(t, "participant-b", newBinding.ParticipantID)
+	require.Equal(t, 1, newBinding.ExpectedVersion, "the replacement execution starts from the latest shared result")
+	require.EqualValues(t, 842, newBinding.SourceConversationID)
+	pcMu.Lock()
+	require.Equal(t, "agent-b", pcTasks["task"]["assigneeAgentId"])
+	require.Equal(t, 1, checkoutsByTask["task"])
+	pcMu.Unlock()
+	var bindPayloadRaw []byte
+	require.NoError(t, db.QueryRow(`SELECT payload FROM shared_space_runtime_outbox WHERE command_id=$1`, "start:"+newBinding.ID).Scan(&bindPayloadRaw))
+	var bindCommandPayload map[string]any
+	require.NoError(t, json.Unmarshal(bindPayloadRaw, &bindCommandPayload))
+	require.Equal(t, float64(1), bindCommandPayload["expectedVersion"])
+	require.Equal(t, float64(1), bindCommandPayload["assignmentEpoch"])
+	startInstruction := bindCommandPayload["instruction"].(string)
+	require.Contains(t, startInstruction, "补充证据")
+	require.Contains(t, startInstruction, sharedBody)
+	require.NotContains(t, startInstruction, "private-conversation-a")
+	var oldSourceConversation, replacementSourceConversation int64
+	require.NoError(t, db.QueryRow(`SELECT source_conversation_id FROM shared_space_runtime_bindings WHERE id='binding-a'`).Scan(&oldSourceConversation))
+	require.NoError(t, db.QueryRow(`SELECT source_conversation_id FROM shared_space_runtime_bindings WHERE id=$1`, newBinding.ID).Scan(&replacementSourceConversation))
+	require.EqualValues(t, 731, oldSourceConversation)
+	require.EqualValues(t, 842, replacementSourceConversation)
+
 	// A stop that is durably confirmed cannot overwrite a Paperclip owner that
 	// changed while the receipt was unknown.
-	sourceChangedAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-source-change"], identity)
+	sourceChangedAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-source-change"], actorIdentity)
 	require.NoError(t, err)
 	code, sourcePending := handoff("task-source-change", "handoff-source-change", "participant-b", sourceChangedAssignment.Token)
 	require.Equal(t, http.StatusAccepted, code, sourcePending)
@@ -252,7 +328,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 
 	// Revoking/changing the target grant during an unknown stop likewise blocks
 	// finalization, even though the durable Pi receipt has since appeared.
-	targetChangedAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-target-change"], identity)
+	targetChangedAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-target-change"], actorIdentity)
 	require.NoError(t, err)
 	code, targetPending := handoff("task-target-change", "handoff-target-change", "participant-b", targetChangedAssignment.Token)
 	require.Equal(t, http.StatusAccepted, code, targetPending)
@@ -273,20 +349,31 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	require.NoError(t, h.k8s.Get(t.Context(), types.NamespacedName{Namespace: h.cfg.namespace, Name: "ws-a"}, &wsA))
 	oldBinding := runtimeBinding{ID: "binding-a", SpaceID: "space", TaskID: "task", Workspace: "ws-a", WorkspaceUID: "uid-ws-a", Owner: "u-x", Companion: "assistant", ParticipantID: "participant-a", ParticipantVersion: 1, BindingState: oldState, AssignmentEpoch: 9}
 	var stale *sharedError
-	require.ErrorAs(t, h.runtimeAuthorize(t.Context(), oldBinding, &wsA, identity), &stale)
+	require.ErrorAs(t, h.runtimeAuthorize(t.Context(), oldBinding, &wsA, actorIdentity), &stale)
 	require.Equal(t, http.StatusConflict, stale.code, "late callback from the retired binding must be rejected by the task epoch fence")
 
 	// A→B→A keeps the retired binding as history and creates a new handoff
 	// epoch; the old source conversation and binding identity remain untouched.
-	assignment, err = h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task"], identity)
+	assignment, err = h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task"], actorIdentity)
 	require.NoError(t, err)
 	code, back := handoff("task", "handoff-b", "participant-a", assignment.Token)
+	require.Equal(t, http.StatusAccepted, code, back, "the second stop also begins with a lost acknowledgement")
+	require.Equal(t, "stopping", back["phase"])
+	code, back = handoff("task", "handoff-b", "participant-a", assignment.Token)
 	require.Equal(t, http.StatusOK, code, back)
 	require.Equal(t, "applied", back["state"])
 	pcMu.Lock()
 	require.Equal(t, "agent-a", pcTasks["task"]["assigneeAgentId"])
 	require.Equal(t, 2, patches)
 	pcMu.Unlock()
+	var replacementState, replacementOutboxState string
+	require.NoError(t, db.QueryRow(`SELECT binding_state FROM shared_space_runtime_bindings WHERE id=$1`, newBinding.ID).Scan(&replacementState))
+	require.NoError(t, db.QueryRow(`SELECT state FROM shared_space_runtime_outbox WHERE command_id=$1`, "start:"+newBinding.ID).Scan(&replacementOutboxState))
+	require.Equal(t, "retired", replacementState)
+	require.Equal(t, "blocked", replacementOutboxState, "handoff tombstones the replacement binding's not-yet-dispatched start")
+	var lateBindingErr *sharedError
+	require.ErrorAs(t, h.runtimeAuthorize(t.Context(), newBinding, &wsB, actorIdentity), &lateBindingErr)
+	require.Equal(t, http.StatusConflict, lateBindingErr.code, "a late callback from the replacement binding cannot cross the next epoch")
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM shared_space_handoffs WHERE space_id='space' AND task_id='task'`).Scan(&count))
 	require.Equal(t, 2, count)
@@ -300,7 +387,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	// For a direct assignment without a running Pi binding, a lost Paperclip
 	// acknowledgement is recovered by GET only. The pending patch is never
 	// replayed; once an external readback confirms it, the request completes.
-	unknownAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-unknown"], identity)
+	unknownAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-unknown"], actorIdentity)
 	require.NoError(t, err)
 	code, unknown := handoff("task-unknown", "handoff-patch-unknown", "participant-b", unknownAssignment.Token)
 	require.Equal(t, http.StatusAccepted, code, unknown)
@@ -309,7 +396,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	require.Equal(t, 1, patchesByTask["task-unknown"])
 	pcMu.Unlock()
 
-	releaseAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-release"], identity)
+	releaseAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-release"], actorIdentity)
 	require.NoError(t, err)
 	code, released := handoff("task-release", "handoff-release", "", releaseAssignment.Token)
 	require.Equal(t, http.StatusOK, code, released)
@@ -349,7 +436,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	// A concurrent handoff and claim serialize on the same space lock. The
 	// winner advances the assignment token; the other operation must be stale
 	// and cannot create a second native assignment.
-	raceAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-race"], identity)
+	raceAssignment, err := h.sharedAssignmentDTO(t.Context(), sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}, pcTasks["task-race"], actorIdentity)
 	require.NoError(t, err)
 	start := make(chan struct{})
 	type outcome struct {
@@ -370,9 +457,9 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 			return
 		}
 		defer release()
-		space, loadErr := h.sharedLoad(t.Context(), conn, "space", identity)
+		space, loadErr := h.sharedLoad(t.Context(), conn, "space", actorIdentity)
 		if loadErr == nil {
-			_, loadErr = h.sharedAssignmentLocked(t.Context(), conn, space, "task-race", identity, sharedAssignmentInput{RequestID: "race-claim", ExpectedAssignmentToken: raceAssignment.Token, ParticipantID: "participant-b"}, true)
+			_, loadErr = h.sharedAssignmentLocked(t.Context(), conn, space, "task-race", actorIdentity, sharedAssignmentInput{RequestID: "race-claim", ExpectedAssignmentToken: raceAssignment.Token, ParticipantID: "participant-b"}, true)
 		}
 		claimDone <- outcome{err: loadErr}
 	}()
@@ -397,7 +484,7 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	}
 	require.Equal(t, 1, winners)
 	pcMu.Lock()
-	require.Equal(t, 1, patchesByTask["task-race"]+checkouts)
+	require.Equal(t, 1, patchesByTask["task-race"]+checkoutsByTask["task-race"])
 	require.Equal(t, "agent-b", pcTasks["task-race"]["assigneeAgentId"])
 	pcMu.Unlock()
 }
