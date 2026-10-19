@@ -70,8 +70,8 @@ func (s *sqlProvisioningStore) Save(ctx context.Context, record departmentProvis
 			name           = EXCLUDED.name,
 			phase          = EXCLUDED.phase,
 			partials       = EXCLUDED.partials,
-			ov_account_id  = EXCLUDED.ov_account_id,
-			weknora_tenant = EXCLUDED.weknora_tenant,
+			ov_account_id  = CASE WHEN EXCLUDED.ov_account_id = '' THEN department_provisioning.ov_account_id ELSE EXCLUDED.ov_account_id END,
+			weknora_tenant = CASE WHEN EXCLUDED.weknora_tenant = '' THEN department_provisioning.weknora_tenant ELSE EXCLUDED.weknora_tenant END,
 			message        = EXCLUDED.message,
 			updated_at     = now()`,
 		record.ID, record.Name, record.Phase, string(partials),
@@ -123,6 +123,17 @@ func (s *memoryProvisioningStore) Save(_ context.Context, record departmentProvi
 	}
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = time.Now().UTC()
+	}
+	// Same rule as the SQL store: an empty id must not erase one that was
+	// already recorded — the row is the durable truth, and a later call that
+	// merely lacked the id does not revoke it.
+	if previous, ok := s.records[record.ID]; ok {
+		if record.OvAccountID == "" {
+			record.OvAccountID = previous.OvAccountID
+		}
+		if record.WeKnoraTenant == "" {
+			record.WeKnoraTenant = previous.WeKnoraTenant
+		}
 	}
 	s.records[record.ID] = record
 	return nil

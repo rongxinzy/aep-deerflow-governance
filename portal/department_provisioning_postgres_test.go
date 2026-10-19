@@ -70,7 +70,13 @@ func TestDepartmentProvisioningPostgresStore(t *testing.T) {
 		require.Len(t, records, 1, "the second save must update the row, never duplicate it")
 		assert.Equal(t, "ready", records["rd-dept"].Phase)
 		assert.Empty(t, records["rd-dept"].Partials)
-		assert.Empty(t, records["rd-dept"].OvAccountID)
+		assert.Equal(t, "tenant-rd-dept", records["rd-dept"].OvAccountID,
+			"a later save that carries no id must not erase the one already recorded")
+
+		require.NoError(t, store.Save(ctx, departmentProvision{ID: "rd-dept", Name: "研发部", Phase: "ready", OvAccountID: "tenant-repaired"}))
+		records, err = store.Load(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "tenant-repaired", records["rd-dept"].OvAccountID, "a real id still replaces the old one")
 	})
 
 	t.Run("a partial create is persisted and then retried through the endpoint", func(t *testing.T) {

@@ -79,8 +79,12 @@ func newDepartmentStubs(t *testing.T) *departmentStubUpstreams {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/auth/login"):
 			_, _ = w.Write([]byte(`{"token":"wk-token"}`))
-		case r.URL.Path == "/api/v1/tenants":
-			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodGet:
+			// The real service answers {"success":…,"data":{"items":[…]}}
+			// with a numeric id, which is what the portal now reads.
+			_, _ = w.Write([]byte(`{"success":true,"data":{"items":[]}}`))
+		case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":7,"name":"研发部"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

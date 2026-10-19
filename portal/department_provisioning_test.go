@@ -277,11 +277,63 @@ func failingWeKnoraRecover(stubs *departmentStubUpstreams) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/auth/login"):
 			_, _ = w.Write([]byte(`{"token":"wk-token"}`))
-		case r.URL.Path == "/api/v1/tenants":
-			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"success":true,"data":{"items":[]}}`))
+		case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"success":true,"data":{"id":7,"name":"研发部"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
+	})
+}
+
+// WeKnora answers {"success":true,"data":{"id":<number>,"name":…}} and lists
+// tenants under {"success":…,"data":{"items":[…]}}; the portal used to decode
+// the create answer into a top-level string field, so a provisioned department
+// was recorded without its tenant and a retry created a second one.
+func TestWeKnoraTenantProvisioning(t *testing.T) {
+	t.Run("a provisioned department records the tenant id WeKnora returns", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		h := newDepartmentHarness(t, stubs)
+
+		status := createDepartment(t, h)
+
+		assert.Equal(t, "ready", status.Phase)
+		assert.Equal(t, "7", status.WeKnoraTenant, "the id is nested under data and numeric")
+	})
+
+	t.Run("retrying reuses the tenant the department already owns", func(t *testing.T) {
+		stubs := newDepartmentStubs(t)
+		creates := 0
+		stubs.weknora.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/auth/login"):
+				_, _ = w.Write([]byte(`{"token":"wk-token"}`))
+			case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodGet:
+				_, _ = w.Write([]byte(`{"success":true,"data":{"items":[{"id":41,"name":"研发部"}]}}`))
+			case r.URL.Path == "/api/v1/tenants" && r.Method == http.MethodPost:
+				creates++
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		h := newDepartmentHarness(t, stubs)
+		// The shape the old decode produced: the step is missing and its tenant
+		// id is empty, while the tenant exists upstream.
+		require.NoError(t, h.provisioningStore.Save(context.Background(), departmentProvision{
+			ID: "rd-dept", Name: "研发部", Phase: "partial",
+			Partials: []string{"weknora: weknora returned 500: unavailable"},
+		}))
+
+		w := httptest.NewRecorder()
+		h.handleProvisionDepartment(w, provisionRequest("rd-dept"), adminIdentity())
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		status := decodeDepartmentStatus(t, w)
+		assert.Equal(t, "ready", status.Phase)
+		assert.Equal(t, "41", status.WeKnoraTenant, "the tenant this department owns is reused")
+		assert.Equal(t, 0, creates, "a tenant that exists must never be created again")
 	})
 }
 
