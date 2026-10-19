@@ -312,7 +312,7 @@ class AepGovernanceMiddleware(AgentMiddleware):
         # resolved per call and injected in wrap_tool_call — see
         # asset_tools for the trust notes.
         from .asset_tools import build_asset_tools
-        asset_tools = build_asset_tools()
+        asset_tools = build_asset_tools(client=self.client)
         if asset_tools:
             self.tools = list(self.tools) + list(asset_tools)
             print(f"[aep-governance] asset tools registered: {sorted(t.name for t in asset_tools)}", flush=True)

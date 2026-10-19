@@ -84,27 +84,27 @@ def _format_execution(result: dict[str, Any]) -> str:
 
 
 def build_asset_tools(environ: dict[str, str] | None = None,
+                      client: Any = None,
                       gateway_factory: Callable[[str], _AssetGateway] | None = None) -> list[BaseTool]:
     """Build the asset tools from ``ASSET_TOOLS_ENABLED``/``ASSET_SUBJECT_ID``.
 
-    Returns ``[]`` when the feature env is absent. ``gateway_factory``
-    substitutes the AEP-carrying gateway in tests.
+    ``client`` is the middleware's own _AepClient — the single credential
+    source (base URL, deployment, service account) the data-scope calls
+    already use; the tools never construct their own. Returns ``[]`` when
+    the feature env is absent or no client was provided.
+    ``gateway_factory`` substitutes the AEP-carrying gateway in tests.
     """
     env = dict(os.environ if environ is None else environ)
     if not env.get("ASSET_TOOLS_ENABLED", "").strip() or not env.get("ASSET_SUBJECT_ID", "").strip():
+        return []
+    if client is None and gateway_factory is None:
+        print("[aep-governance] asset tools disabled: no AEP client provided", flush=True)
         return []
     subject_id = env["ASSET_SUBJECT_ID"].strip()
 
     def make_gateway() -> _AssetGateway:
         if gateway_factory is not None:
             return gateway_factory(subject_id)
-        from . import _AepClient  # late import: shares the middleware's client config
-        client = _AepClient(
-            env.get("AEP_BASE_URL", "http://aep-control-service.aep-system:8080"),
-            env.get("AEP_DEPLOYMENT_ID", "demo"),
-            env.get("AEP_SERVICE_USERNAME", ""),
-            env.get("AEP_SERVICE_PASSWORD", ""),
-        )
         return _AssetGateway(client, subject_id)
 
     @tool
