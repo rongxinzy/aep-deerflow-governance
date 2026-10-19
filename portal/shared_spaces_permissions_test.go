@@ -18,17 +18,19 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	dev "github.com/rongxinzy/aep-deerflow-governance/operator/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestSharedSpacesOwnerPermissions exercises ownership transitions against
+// TestSharedSpacesPostgresOwnerPermissions exercises ownership transitions against
 // PostgreSQL because the last-owner check and membership versions are
 // transactional invariants.
-func TestSharedSpacesOwnerPermissions(t *testing.T) {
+func TestSharedSpacesPostgresOwnerPermissions(t *testing.T) {
 	dsn := os.Getenv("PORTAL_TEST_POSTGRES_URL")
 	if dsn == "" {
 		t.Skip("requires disposable localhost PORTAL_TEST_POSTGRES_URL")
@@ -70,7 +72,12 @@ func TestSharedSpacesOwnerPermissions(t *testing.T) {
 	h.aep = &aepAuthenticator{baseURL: aep.URL, http: aep.Client()}
 	scheme := runtime.NewScheme()
 	require.NoError(t, schemeAddK8s(scheme))
+	require.NoError(t, dev.AddToScheme(scheme))
 	h.k8s = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(secret).Build()
+	editorWorkspace := runningWorkspace("ws-editor-agent", "editor-synthetic", "assistant")
+	editorWorkspace.UID = types.UID("uid-ws-editor-agent")
+	initializeContacts(editorWorkspace, nil)
+	require.NoError(t, h.k8s.Create(t.Context(), editorWorkspace))
 	clearSharedSpaceAdminTokenCache(t)
 	routes := h.routes()
 	call := func(token, method, route string, body any) (int, map[string]any) {
@@ -100,6 +107,9 @@ func TestSharedSpacesOwnerPermissions(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, status, out)
 	spaceID := out["space"].(map[string]any)["id"].(string)
+	_, err = db.Exec(`INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state)
+VALUES('editor-assistant', $1, 'companion', 'ws-editor-agent/assistant', 'Assistant', 'editor-synthetic', 'uid-ws-editor-agent', 'editor', 'active', 1, 'assigned-agent-synthetic', 'ready')`, spaceID)
+	require.NoError(t, err)
 	base := "/api/v1/shared-spaces/" + spaceID
 	status, out = call("token-owner", http.MethodGet, "/api/v1/shared-spaces", nil)
 	require.Equal(t, http.StatusOK, status, out)

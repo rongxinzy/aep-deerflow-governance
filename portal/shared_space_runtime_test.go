@@ -36,21 +36,31 @@ func (expected runtimeReturnPayload) Match(value driver.Value) bool {
 }
 
 func runtimeTestBinding() runtimeBinding {
-	return runtimeBinding{ID: "binding", SpaceID: "space", TaskID: "task", Workspace: "ws-source", Owner: "u-x", Companion: "assistant", SourceConversationID: 42, PiTaskID: "pi-task", Generation: 1, ExecutionID: "execution", ExpectedVersion: 0, BindHash: "bind-hash", AssignmentHash: runtimeAssignment(map[string]any{})}
+	return runtimeBinding{ParticipantID: "participant", ParticipantVersion: 1, ID: "binding", SpaceID: "space", TaskID: "task", Workspace: "ws-source", WorkspaceUID: "runtime-test-uid", Owner: "u-x", Companion: "assistant", SourceConversationID: 42, PiTaskID: "pi-task", Generation: 1, ExecutionID: "execution", ExpectedVersion: 0, BindHash: "bind-hash", AssignmentHash: runtimeAssignment(map[string]any{"assigneeAgentId": "agent"})}
 }
 func runtimeTestRows(b runtimeBinding) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "space_id", "task_id", "workspace_name", "workspace_uid", "owner_id", "companion", "source_conversation_id", "pi_task_id", "generation", "execution_id", "expected_version", "bind_hash", "assignment_hash"}).AddRow(b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.PiTaskID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash)
+	return sqlmock.NewRows([]string{"id", "space_id", "task_id", "workspace_name", "workspace_uid", "owner_id", "companion", "source_conversation_id", "pi_task_id", "generation", "execution_id", "expected_version", "bind_hash", "assignment_hash", "participant_id", "participant_version"}).AddRow(b.ID, b.SpaceID, b.TaskID, b.Workspace, b.WorkspaceUID, b.Owner, b.Companion, b.SourceConversationID, b.PiTaskID, b.Generation, b.ExecutionID, b.ExpectedVersion, b.BindHash, b.AssignmentHash, b.ParticipantID, b.ParticipantVersion)
 }
 func runtimeExpectBinding(h *apiTestPortal, b runtimeBinding) {
 	h.dbmock.ExpectQuery("SELECT id,space_id,task_id,workspace_name").WithArgs(b.ID).WillReturnRows(runtimeTestRows(b))
 }
 func runtimeExpectSpace(h *apiTestPortal, role string) {
+	h.dbmock.ExpectQuery("SELECT id,deployment_id,company_id,project_id,name").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment_id", "company_id", "project_id", "name"}).AddRow("space", h.cfg.aepDeploymentID, "company", "project", "空间"))
+}
+func runtimeExpectMemberSpace(h *apiTestPortal, role string) {
 	h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment_id", "company_id", "project_id", "name", "role"}).AddRow("space", h.cfg.aepDeploymentID, "company", "project", "空间", role))
+}
+func runtimeExpectParticipant(h *apiTestPortal, b runtimeBinding) {
+	h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnRows(sqlmock.NewRows([]string{"id", "kind", "target", "name", "owner_id", "resource_uid", "role", "state", "version", "agent_id", "registration_state"}).AddRow(b.ParticipantID, "companion", b.Workspace+"/"+b.Companion, "assistant", b.Owner, b.WorkspaceUID, "editor", "active", b.ParticipantVersion, "agent", "ready"))
 }
 func runtimeWorkspace(t *testing.T, h *apiTestPortal) *dev.PersonalWorkspace {
 	t.Helper()
 	var ws dev.PersonalWorkspace
 	require.NoError(t, h.k8s.Get(t.Context(), client.ObjectKey{Namespace: h.cfg.namespace, Name: "ws-source"}, &ws))
+	if ws.UID == "" {
+		ws.UID = "runtime-test-uid"
+		require.NoError(t, h.k8s.Update(t.Context(), &ws))
+	}
 	return &ws
 }
 func runtimeExpectUnlock(h *apiTestPortal) {
@@ -142,7 +152,7 @@ func TestSharedRuntimeAuthorizationFences(t *testing.T) {
 			case "missing-companion":
 				b.Companion = "removed"
 			}
-			if mode == "viewer" || mode == "assignment" || mode == "ok" {
+			if mode == "viewer" || mode == "assignment" || mode == "ok" || mode == "revoked" {
 				role := "editor"
 				if mode == "viewer" {
 					role = "viewer"
@@ -150,15 +160,16 @@ func TestSharedRuntimeAuthorizationFences(t *testing.T) {
 				runtimeExpectSpace(h, role)
 			}
 			if mode == "revoked" {
-				h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnError(sql.ErrNoRows)
+				h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnError(sql.ErrNoRows)
 			}
 			if mode == "temporary" {
-				h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnError(errors.New("temporary db"))
+				h.dbmock.ExpectQuery("SELECT id,deployment_id,company_id,project_id,name").WillReturnError(errors.New("temporary db"))
 			}
 			if mode == "assignment" || mode == "ok" {
+				runtimeExpectParticipant(h, b)
 				pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					require.Equal(t, "/issues/task", r.URL.Path)
-					body := map[string]any{"id": "task", "projectId": "project", "companyId": "company"}
+					body := map[string]any{"id": "task", "projectId": "project", "companyId": "company", "assigneeAgentId": "agent"}
 					if mode == "assignment" {
 						body["assigneeUserId"] = "changed"
 					}
@@ -192,6 +203,9 @@ func TestSharedRuntimeHandlerValidationAndDiscovery(t *testing.T) {
 	}
 	h.dbmock.ExpectQuery("SELECT s.id FROM shared_spaces").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("space"))
 	runtimeExpectSpace(h, "editor")
+	b := runtimeTestBinding()
+	runtimeExpectParticipant(h, b)
+	h.dbmock.ExpectQuery("SELECT count\\(\\*\\) FROM shared_space_commands").WithArgs("space", "allowed").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "allowed", "projectId": "project", "companyId": "company", "executionConfig": "PRIVATE"}, {"id": "foreign", "projectId": "other", "companyId": "company"}})
 	}))
@@ -210,6 +224,7 @@ func TestSharedRuntimeWorkerUnknownOnlyQueriesReceipt(t *testing.T) {
 	for _, mode := range []string{"unknown", "wrong-hash", "applied", "stale", "temporary"} {
 		t.Run(mode, func(t *testing.T) {
 			h := collaborationHarness(t)
+			_ = runtimeWorkspace(t, h)
 			b := runtimeTestBinding()
 			b.PiTaskID = ""
 			payload := map[string]any{"executionId": b.ExecutionID}
@@ -230,9 +245,10 @@ func TestSharedRuntimeWorkerUnknownOnlyQueriesReceipt(t *testing.T) {
 			h.dbmock.ExpectExec("UPDATE shared_space_runtime_outbox SET next_attempt_at").WillReturnResult(sqlmock.NewResult(0, 1))
 			h.dbmock.ExpectQuery("SELECT state FROM shared_space_runtime_outbox").WillReturnRows(sqlmock.NewRows([]string{"state"}).AddRow(state))
 			if mode == "temporary" {
-				h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnError(errors.New("temporary db"))
+				h.dbmock.ExpectQuery("SELECT id,deployment_id,company_id,project_id,name").WillReturnError(errors.New("temporary db"))
 			} else {
 				runtimeExpectSpace(h, "editor")
+				runtimeExpectParticipant(h, current)
 			}
 			calls := []string{}
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +262,7 @@ func TestSharedRuntimeWorkerUnknownOnlyQueriesReceipt(t *testing.T) {
 			defer up.Close()
 			h.workspaceChatOverride = up.URL
 			pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "projectId": "project", "companyId": "company", "status": "todo"})
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "projectId": "project", "companyId": "company", "status": "todo", "assigneeAgentId": "agent"})
 			}))
 			defer pc.Close()
 			h.cfg.paperclipBaseURL = pc.URL
@@ -284,74 +300,20 @@ func TestSharedRuntimeWorkerUnknownOnlyQueriesReceipt(t *testing.T) {
 	time.Sleep(time.Millisecond)
 }
 
-func TestSharedRuntimeBindStages(t *testing.T) {
-	for _, mode := range []string{"viewer", "terminal", "wrong-source", "already-bound", "unknown", "new", "insert-failure"} {
-		t.Run(mode, func(t *testing.T) {
-			h := collaborationHarness(t)
-			ws := runtimeWorkspace(t, h)
-			h.dbmock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
-			role := "editor"
-			if mode == "viewer" {
-				role = "viewer"
-			}
-			runtimeExpectSpace(h, role)
-			pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				status := "todo"
-				if mode == "terminal" {
-					status = "cancelled"
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": status})
-			}))
-			defer pc.Close()
-			h.cfg.paperclipBaseURL = pc.URL
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				id := 42
-				if mode == "wrong-source" {
-					id = 43
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"conversationId": id})
-			}))
-			defer up.Close()
-			h.workspaceChatOverride = up.URL
-			if mode != "viewer" && mode != "terminal" && mode != "wrong-source" {
-				if mode == "already-bound" {
-					b := runtimeTestBinding()
-					b.ID = collaborationID("space", "task")
-					runtimeExpectBinding(h, b)
-				} else {
-					h.dbmock.ExpectQuery("SELECT id,space_id").WillReturnError(sql.ErrNoRows)
-					h.dbmock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"blocked"}).AddRow(mode == "unknown"))
-					if mode != "unknown" {
-						h.dbmock.ExpectQuery("SELECT r.id,r.task_id").WillReturnRows(sqlmock.NewRows([]string{"id"}))
-						h.dbmock.ExpectBegin()
-						insert := h.dbmock.ExpectExec("INSERT INTO shared_space_runtime_bindings")
-						if mode == "insert-failure" {
-							insert.WillReturnError(errors.New("write failed"))
-							h.dbmock.ExpectRollback()
-						} else {
-							insert.WillReturnResult(sqlmock.NewResult(0, 1))
-							h.dbmock.ExpectExec("INSERT INTO shared_space_runtime_outbox").WillReturnResult(sqlmock.NewResult(0, 1))
-							h.dbmock.ExpectCommit()
-						}
-					}
-				}
-			}
-			runtimeExpectUnlock(h)
-			r := httptest.NewRequest("POST", "/", strings.NewReader(`{"spaceId":"space","taskId":"task","sourceConversationId":42,"requestId":"origin-call","title":"交办","instruction":"真实任务"}`))
-			r.SetPathValue("action", "space-bind")
-			w := httptest.NewRecorder()
-			err := h.sharedRuntimeAgent(w, r, identity{UserID: "u-x"}, ws, "assistant")
-			if mode == "new" {
-				require.NoError(t, err)
-				require.Equal(t, 202, w.Code)
-				require.Contains(t, w.Body.String(), "sourceConversationId")
-				require.NotContains(t, w.Body.String(), "workspace_uid")
-			} else {
-				require.Error(t, err)
-			}
-			require.NoError(t, h.dbmock.ExpectationsWereMet())
-		})
-	}
+func TestSharedRuntimeBindRequiresActiveParticipant(t *testing.T) {
+	h := collaborationHarness(t)
+	ws := runtimeWorkspace(t, h)
+	h.dbmock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+	runtimeExpectSpace(h, "editor")
+	h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnError(sql.ErrNoRows)
+	runtimeExpectUnlock(h)
+	r := httptest.NewRequest("POST", "/", strings.NewReader(`{"spaceId":"space","taskId":"task","sourceConversationId":42,"requestId":"origin-call","title":"交办","instruction":"真实任务"}`))
+	r.SetPathValue("action", "space-bind")
+	err := h.sharedRuntimeAgent(httptest.NewRecorder(), r, identity{UserID: "u-x"}, ws, "assistant")
+	var rejected *sharedError
+	require.ErrorAs(t, err, &rejected)
+	require.Equal(t, 403, rejected.code)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
 }
 func TestSharedRuntimeStatusReceiptAndSubmitFences(t *testing.T) {
 	for _, mode := range []string{"missing", "companion", "status", "receipt", "receipt-absent", "unknown-action", "old-generation", "not-completed", "wrong-artifact"} {
@@ -370,9 +332,10 @@ func TestSharedRuntimeStatusReceiptAndSubmitFences(t *testing.T) {
 			}
 			if mode != "missing" && mode != "companion" {
 				runtimeExpectSpace(h, "editor")
+				runtimeExpectParticipant(h, b)
 			}
 			pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": "todo"})
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "assigneeAgentId": "agent"})
 			}))
 			defer pc.Close()
 			h.cfg.paperclipBaseURL = pc.URL

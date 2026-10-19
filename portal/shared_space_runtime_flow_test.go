@@ -61,7 +61,7 @@ func TestSharedRuntimeSubmitAndReviewTransactionFlow(t *testing.T) {
 			pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/issues/task" && r.Method == http.MethodGet:
-					_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": taskStatus})
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": taskStatus, "assigneeAgentId": "agent"})
 				case r.URL.Path == "/issues/task" && r.Method == http.MethodPatch:
 					var change map[string]any
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&change))
@@ -103,10 +103,13 @@ func TestSharedRuntimeSubmitAndReviewTransactionFlow(t *testing.T) {
 			// the shared submission service, then verify the binding again under its lock.
 			runtimeExpectBinding(h, binding)
 			runtimeExpectSpace(h, "editor")
+			runtimeExpectParticipant(h, binding)
 			h.dbmock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
 			runtimeExpectBinding(h, binding)
 			runtimeExpectSpace(h, "editor")
+			runtimeExpectParticipant(h, binding)
 			runtimeExpectSpace(h, "editor")
+			h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnRows(sqlmock.NewRows([]string{"id", "kind", "target", "name", "owner_id", "resource_uid", "role", "state", "version", "agent_id", "registration_state"}).AddRow(binding.ParticipantID, "companion", "ws-source/assistant", "assistant", binding.Owner, binding.WorkspaceUID, "editor", "active", binding.ParticipantVersion, "agent", "ready"))
 			h.dbmock.ExpectQuery("SELECT actor_id,action,payload_hash,state,receipt").WithArgs("space", submitCommand).WillReturnError(sql.ErrNoRows)
 			h.dbmock.ExpectQuery("SELECT r.id,r.task_id").WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			h.dbmock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"blocked"}).AddRow(false))
@@ -147,7 +150,7 @@ func TestSharedRuntimeSubmitAndReviewTransactionFlow(t *testing.T) {
 			// review, new execution fence, and both delivery intents form one transaction.
 			const reason = "请补充验收结论 <>&"
 			h.dbmock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
-			runtimeExpectSpace(h, "owner")
+			runtimeExpectMemberSpace(h, "owner")
 			h.dbmock.ExpectQuery("SELECT actor_id,action,payload_hash,state,receipt").WithArgs("space", "review-command").WillReturnError(sql.ErrNoRows)
 			h.dbmock.ExpectQuery("SELECT r.id,r.task_id").WillReturnRows(sqlmock.NewRows([]string{"id", "task_id", "version", "title", "document_key", "document_id", "revision_id", "body_hash", "submitted_by", "state", "created_at"}).AddRow(resultID, "task", 1, title, "shared-space-result", documentID, revisionID, sharedHash(body), "u-x", "submitted", time.Now()))
 			h.dbmock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"blocked"}).AddRow(false))
