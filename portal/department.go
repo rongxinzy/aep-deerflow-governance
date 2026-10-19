@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,6 +92,14 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 		status.Phase = "partial"
 		status.Message = fmt.Sprintf("partially provisioned: %v", partials)
 	}
+	// Record the outcome: without it a partial provision disappears with the
+	// request, nothing shows it in the listing, and the missing pieces can
+	// never be retried (the department then stays half-provisioned for good).
+	if err := p.storeDepartmentProvision(r.Context(), provisioningRecordFromStatus(status, partials)); err != nil {
+		if p.logger != nil {
+			p.logger.Warn("department provisioning outcome not recorded", "id", status.ID, "error", err.Error())
+		}
+	}
 	p.logger.Info("department provisioned", "id", status.ID, "phase", status.Phase, "partials", partials)
 	writeJSON(w, http.StatusOK, status)
 }
@@ -146,20 +156,26 @@ func (p *portal) createOpenVikingAccount(r *http.Request, accountID string) (str
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// The account id is derived from the department, so "already exists" is the
+	// same answer as "created": recording it instead of reporting a 409 partial
+	// is what lets a department whose account predates the provisioning record
+	// be repaired, and what keeps the row's ov_account_id non-empty.
+	if resp.StatusCode == http.StatusConflict || strings.Contains(string(raw), "ALREADY_EXISTS") || strings.Contains(string(raw), "already exists") {
+		return "tenant-" + accountID, nil
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("openviking returned %d: %s", resp.StatusCode, string(raw))
 	}
 	return "tenant-" + accountID, nil
 }
 
-func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (string, error) {
-	// WeKnora admin auth: use the admin credentials from the platform secret
-	// to obtain a JWT, then create a tenant.
+// weknoraAdminToken logs into WeKnora with the admin credentials from the
+// platform secret and returns the JWT the tenant admin API expects.
+func (p *portal) weknoraAdminToken(r *http.Request) (string, error) {
 	adminUser, adminPass := p.weknoraAdminCreds(r.Context())
 	if adminUser == "" {
 		return "", fmt.Errorf("weknora admin credentials not configured")
 	}
-	// Login
 	body, _ := json.Marshal(map[string]string{"email": adminUser, "password": adminPass})
 	loginReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		p.cfg.knowledgeAPIURL+"/api/v1/auth/login", bytes.NewReader(body))
@@ -176,16 +192,103 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 	if loginResult.Token == "" {
 		return "", fmt.Errorf("weknora login returned no token")
 	}
+	return loginResult.Token, nil
+}
+
+// weknoraTenantIDFromRaw reads a tenant id out of a WeKnora answer. The service
+// answers {"success":true,"data":{"id":<number>,"name":…}}; decoding that into
+// a string field silently yields an empty id, which is how a provisioned
+// department could end up recorded without its tenant and then be provisioned
+// all over again.
+func weknoraTenantIDFromRaw(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var asNumber float64
+	if err := json.Unmarshal(raw, &asNumber); err == nil {
+		return strconv.FormatUint(uint64(asNumber), 10)
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return asString
+	}
+	return ""
+}
+
+func weknoraTenantID(raw []byte) string {
+	var payload struct {
+		Data struct {
+			ID json.RawMessage `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return weknoraTenantIDFromRaw(payload.Data.ID)
+}
+
+// findWeKnoraTenantByName returns the id of an existing tenant with that name,
+// or "" when there is none. Retrying a department must reuse the tenant it
+// already owns — a second tenant with the same name would split its knowledge.
+func (p *portal) findWeKnoraTenantByName(r *http.Request, token, name string) (string, error) {
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		p.cfg.knowledgeAPIURL+"/api/v1/tenants", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	resp, err := serviceProbeClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("weknora tenant listing returned %d: %s", resp.StatusCode, string(raw))
+	}
+	var payload struct {
+		Data struct {
+			Items []struct {
+				ID   json.RawMessage `json:"id"`
+				Name string          `json:"name"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	for _, item := range payload.Data.Items {
+		if item.Name == name {
+			if id := weknoraTenantIDFromRaw(item.ID); id != "" {
+				return id, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (string, error) {
+	token, err := p.weknoraAdminToken(r)
+	if err != nil {
+		return "", err
+	}
+	// A tenant of that name is the tenant this department owns already, so it
+	// is reused instead of a second one being created on every retry.
+	if existing, existingErr := p.findWeKnoraTenantByName(r, token, req.Name); existingErr != nil {
+		return "", existingErr
+	} else if existing != "" {
+		return existing, nil
+	}
 
 	// Create tenant
-	body, _ = json.Marshal(map[string]any{
+	body, _ := json.Marshal(map[string]any{
 		"name":        req.Name,
 		"description": "Department: " + req.Name,
 	})
 	tenantReq, _ := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		p.cfg.knowledgeAPIURL+"/api/v1/tenants", bytes.NewReader(body))
 	tenantReq.Header.Set("Content-Type", "application/json")
-	tenantReq.Header.Set("Authorization", "Bearer "+loginResult.Token)
+	tenantReq.Header.Set("Authorization", "Bearer "+token)
 	resp, err := serviceProbeClient.Do(tenantReq)
 	if err != nil {
 		return "", err
@@ -195,11 +298,7 @@ func (p *portal) createWeKnoraTenant(r *http.Request, req departmentRequest) (st
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("weknora returned %d: %s", resp.StatusCode, string(raw))
 	}
-	var tenant struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(raw, &tenant)
-	return tenant.ID, nil
+	return weknoraTenantID(raw), nil
 }
 
 // platformSecretKeyOrEmpty reads a key from the platform Secret without erroring.
@@ -424,11 +523,31 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 	}
 	// Upstream listing order: selector endpoints must not shuffle between
 	// calls the way a map iteration would.
+	records := p.loadDepartmentProvisioning(r.Context())
 	out := make([]map[string]any, 0, len(teams))
 	for _, team := range teams {
 		entry := map[string]any{"id": team.ID, "name": team.Name}
 		if team.ParentID != nil {
 			entry["parentId"] = *team.ParentID
+		}
+		// Provisioning fields are only emitted when the portal recorded an
+		// outcome: a department provisioned outside it (or before this record
+		// existed) has no phase to claim, rather than a made-up one.
+		if record, ok := records[team.ID]; ok {
+			entry["phase"] = record.Phase
+			if len(record.Partials) > 0 {
+				entry["partials"] = record.Partials
+			}
+			if record.OvAccountID != "" {
+				entry["ovAccountId"] = record.OvAccountID
+			}
+			if record.WeKnoraTenant != "" {
+				entry["weknoraTenant"] = record.WeKnoraTenant
+			}
+			if record.Message != "" {
+				entry["message"] = record.Message
+			}
+			entry["updatedAt"] = record.UpdatedAt.Format(time.RFC3339)
 		}
 		out = append(out, entry)
 	}

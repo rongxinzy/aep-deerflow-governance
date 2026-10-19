@@ -178,6 +178,8 @@ func main() {
 		aep:      &aepAuthenticator{baseURL: cfg.aepBaseURL, http: &http.Client{Timeout: 10 * time.Second}},
 		logger:   logger,
 		sessions: newSessionStoreWithDB(cfg.sessionTTL, db),
+
+		provisioningStore: &sqlProvisioningStore{db: db},
 	}
 
 	server := &http.Server{
@@ -196,7 +198,7 @@ func main() {
 }
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(sharedSpaceSchema + collaborationSchema + sharedRuntimeSchema + `
+	_, err := db.Exec(sharedSpaceSchema + collaborationSchema + sharedRuntimeSchema + departmentProvisionSchema + `
 CREATE TABLE IF NOT EXISTS requests (
 	id            TEXT PRIMARY KEY,
 	employee_name TEXT NOT NULL,

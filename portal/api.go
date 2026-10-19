@@ -27,6 +27,10 @@ type portal struct {
 	aep      *aepAuthenticator
 	logger   *slog.Logger
 	sessions *sessionStore
+	// provisioningStore keeps department provisioning outcomes so a partial
+	// provision stays visible in the listing and can be retried. nil means no
+	// durable store: nothing is recorded and retry is refused explicitly.
+	provisioningStore provisioningStore
 	// chatBaseOverride is test-only: replaces the in-cluster runtime URL.
 	chatBaseOverride string
 	// workspaceChatOverride is test-only: replaces the workspace gateway URL.
@@ -99,6 +103,10 @@ func (p *portal) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("PUT /api/v1/departments/{id}/members", p.auth(p.handleDepartmentMembers))
 	mux.HandleFunc("POST /api/v1/departments", p.auth(p.handleCreateDepartment))
+	// Retry only the pieces of a department's provisioning that never landed;
+	// idempotent, so the console can re-post it without a second account or
+	// tenant being created.
+	mux.HandleFunc("POST /api/v1/departments/{id}/provision", p.auth(p.handleProvisionDepartment))
 	mux.HandleFunc("GET /api/v1/memory/status", p.auth(p.adminOnly(p.handleMemoryStatus)))
 	// Memory test box: an administrator diagnostic over one employee's own
 	// OpenViking key, annotated with the scope it ran in and the runtime
