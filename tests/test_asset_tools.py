@@ -53,6 +53,10 @@ def _build(gateway: FakeGateway):
     )
 
 
+def test_build_requires_client() -> None:
+    assert build_asset_tools(environ=ENABLED_ENV, client=None) == []
+
+
 def test_build_gating() -> None:
     assert build_asset_tools(environ={}) == []
     assert build_asset_tools(environ={"ASSET_TOOLS_ENABLED": "1"}) == []
