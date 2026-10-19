@@ -129,10 +129,22 @@ func TestChannelManagementRejectsNonAdminAndUnreadyWake(t *testing.T) {
 }
 
 func TestChannelActivationPreservesOtherProviders(t *testing.T) {
+	enableCalls := 0
 	p := channelPortal(t, func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "DELETE", r.Method)
-		require.Equal(t, "/api/channels/wechat/runtime-config", r.URL.Path)
-		writeJSON(w, 200, map[string]bool{"enabled": false})
+		switch r.Method {
+		case "DELETE":
+			require.Equal(t, "/api/channels/wechat/runtime-config", r.URL.Path)
+			writeJSON(w, 200, map[string]bool{"enabled": false})
+		case "PUT":
+			enableCalls++
+			require.Equal(t, "/api/channels/wechat/enabled", r.URL.Path)
+			var body map[string]bool
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, map[string]bool{"enabled": true}, body)
+			writeJSON(w, 200, map[string]any{"enabled": true, "configured": true})
+		default:
+			t.Errorf("unexpected runtime call %s %s", r.Method, r.URL.Path)
+		}
 	})
 	w := httptest.NewRecorder()
 	p.handleActivateEmployeeChannel(w, channelRequest("PUT", "wechat", "", `{"enabled":false}`), identity{UserID: "admin-user"})
@@ -142,9 +154,45 @@ func TestChannelActivationPreservesOtherProviders(t *testing.T) {
 	require.True(t, employee.Spec.Channels.Feishu)
 	require.True(t, employee.Spec.Channels.Wecom)
 	require.False(t, employee.Spec.Channels.Wechat)
+	require.Zero(t, enableCalls, "disabling must not call the hot-apply endpoint")
 	w = httptest.NewRecorder()
 	p.handleActivateEmployeeChannel(w, channelRequest("PUT", "wechat", "", `{"enabled":true}`), identity{UserID: "admin-user"})
 	require.Equal(t, 202, w.Code)
+	require.Equal(t, 1, enableCalls, "enabling must hot-apply through the runtime")
+}
+
+func TestChannelEnableHotApplyFailureSurfacesAndKeepsDeclaredIntent(t *testing.T) {
+	for _, status := range []int{400, 403, 404, 500, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			p := channelPortal(t, func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "PUT", r.Method)
+				require.Equal(t, "/api/channels/wecom/enabled", r.URL.Path)
+				var body map[string]bool
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, map[string]bool{"enabled": true}, body)
+				http.Error(w, "credential=never-echo", status)
+			})
+			w := httptest.NewRecorder()
+			p.handleActivateEmployeeChannel(w, channelRequest("PUT", "wecom", "", `{"enabled":true}`), identity{UserID: "admin-user"})
+			require.Equal(t, status, w.Code, w.Body.String())
+			require.NotContains(t, w.Body.String(), "never-echo")
+			var employee dev1alpha1.DigitalEmployee
+			require.NoError(t, p.k8s.Get(t.Context(), client.ObjectKey{Namespace: p.cfg.namespace, Name: "hr-bot"}, &employee))
+			require.True(t, employee.Spec.Channels.Wecom, "the CR stays the declared intent so the operator can retry")
+			require.True(t, employee.Spec.Channels.Feishu)
+		})
+	}
+}
+
+func TestChannelEnableHotApplyTransportFailureIsRuntimeUnavailable(t *testing.T) {
+	p := channelPortal(t, func(_ http.ResponseWriter, _ *http.Request) {})
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	upstream.Close()
+	p.chatBaseOverride = upstream.URL
+	w := httptest.NewRecorder()
+	p.handleActivateEmployeeChannel(w, channelRequest("PUT", "feishu", "", `{"enabled":true}`), identity{UserID: "admin-user"})
+	require.Equal(t, 502, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "CHANNEL_RUNTIME_UNAVAILABLE")
 }
 
 func TestChannelActivationRejectsHibernationBeforeMutatingEmployee(t *testing.T) {
