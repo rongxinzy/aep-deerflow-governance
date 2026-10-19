@@ -26,7 +26,7 @@ images:
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
   adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.15.0" }
   # runtime images are big and version rarely; the lineage lives on ghcr
-  runtime: { repository: rongxinzy/deerflow-gov, tag: "v29" }
+  runtime: { repository: rongxinzy/deerflow-gov, tag: "v30" }
   openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
   embedServer: { repository: "harbor.zhiyuan.local:30443/zhiyuan/embed-server", tag: "0.1.0" }
   # AEP control plane + datastore images (ns aep-system, see templates/aep-stack.yaml)
