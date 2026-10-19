@@ -18,6 +18,7 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 	for _, mode := range []string{"revoked", "terminal", "unresolved-command", "historical-return", "review-revise", "receipt-absent", "malformed-payload", "ack-write-fails", "dispatch-intent-fails"} {
 		t.Run(mode, func(t *testing.T) {
 			h := collaborationHarness(t)
+			_ = runtimeWorkspace(t, h)
 			b := runtimeTestBinding()
 			action := "revise"
 			if mode == "historical-return" {
@@ -48,7 +49,7 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 				if mode == "terminal" {
 					status = "cancelled"
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": status})
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": status, "assigneeAgentId": "agent"})
 			}))
 			defer pc.Close()
 			h.cfg.paperclipBaseURL = pc.URL
@@ -69,8 +70,10 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 				}
 				runtimeExpectSpace(h, role)
 				if mode == "revoked" {
+					h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnError(sql.ErrNoRows)
 					h.dbmock.ExpectExec("UPDATE shared_space_runtime_outbox SET state='blocked'").WillReturnResult(sqlmock.NewResult(0, 1))
 				} else {
+					runtimeExpectParticipant(h, runtimeTestBinding())
 					if action != "return" {
 						runtimeExpectSpace(h, "editor")
 						if mode == "terminal" {
@@ -134,10 +137,12 @@ func TestSharedRuntimeDiscoveryDependencyFailures(t *testing.T) {
 				query.WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("space"))
 			}
 			if mode == "directory-revoked" {
-				h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnError(sql.ErrNoRows)
+				runtimeExpectSpace(h, "editor")
+				h.dbmock.ExpectQuery("SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants").WillReturnError(sql.ErrNoRows)
 			}
 			if mode == "paperclip" {
 				runtimeExpectSpace(h, "editor")
+				runtimeExpectParticipant(h, runtimeTestBinding())
 				pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "dependency unavailable", http.StatusServiceUnavailable)
 				}))

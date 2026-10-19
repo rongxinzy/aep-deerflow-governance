@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS shared_space_reviews (
  decision TEXT NOT NULL CHECK(decision IN ('request_changes','accept')), reason TEXT NOT NULL,
  actor_id TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(result_id)
 );
-`
+` + sharedParticipantSchema
 
 type sharedSpace struct {
 	ID           string `json:"id"`
@@ -132,7 +132,7 @@ func sharedDecode(w http.ResponseWriter, r *http.Request, v any) error {
 	return nil
 }
 func sharedCaps(role string) map[string]bool {
-	return map[string]bool{"createTask": role == "owner" || role == "editor", "manageMembers": role == "owner", "submit": role == "owner" || role == "editor", "review": role == "owner"}
+	return map[string]bool{"createTask": role == "owner" || role == "editor", "manageMembers": role == "owner", "manageParticipants": role == "owner", "submit": role == "owner" || role == "editor", "review": role == "owner"}
 }
 
 func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
@@ -157,6 +157,13 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 			}
 		})
 	}
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/{assignmentAction}", wrap(p.sharedAssignmentChange))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/participants", wrap(p.sharedParticipants))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/agent-candidates", wrap(p.sharedAgentCandidates))
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/participants", wrap(p.sharedParticipantChange))
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/participants/{participant}/{participantAction}", wrap(p.sharedParticipantChange))
+	mux.HandleFunc("GET /api/v1/shared-space-invitations", wrap(p.sharedInvitations))
+	mux.HandleFunc("POST /api/v1/shared-space-invitations/{participant}/{invitationAction}", wrap(p.sharedAcceptInvitation))
 	mux.HandleFunc("GET /api/v1/shared-spaces", wrap(p.sharedList))
 	mux.HandleFunc("POST /api/v1/shared-spaces", wrap(p.sharedBind))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}", wrap(p.sharedDetail))
@@ -616,7 +623,16 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 		caps["review"] = false
 		caps["submit"] = false
 	}
-	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "results": results, "reviews": reviews, "commands": commands, "capabilities": caps})
+	assignment, err := p.sharedAssignmentDTO(r.Context(), s, task, i)
+	if err != nil {
+		return err
+	}
+	caps["assign"] = sharedCaps(s.Role)["submit"] && !blocked && !assignment.External && !assignment.Claimed && (task["status"] == "todo" || task["status"] == "backlog")
+	caps["claim"] = caps["assign"]
+	if agent, _ := task["assigneeAgentId"].(string); agent != "" {
+		caps["submit"] = caps["submit"] && assignment.Participant != nil && assignment.Participant.CanClaim
+	}
+	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": caps})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {
@@ -680,7 +696,10 @@ func sharedReplay(ctx context.Context, c *sql.Conn, space, request, actor, actio
 	}
 	return json.RawMessage(raw), true, nil
 }
-func sharedStart(ctx context.Context, c *sql.Conn, space, task, request, actor, action, hash string, expected any) error {
+func sharedStart(ctx context.Context, c interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, space, task, request, actor, action, hash string, expected any) error {
 	var blocked bool
 	if err := c.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM shared_space_commands WHERE space_id=$1 AND task_id=$2 AND state<>'applied')`, space, task).Scan(&blocked); err != nil {
 		return err
@@ -743,6 +762,9 @@ func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, 
 		}
 	}
 	s, err := p.sharedLoad(ctx, c, spaceID, i)
+	if len(guards) > 0 {
+		s, err = p.sharedRuntimeSpace(ctx, spaceID)
+	}
 	if err != nil {
 		return 0, nil, err
 	}
@@ -752,6 +774,16 @@ func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, 
 	task, err := p.sharedCheckTask(ctx, s, taskID)
 	if err != nil {
 		return 0, nil, err
+	}
+	if agent, _ := task["assigneeAgentId"].(string); agent != "" {
+		x, e := participantScan(c.QueryRowContext(ctx, participantSelect+` AND agent_id=$2`, s.ID, agent))
+		if e != nil {
+			return 0, nil, sharedFail(403, "任务承接者无法核验")
+		}
+		x = p.participantDecorate(ctx, s, x, i)
+		if !x.CanClaim {
+			return 0, nil, sharedFail(403, "仅当前Agent管理者可代表提交")
+		}
 	}
 	hash := sharedHash([]any{taskID, b})
 	if receipt, ok, err := sharedReplay(ctx, c, s.ID, b.RequestID, i.UserID, "submit", hash); err != nil {
