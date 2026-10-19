@@ -325,12 +325,26 @@ INSERT INTO shared_space_result_bindings(result_id,binding_id) VALUES('result-fr
 	pcTasks["task-unknown"]["status"] = "todo"
 	pcTasks["task-unknown"]["updatedAt"] = "eventually-confirmed"
 	pcMu.Unlock()
-	code, confirmed := handoff("task-unknown", "handoff-patch-unknown", "participant-b", unknownAssignment.Token)
-	require.Equal(t, http.StatusOK, code, confirmed)
-	require.Equal(t, "applied", confirmed["state"])
+	// Let the durable background recovery worker observe the assignment readback.
+	// Other intentionally blocked handoffs remain pending in this fixture, so
+	// schedule only this request for processing and exercise the worker's normal
+	// selection/order path without making the test timing-dependent.
+	_, err = db.Exec(`UPDATE shared_space_handoffs SET next_attempt_at=now()+interval '1 hour' WHERE phase<>'applied'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE shared_space_handoffs SET next_attempt_at=now() WHERE space_id='space' AND request_id='handoff-patch-unknown'`)
+	require.NoError(t, err)
+	h.processSharedHandoffs(t.Context())
+	pending, err := h.sharedHandoffDTO(t.Context(), "space", "task-unknown")
+	require.NoError(t, err)
+	require.Nil(t, pending, "worker recovery should finalize the durable handoff")
+	history, err := h.sharedHandoffHistory(t.Context(), "space", "task-unknown")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, "applied", history[0].Phase)
 	pcMu.Lock()
 	require.Equal(t, 1, patchesByTask["task-unknown"])
 	pcMu.Unlock()
+	h.processSharedHandoffs(t.Context()) // An empty worker queue is a no-op.
 
 	// A concurrent handoff and claim serialize on the same space lock. The
 	// winner advances the assignment token; the other operation must be stale
