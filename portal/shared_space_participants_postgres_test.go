@@ -86,6 +86,7 @@ INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,reso
 					http.Error(w, "bad agent", http.StatusBadRequest)
 					return
 				}
+				agent["companyId"] = "company"
 				agent["id"] = fmt.Sprintf("registered-agent-%d", len(registeredAgents)+1)
 				registeredAgents = append(registeredAgents, agent)
 				writeJSON(w, http.StatusCreated, agent)

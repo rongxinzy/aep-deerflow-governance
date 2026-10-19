@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -68,6 +69,10 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 	h.cfg.paperclipToken = "synthetic-paperclip-service-token"
 	h.aep = &aepAuthenticator{baseURL: aep.URL, http: aep.Client()}
 	h.k8s = fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(secret).Build()
+	agentWorkspace := runningWorkspace("ws-shared-agent", "owner-synthetic", "assistant")
+	agentWorkspace.UID = types.UID("uid-ws-shared-agent")
+	initializeContacts(agentWorkspace, nil)
+	require.NoError(t, h.k8s.Create(t.Context(), agentWorkspace))
 	clearSharedSpaceAdminTokenCache(t)
 	routes := h.routes()
 	call := func(token, method, route string, body any) (int, map[string]any) {
@@ -97,6 +102,8 @@ func TestSharedSpacesPostgresWorkflow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, status, out)
 	spaceID = out["space"].(map[string]any)["id"].(string)
+	_, err = db.Exec(`INSERT INTO shared_space_participants(id,space_id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state) VALUES('workflow-agent','` + spaceID + `','companion','ws-shared-agent/assistant','Assistant','owner-synthetic','uid-ws-shared-agent','editor','active',1,'synthetic-agent','ready')`)
+	require.NoError(t, err)
 	base := "/api/v1/shared-spaces/" + url.PathEscape(spaceID)
 
 	status, out = call("token-admin-owner", http.MethodPut, base+"/members/editor-synthetic", map[string]any{"role": "editor", "expectedVersion": 0, "requestId": "member-editor-1"})
