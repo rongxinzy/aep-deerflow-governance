@@ -16,7 +16,7 @@ on:
         description: "Target image tag (e.g. v16)"
         required: true
       base:
-        description: "Base image tag on ghcr (e.g. v15)"
+        description: "Base image tag on ghcr (e.g. v15). Locally built tags must be mirrored first: scripts/mirror-deerflow-gov-base.sh <tag>"
         required: true
       variant:
         description: "governance (middleware only) or backend (full backend refresh)"
