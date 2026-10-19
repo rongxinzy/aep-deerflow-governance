@@ -256,6 +256,16 @@ func (p *portal) handleActivateEmployeeChannel(w http.ResponseWriter, r *http.Re
 		p.managedWriteError(w, statusOf(err), "CHANNEL_CONFIG_UPDATE_FAILED", "渠道配置更新失败，请刷新后重试；停用时连接可能已停止", "")
 		return
 	}
+	// Enabling is hot-applied by the runtime so the deployment does not roll.
+	// The CR above stays the declared intent and audit record; only an
+	// already-configured provider starts its leg without credentials.
+	if *input.Enabled {
+		if _, status, err := p.runtimeChannelRequest(r.Context(), employee.Name, ident.UserID, "PUT", "/api/channels/"+provider+"/enabled", map[string]bool{"enabled": true}); err != nil || status != 200 {
+			p.channelAudit(ident, employee.Name, provider, "activation", status)
+			p.channelRuntimeError(w, status)
+			return
+		}
+	}
 	p.channelAudit(ident, employee.Name, provider, "activation", 202)
 	writeJSON(w, 202, map[string]any{"enabled": *input.Enabled, "pending": true})
 }
