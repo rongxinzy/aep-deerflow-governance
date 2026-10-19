@@ -13,7 +13,7 @@ func TestRenderWechatChannelGateWithoutCredentials(t *testing.T) {
 	employee.Name = "hr-bot"
 	employee.Spec.Channels = &dev1alpha1.ChannelsSpec{Wechat: true}
 	var result map[string]any
-	require.NoError(t, json.Unmarshal([]byte(renderConfig(employee, "")), &result))
+	require.NoError(t, json.Unmarshal([]byte(marshalConfig(renderConfigData(employee, ""))), &result))
 	channels, ok := result["channel_connections"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, true, channels["enabled"])
