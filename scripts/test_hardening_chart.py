@@ -54,6 +54,36 @@ class HardeningChartTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return objects(result)
 
+    def test_portal_can_read_runtime_deployments_without_mutating_them(self):
+        standalone = CHART.parents[1] / "portal/deploy/portal.yaml"
+        with standalone.open(encoding="utf-8") as source:
+            standalone_docs = [doc for doc in yaml.safe_load_all(source) if doc]
+        for deployment, docs in (("standalone", standalone_docs), ("helm", self.ok())):
+            with self.subTest(deployment=deployment):
+                role = find(docs, "Role", "de-portal")[0]
+                namespace = role["metadata"]["namespace"]
+                binding = find(docs, "RoleBinding", "de-portal")[0]
+                self.assertEqual(binding["metadata"]["namespace"], namespace)
+                self.assertEqual(binding["roleRef"]["kind"], "Role")
+                self.assertEqual(binding["roleRef"]["name"], role["metadata"]["name"])
+                self.assertIn({"kind": "ServiceAccount", "name": "de-portal",
+                               "namespace": namespace}, binding["subjects"])
+
+                verbs = set()
+                for rule in role["rules"]:
+                    groups, resources = rule.get("apiGroups", []), rule.get("resources", [])
+                    if ("apps" in groups or "*" in groups) and (
+                            "deployments" in resources or "*" in resources):
+                        self.assertNotIn("resourceNames", rule,
+                                         "runtime Deployment names are employee-derived")
+                        verbs.update(rule["verbs"])
+                self.assertIn("get", verbs, "wakeRuntime reads the employee Deployment before proxying")
+                self.assertLessEqual(verbs, {"get", "list", "watch"},
+                                     "chat must not grant Deployment writes")
+                for cluster_binding in find(docs, "ClusterRoleBinding"):
+                    self.assertNotIn({"kind": "ServiceAccount", "name": "de-portal",
+                                      "namespace": namespace}, cluster_binding.get("subjects", []))
+
     def test_network_policies_default_on_and_toggleable(self):
         docs = self.ok()
         names = {(d["metadata"]["namespace"], d["metadata"]["name"]) for d in find(docs, "NetworkPolicy")}
