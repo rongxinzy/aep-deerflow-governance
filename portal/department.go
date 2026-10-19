@@ -90,6 +90,14 @@ func (p *portal) handleCreateDepartment(w http.ResponseWriter, r *http.Request, 
 		status.Phase = "partial"
 		status.Message = fmt.Sprintf("partially provisioned: %v", partials)
 	}
+	// Record the outcome: without it a partial provision disappears with the
+	// request, nothing shows it in the listing, and the missing pieces can
+	// never be retried (the department then stays half-provisioned for good).
+	if err := p.storeDepartmentProvision(r.Context(), provisioningRecordFromStatus(status, partials)); err != nil {
+		if p.logger != nil {
+			p.logger.Warn("department provisioning outcome not recorded", "id", status.ID, "error", err.Error())
+		}
+	}
 	p.logger.Info("department provisioned", "id", status.ID, "phase", status.Phase, "partials", partials)
 	writeJSON(w, http.StatusOK, status)
 }
@@ -424,11 +432,31 @@ func (p *portal) handleListDepartments(w http.ResponseWriter, r *http.Request, i
 	}
 	// Upstream listing order: selector endpoints must not shuffle between
 	// calls the way a map iteration would.
+	records := p.loadDepartmentProvisioning(r.Context())
 	out := make([]map[string]any, 0, len(teams))
 	for _, team := range teams {
 		entry := map[string]any{"id": team.ID, "name": team.Name}
 		if team.ParentID != nil {
 			entry["parentId"] = *team.ParentID
+		}
+		// Provisioning fields are only emitted when the portal recorded an
+		// outcome: a department provisioned outside it (or before this record
+		// existed) has no phase to claim, rather than a made-up one.
+		if record, ok := records[team.ID]; ok {
+			entry["phase"] = record.Phase
+			if len(record.Partials) > 0 {
+				entry["partials"] = record.Partials
+			}
+			if record.OvAccountID != "" {
+				entry["ovAccountId"] = record.OvAccountID
+			}
+			if record.WeKnoraTenant != "" {
+				entry["weknoraTenant"] = record.WeKnoraTenant
+			}
+			if record.Message != "" {
+				entry["message"] = record.Message
+			}
+			entry["updatedAt"] = record.UpdatedAt.Format(time.RFC3339)
 		}
 		out = append(out, entry)
 	}

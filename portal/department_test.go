@@ -123,6 +123,8 @@ func newDepartmentHarness(t *testing.T, stubs *departmentStubUpstreams) *apiTest
 		aep:      &aepAuthenticator{},
 		logger:   discardLogger(),
 		sessions: newSessionStore(0),
+
+		provisioningStore: newMemoryProvisioningStore(),
 	}
 	// Point the portal's AEP and probe client at the stubs.
 	p.cfg.aepBaseURL = stubs.aep.URL
