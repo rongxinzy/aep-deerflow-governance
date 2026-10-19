@@ -260,7 +260,7 @@ func assignmentParticipantMissingByAgent(mock sqlmock.Sqlmock, agent string) {
 }
 
 func assignmentEpochRow(mock sqlmock.Sqlmock, task string, epoch int) {
-	mock.ExpectQuery(`SELECT count\(\*\) FROM shared_space_commands WHERE space_id=\$1 AND \(\(task_id=\$2 AND action IN \('assign','claim'\)\) OR action='participant'\)`).
+	mock.ExpectQuery(`SELECT count\(\*\) FROM shared_space_commands WHERE space_id=\$1 AND \(\(task_id=\$2 AND action IN \('assign','claim'\)\) OR action='participant' OR \(task_id=\$2 AND action='handoff'\)\)`).
 		WithArgs("space", task).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(epoch))
 }
 
@@ -350,7 +350,7 @@ func TestSharedAssignmentLockedWritesOnlyFreshAuthorizedAssignment(t *testing.T)
 		assignmentEpochRow(h.dbmock, "task", 0)
 		assignmentParticipantActive(h.dbmock, "participant", "agent-a")
 		assignmentCommandGate(h.dbmock, "task")
-		h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2\)`).
+		h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2 AND binding_state='active'\)`).
 			WithArgs("space", "task").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 		assignmentCommandGate(h.dbmock, "task")
 		h.dbmock.ExpectExec(`INSERT INTO shared_space_commands`).
@@ -450,7 +450,7 @@ func TestSharedAssignmentLockedWritesOnlyFreshAuthorizedAssignment(t *testing.T)
 			assignmentParticipantRow(h.dbmock, `id=\$2`, "participant", agent, state, registration)
 			if tc.runID == "" && tc.grant != "pending" {
 				assignmentCommandGate(h.dbmock, "task")
-				h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2\)`).
+				h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2 AND binding_state='active'\)`).
 					WithArgs("space", "task").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 			}
 			_, err = h.sharedAssignmentLocked(t.Context(), c, sharedSpace{ID: "space", CompanyID: "company", ProjectID: "project", Role: "owner"}, "task", identity{UserID: "u-owner"}, input, false)
@@ -494,7 +494,7 @@ func TestSharedAssignmentLockedWritesOnlyFreshAuthorizedAssignment(t *testing.T)
 				assignmentCommandGateValue(h.dbmock, "task", tc.gateBlocked)
 			}
 			if tc.needsBoundRow {
-				h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2\)`).
+				h.dbmock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM shared_space_runtime_bindings WHERE space_id=\$1 AND task_id=\$2 AND binding_state='active'\)`).
 					WithArgs("space", "task").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(tc.runtimeBound))
 			}
 			_, err = h.sharedAssignmentLocked(t.Context(), c, sharedSpace{ID: "space", CompanyID: "company", ProjectID: "project", Role: "owner"}, "task", identity{UserID: "u-owner"}, input, false)

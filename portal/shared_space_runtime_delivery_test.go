@@ -64,6 +64,7 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 			defer pi.Close()
 			h.workspaceChatOverride = pi.URL
 			if mode != "malformed-payload" {
+				runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 				role := "editor"
 				if mode == "revoked" {
 					role = "viewer"
@@ -176,11 +177,11 @@ func TestSharedRuntimeReviewMetadataFailuresAbortTransaction(t *testing.T) {
 			h.dbmock.ExpectBegin()
 			tx, err := h.db.Begin()
 			require.NoError(t, err)
-			lookup := h.dbmock.ExpectQuery("SELECT id FROM shared_space_runtime_bindings")
+			lookup := h.dbmock.ExpectQuery("SELECT binding_id FROM shared_space_result_bindings WHERE result_id=\\$1")
 			if stage == "lookup" {
 				lookup.WillReturnError(errors.New("lookup unavailable"))
 			} else {
-				lookup.WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(b.ID))
+				lookup.WithArgs("result").WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(b.ID))
 				if stage == "binding" {
 					h.dbmock.ExpectQuery("SELECT id,space_id").WillReturnError(errors.New("binding unavailable"))
 				} else {

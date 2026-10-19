@@ -40,6 +40,8 @@ func TestSharedSpacesPostgresTaskCreation(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	_, err = db.Exec(sharedSpaceSchema)
 	require.NoError(t, err)
+	_, err = db.Exec(sharedRuntimeSchema)
+	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO shared_spaces(id,deployment_id,company_id,project_id,name) VALUES('space','deployment','company','project','空间'); INSERT INTO shared_space_members(space_id,user_id,role,version) VALUES('space','editor','editor',1),('space','viewer','viewer',1),('space','revoked','revoked',1)`)
 	require.NoError(t, err)
 	var calls atomic.Int32

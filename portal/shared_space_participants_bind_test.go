@@ -177,6 +177,7 @@ func TestSharedRuntimeAuthorizationRejectsNativeExecutionRuns(t *testing.T) {
 			ws := runtimeWorkspace(t, h)
 			b := runtimeTestBinding()
 			b.WorkspaceUID = string(ws.UID)
+			runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 			runtimeExpectSpace(h, "editor")
 			runtimeExpectParticipant(h, b)
 			pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +262,7 @@ func TestSharedRuntimeNativeRunFenceIsFailClosedOnLookupFailure(t *testing.T) {
 	ws := runtimeWorkspace(t, h)
 	b := runtimeTestBinding()
 	b.WorkspaceUID = string(ws.UID)
+	runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
 	runtimeExpectSpace(h, "editor")
 	runtimeExpectParticipant(h, b)
 	pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
