@@ -290,3 +290,149 @@ func TestSharedHandoffStopAndHistoryFailuresFailClosed(t *testing.T) {
 		require.Error(t, err, "malformed history must fail rather than disappear")
 	})
 }
+
+func TestSharedHandoffWorkerStopsOnUncertainEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase string
+		setup func(*apiTestPortal, runtimeBinding)
+	}{
+		{
+			name: "runtime binding lookup error", phase: "stop_pending",
+			setup: func(h *apiTestPortal, b runtimeBinding) {
+				h.dbmock.ExpectQuery("SELECT id,space_id,task_id,workspace_name").WithArgs(b.ID).WillReturnError(errors.New("binding lookup failed"))
+			},
+		},
+		{
+			name: "workspace resource uid changed", phase: "stop_pending",
+			setup: func(h *apiTestPortal, b runtimeBinding) {
+				h.dbmock.ExpectQuery("SELECT id,space_id,task_id,workspace_name").WithArgs(b.ID).WillReturnRows(runtimeTestRows(b))
+			},
+		},
+		{
+			name: "persisted stop payload is malformed", phase: "stop_unknown",
+			setup: func(h *apiTestPortal, b runtimeBinding) {
+				h.dbmock.ExpectQuery("SELECT id,space_id,task_id,workspace_name").WithArgs(b.ID).WillReturnRows(runtimeTestRows(b))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := participantPermissionHarness(t)
+			binding := runtimeTestBinding()
+			binding.Workspace = "ws-participant-owner"
+			binding.WorkspaceUID = "uid-ws-participant-owner"
+			binding.Owner = "u-owner"
+			binding.Companion = "assistant"
+			if tc.name == "workspace resource uid changed" {
+				binding.WorkspaceUID = "stale-resource-uid"
+			}
+			tc.setup(h, binding)
+			stopCalls := 0
+			pi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				stopCalls++
+				writeJSON(w, http.StatusOK, map[string]any{})
+			}))
+			defer pi.Close()
+			h.workspaceChatOverride = pi.URL
+			stopPayload := []byte(`{"bindingId":"binding","executionId":"execution"}`)
+			if tc.name == "persisted stop payload is malformed" {
+				stopPayload = []byte(`{invalid`)
+			}
+			handoff := sharedHandoff{Phase: tc.phase, RequestID: "request", BindingID: binding.ID, Stop: stopPayload}
+			handoffProcessInConn(t, h, &handoff)
+			require.Equal(t, tc.phase, handoff.Phase)
+			require.Zero(t, stopCalls, "uncertain binding evidence must not advance or dispatch stop")
+		})
+	}
+
+	t.Run("actor grant revoked before assignment patch", func(t *testing.T) {
+		h := newAPIHarness(t)
+		h.dbmock.ExpectQuery(`SELECT s.id,s.deployment_id,s.company_id,s.project_id,s.name,m.role FROM shared_spaces`).WithArgs("space", "deployment-acme", "u-owner").WillReturnError(errors.New("actor membership revoked"))
+		handoff := sharedHandoff{Phase: "patch_pending", RequestID: "request", Actor: "u-owner", TaskID: "task", SourceAgentID: "agent-a", AgentID: "agent-b", TargetID: "participant-b", TargetVersion: 1}
+		patches := 0
+		pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPatch {
+				patches++
+			}
+		}))
+		defer pc.Close()
+		h.cfg.paperclipBaseURL = pc.URL
+		handoffProcessInConn(t, h, &handoff)
+		require.Equal(t, "patch_pending", handoff.Phase)
+		require.Zero(t, patches)
+	})
+
+	t.Run("target grant lookup error before first patch", func(t *testing.T) {
+		h := participantPermissionHarness(t)
+		handoffProcessExpectOwner(h.dbmock)
+		h.dbmock.ExpectQuery(`SELECT id,kind,target,name,owner_id,resource_uid,role,state,version,agent_id,registration_state FROM shared_space_participants WHERE space_id=\$1 AND id=\$2`).
+			WithArgs("space", "participant-b").WillReturnError(errors.New("target lookup failed"))
+		handoff := sharedHandoff{Phase: "patch_pending", RequestID: "request", Actor: "u-owner", TaskID: "task", SourceAgentID: "agent-a", AgentID: "agent-b", TargetID: "participant-b", TargetVersion: 1}
+		patches := 0
+		pc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPatch {
+				patches++
+			}
+		}))
+		defer pc.Close()
+		h.cfg.paperclipBaseURL = pc.URL
+		handoffProcessInConn(t, h, &handoff)
+		require.Equal(t, "patch_pending", handoff.Phase)
+		require.Zero(t, patches)
+	})
+
+	t.Run("native execution appears before patch", func(t *testing.T) {
+		h := participantPermissionHarness(t)
+		handoffProcessExpectOwner(h.dbmock)
+		h.cfg.paperclipBaseURL = handoffProcessTaskServer(t, map[string]any{"id": "task", "companyId": "company", "projectId": "project", "status": "todo", "assigneeAgentId": "agent-a", "executionRunId": "native-run"})
+		handoff := sharedHandoff{Phase: "patch_pending", RequestID: "request", Actor: "u-owner", TaskID: "task", SourceAgentID: "agent-a"}
+		handoffProcessInConn(t, h, &handoff)
+		require.Equal(t, "patch_pending", handoff.Phase)
+	})
+
+	t.Run("assignment readback error before finalize", func(t *testing.T) {
+		h := newAPIHarness(t)
+		h.cfg.paperclipBaseURL = handoffProcessUnavailableTaskServer(t)
+		handoff := sharedHandoff{Phase: "patch_unknown", RequestID: "request", TaskID: "task"}
+		handoffProcessInConn(t, h, &handoff)
+		require.Equal(t, "patch_unknown", handoff.Phase)
+	})
+
+}
+
+func handoffProcessInConn(t *testing.T, h *apiTestPortal, handoff *sharedHandoff) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := h.db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	h.processHandoffLocked(ctx, conn, sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project"}, handoff)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
+}
+
+func handoffProcessExpectOwner(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT s.id,s.deployment_id,s.company_id,s.project_id,s.name,m.role FROM shared_spaces`).
+		WithArgs("space", "deployment-acme", "u-owner").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment_id", "company_id", "project_id", "name", "role"}).AddRow("space", "deployment-acme", "company", "project", "Space", "owner"))
+}
+
+func handoffProcessTaskServer(t *testing.T, task map[string]any) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, task)
+			return
+		}
+		http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func handoffProcessUnavailableTaskServer(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "task unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
