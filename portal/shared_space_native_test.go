@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
@@ -147,11 +148,12 @@ func TestSharedNativeDocuments(t *testing.T) {
 				if mode == "wrong-scope" {
 					doc["companyId"] = "foreign"
 				}
-				if mode == "list" {
+				switch mode {
+				case "list":
 					writeJSON(w, 200, []any{doc, map[string]any{"companyId": "company", "issueId": "task", "key": "shared-space-result-1"}})
-				} else if mode == "revisions" {
+				case "revisions":
 					writeJSON(w, 200, []any{doc})
-				} else {
+				default:
 					writeJSON(w, 200, doc)
 				}
 			})
@@ -178,6 +180,71 @@ func TestSharedNativeDocuments(t *testing.T) {
 				require.NotContains(t, w.Body.String(), "secret")
 				require.NotContains(t, w.Body.String(), "shared-space-result")
 			}
+		})
+	}
+}
+
+// Rejected input must stop before directory access, database mutation or an
+// upstream request, including company spoofing and unsupported project states.
+func TestSharedNativeProjectRejectsInvalidInputBeforeWriting(t *testing.T) {
+	p := &portal{}
+	p.cfg.paperclipCompanyID = "company"
+	for _, body := range []string{
+		`{`,
+		`{"name":"空间"}`,
+		`{"name":"空间","requestId":"create","companyId":"foreign"}`,
+		`{"name":"空间","requestId":"create","status":"paused"}`,
+	} {
+		w := httptest.NewRecorder()
+		sharedWriteError(w, p.sharedCreateSpace(w, sharedNativeRequest("POST", "/", body), sharedNativeIdentity))
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	for _, body := range []string{`{`, `{}`, `{"status":"paused"}`, `{"status":""}`} {
+		w := httptest.NewRecorder()
+		sharedWriteError(w, p.sharedUpdateProject(w, sharedNativeRequest("PATCH", "/", body), sharedNativeIdentity))
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// Revocation must cut off the additional project and task resource surfaces
+// before any native service read or write occurs.
+func TestSharedNativeRevokedMemberCannotAccessResources(t *testing.T) {
+	for _, handler := range []struct {
+		name   string
+		method string
+		body   string
+		call   func(*portal, http.ResponseWriter, *http.Request, identity) error
+	}{
+		{"project", "GET", "", (*portal).sharedProject},
+		{"comments", "GET", "", (*portal).sharedComments},
+		{"documents", "GET", "", (*portal).sharedDocuments},
+		{"edit-project", "PATCH", `{"name":"空间"}`, (*portal).sharedUpdateProject},
+		{"post-comment", "POST", `{"body":"讨论","clientRequestId":"00000000-0000-4000-8000-000000000006"}`, (*portal).sharedAddComment},
+		{"put-document", "PUT", `{"title":"资料","body":"正文"}`, (*portal).sharedPutDocument},
+	} {
+		t.Run(handler.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, mock.ExpectationsWereMet()); _ = db.Close() })
+			write := handler.method != "GET"
+			if write {
+				mock.ExpectExec("SELECT pg_advisory_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+			mock.ExpectQuery("SELECT s.id,s.deployment_id").WithArgs("space", "deployment", "person").WillReturnError(sql.ErrNoRows)
+			if write {
+				sharedNativeUnlock(mock)
+			}
+			p := &portal{db: db}
+			calls := 0
+			sharedNativeServer(t, p, func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(500) })
+			r := sharedNativeRequest(handler.method, "/", handler.body)
+			if handler.name == "put-document" {
+				r.SetPathValue("key", "zhiyuan-reference-guide")
+			}
+			w := httptest.NewRecorder()
+			sharedWriteError(w, handler.call(p, w, r, sharedNativeIdentity))
+			require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+			require.Zero(t, calls)
 		})
 	}
 }
