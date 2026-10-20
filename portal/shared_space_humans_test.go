@@ -131,3 +131,71 @@ func TestSharedHumanCandidatesHideNativeDirectoryFromCollaborators(t *testing.T)
 	require.True(t, response.Members[0].CanAssign)
 	require.NoError(t, h.dbmock.ExpectationsWereMet())
 }
+
+// A readable people picker explains incomplete links and temporary directory
+// outages while keeping native directory details hidden from read-only staff.
+func TestSharedHumanRosterReflectsMemberReadiness(t *testing.T) {
+	for _, mode := range []string{"viewer-linked", "waiting-for-link", "native-account-removed", "directory-offline", "former-member"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newApplyHarness(t)
+			native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/companies/company/user-directory", r.URL.Path)
+				if mode == "directory-offline" {
+					w.WriteHeader(503)
+					return
+				}
+				id := "native-1"
+				if mode == "native-account-removed" {
+					id = "another-native"
+				}
+				writeJSON(w, 200, map[string]any{"users": []any{map[string]any{"principalId": id, "status": "active", "user": map[string]any{"id": id, "name": "任务系统人员"}}}})
+			}))
+			defer native.Close()
+			h.cfg.paperclipBaseURL = native.URL
+			h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment", "company", "project", "name", "role"}).AddRow("space", "deployment-acme", "company", "project", "空间", "viewer"))
+			h.dbmock.ExpectQuery("SELECT user_id FROM shared_space_members").WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow("u-x"))
+			if mode == "former-member" {
+				h.dbmock.ExpectQuery("SELECT role FROM shared_space_members").WillReturnError(sql.ErrNoRows)
+			} else {
+				role := "editor"
+				if mode == "viewer-linked" {
+					role = "viewer"
+				}
+				humanRole(h.dbmock, "u-x", role)
+				id := "native-1"
+				if mode == "waiting-for-link" {
+					id = ""
+				}
+				humanMappingRow(h.dbmock, "u-x", id)
+			}
+			r := httptest.NewRequest("GET", "/", nil)
+			r.SetPathValue("space", "space")
+			w := httptest.NewRecorder()
+			require.NoError(t, h.sharedHumanAssignees(w, r, identity{UserID: "u-x", DeploymentID: "deployment-acme"}))
+			var out struct {
+				Members      []sharedHumanCandidate `json:"members"`
+				NativeUsers  []sharedNativeHuman    `json:"nativeUsers"`
+				Capabilities map[string]bool        `json:"capabilities"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+			require.Len(t, out.Members, 1)
+			require.Empty(t, out.NativeUsers)
+			require.False(t, out.Capabilities["manageHumanMappings"])
+			member := out.Members[0]
+			require.False(t, member.CanAssign)
+			require.False(t, member.CanClaim)
+			require.NotEmpty(t, member.UnavailableReason)
+			switch mode {
+			case "viewer-linked":
+				require.Equal(t, "linked", member.Mapping.State)
+				require.Equal(t, "viewer", member.Role)
+				require.Equal(t, "用户甲", member.DisplayName)
+			case "waiting-for-link":
+				require.Equal(t, "unlinked", member.Mapping.State)
+			default:
+				require.Equal(t, "unavailable", member.Mapping.State)
+			}
+			require.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}
