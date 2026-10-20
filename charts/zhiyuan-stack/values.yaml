@@ -170,7 +170,9 @@ portal:
   # instead of creating an employee that cannot converse. 2026-10-08 real
   # check: bench-glm is DISABLED in the cicd catalog; every existing
   # employee rides bench-qwen38-fast, which is also this default.
-  defaultModel: bench-qwen38-fast
+  # 2026-10-20: bench-qwen38-fast unreachable (bench host gone); default to
+  # the healthy online model served via the bigmodel passthrough.
+  defaultModel: glm-5.3-flash
   nodePort: 30190
   # Enable only after provisioning the tenant-scoped WeKnora API key in
   # secrets.platformCreds. Values contain identifiers, never credentials.
