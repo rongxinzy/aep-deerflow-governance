@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"math"
@@ -114,61 +115,12 @@ func (p *portal) handleEmployeeKnowledgeSearch(w http.ResponseWriter, r *http.Re
 	}
 	results := make([]employeeKnowledgeSearchResult, 0, input.Limit)
 	for _, baseID := range allowed {
-		kb, found, err := p.managedFetchKB(r.Context(), key, tenant, current.DeploymentID, baseID)
-		if err != nil {
-			p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务暂不可用", "")
+		hits, failure := p.searchKnowledgeBase(r.Context(), key, tenant, current.DeploymentID, baseID, input)
+		if failure != nil {
+			p.managedWriteError(w, failure.status, failure.code, failure.message, "")
 			return
 		}
-		if !found || kb.TenantID != tenant {
-			p.managedWriteError(w, http.StatusForbidden, "KNOWLEDGE_ACCESS_DENIED", "所请求的知识库不属于当前部署或租户", "")
-			return
-		}
-		payload, _ := json.Marshal(map[string]any{
-			"query_text": input.Query, "vector_threshold": 0.5, "keyword_threshold": 0.3,
-			"match_count": input.Limit,
-		})
-		resp, err := p.managedRequest(r.Context(), key, http.MethodPost,
-			"knowledge-bases/"+url.PathEscape(baseID)+"/hybrid-search", nil, strings.NewReader(string(payload)), "application/json")
-		if err != nil {
-			p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库检索暂不可用", "")
-			return
-		}
-		var hits []struct {
-			ID             string  `json:"id"`
-			Content        string  `json:"content"`
-			KnowledgeID    string  `json:"knowledge_id"`
-			KnowledgeTitle string  `json:"knowledge_title"`
-			Score          float64 `json:"score"`
-		}
-		if err := decodeManagedData(resp, &hits); err != nil {
-			p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库检索结果无法校验", "")
-			return
-		}
-		verifiedDocuments := make(map[string]managedKnowledge)
-		for _, hit := range hits {
-			if _, safe := safeKnowledgeID(hit.ID); !safe || hit.KnowledgeID == "" || math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) {
-				p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库检索结果归属校验失败", "")
-				return
-			}
-			doc, checked := verifiedDocuments[hit.KnowledgeID]
-			if !checked {
-				var docFound bool
-				doc, docFound, err = p.managedFetchDocument(r.Context(), key, tenant, current.DeploymentID, baseID, hit.KnowledgeID)
-				if err != nil {
-					p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库资料元数据暂不可用", "")
-					return
-				}
-				if !docFound {
-					p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料归属校验失败", "")
-					return
-				}
-				verifiedDocuments[hit.KnowledgeID] = doc
-			}
-			results = append(results, employeeKnowledgeSearchResult{
-				Score: hit.Score, Content: hit.Content,
-				Source: employeeKnowledgeSearchSource{KnowledgeBaseID: baseID, DocumentID: hit.KnowledgeID, ChunkID: hit.ID, Title: doc.Name},
-			})
-		}
+		results = append(results, hits...)
 		if err := p.auditKnowledgeRuntime(r.Context(), current, tenant, "employee_search", "knowledge_base", baseID, ""); err != nil {
 			p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库检索审计", "")
 			return
@@ -180,6 +132,66 @@ func (p *portal) handleEmployeeKnowledgeSearch(w http.ResponseWriter, r *http.Re
 		results = results[:input.Limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"query": input.Query, "mode": input.Mode, "results": results})
+}
+
+type knowledgeReadFailure struct {
+	status        int
+	code, message string
+}
+
+// Both management checks and employee reads use the same native search and
+// ownership verification. Authorization is completed by the caller, separately.
+func (p *portal) searchKnowledgeBase(ctx context.Context, key, tenant, deployment, baseID string, input employeeKnowledgeSearchRequest) ([]employeeKnowledgeSearchResult, *knowledgeReadFailure) {
+	kb, found, err := p.managedFetchKB(ctx, key, tenant, deployment, baseID)
+	if err != nil {
+		return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库服务暂不可用"}
+	}
+	if !found || kb.TenantID != tenant {
+		return nil, &knowledgeReadFailure{http.StatusForbidden, "KNOWLEDGE_ACCESS_DENIED", "所请求的知识库不属于当前部署或租户"}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"query_text": input.Query, "vector_threshold": 0.5, "keyword_threshold": 0.3,
+		"match_count": input.Limit,
+	})
+	resp, err := p.managedRequest(ctx, key, http.MethodPost,
+		"knowledge-bases/"+url.PathEscape(baseID)+"/hybrid-search", nil, strings.NewReader(string(payload)), "application/json")
+	if err != nil {
+		return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库检索暂不可用"}
+	}
+	var hits []struct {
+		ID             string  `json:"id"`
+		Content        string  `json:"content"`
+		KnowledgeID    string  `json:"knowledge_id"`
+		KnowledgeTitle string  `json:"knowledge_title"`
+		Score          float64 `json:"score"`
+	}
+	if err := decodeManagedData(resp, &hits); err != nil {
+		return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库检索结果无法校验"}
+	}
+	results := make([]employeeKnowledgeSearchResult, 0, len(hits))
+	verifiedDocuments := make(map[string]managedKnowledge)
+	for _, hit := range hits {
+		if _, safe := safeKnowledgeID(hit.ID); !safe || hit.KnowledgeID == "" || math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) {
+			return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库检索结果归属校验失败"}
+		}
+		doc, checked := verifiedDocuments[hit.KnowledgeID]
+		if !checked {
+			var docFound bool
+			doc, docFound, err = p.managedFetchDocument(ctx, key, tenant, deployment, baseID, hit.KnowledgeID)
+			if err != nil {
+				return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库资料元数据暂不可用"}
+			}
+			if !docFound {
+				return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料归属校验失败"}
+			}
+			verifiedDocuments[hit.KnowledgeID] = doc
+		}
+		results = append(results, employeeKnowledgeSearchResult{
+			Score: hit.Score, Content: hit.Content,
+			Source: employeeKnowledgeSearchSource{KnowledgeBaseID: baseID, DocumentID: hit.KnowledgeID, ChunkID: hit.ID, Title: doc.Name},
+		})
+	}
+	return results, nil
 }
 
 func sortEmployeeKnowledgeResults(results []employeeKnowledgeSearchResult) {
@@ -194,28 +206,9 @@ func (p *portal) handleEmployeeKnowledgeDocument(w http.ResponseWriter, r *http.
 		p.managedWriteError(w, http.StatusNotFound, "KNOWLEDGE_NOT_FOUND", "未找到知识库资料", "")
 		return
 	}
-	for key, values := range r.URL.Query() {
-		if (key != "page" && key != "page_size") || len(values) != 1 {
-			p.managedWriteError(w, http.StatusBadRequest, "INVALID_QUERY", "不支持的来源查询参数", "")
-			return
-		}
-	}
-	page, pageSize := 1, 20
-	if raw := r.URL.Query().Get("page"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 1_000_000 {
-			p.managedWriteError(w, http.StatusBadRequest, "INVALID_QUERY", "页码无效", "")
-			return
-		}
-		page = value
-	}
-	if raw := r.URL.Query().Get("page_size"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 100 {
-			p.managedWriteError(w, http.StatusBadRequest, "INVALID_QUERY", "每页数量无效", "")
-			return
-		}
-		pageSize = value
+	page, pageSize, ok := p.knowledgeSourcePagination(w, r)
+	if !ok {
+		return
 	}
 	current, key, tenant, ok := p.employeeKnowledgeReadContext(w, r, ident)
 	if !ok {
@@ -230,6 +223,20 @@ func (p *portal) handleEmployeeKnowledgeDocument(w http.ResponseWriter, r *http.
 		p.managedWriteError(w, http.StatusForbidden, "KNOWLEDGE_NOT_GRANTED", "该数字员工没有绑定该知识库或无权访问", "")
 		return
 	}
+	response, failure := p.readKnowledgeSource(r.Context(), key, tenant, doc, page, pageSize)
+	if failure != nil {
+		p.managedWriteError(w, failure.status, failure.code, failure.message, "")
+		return
+	}
+	if err := p.auditKnowledgeRuntime(r.Context(), current, tenant, "employee_read_source", "document", doc.ID, doc.KnowledgeBaseID); err != nil {
+		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库资料读取审计", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (p *portal) readKnowledgeSource(ctx context.Context, key, tenant string, doc managedKnowledge, page, pageSize int) (map[string]any, *knowledgeReadFailure) {
+	documentID := doc.ID
 	query := url.Values{"page": {strconv.Itoa(page)}, "page_size": {strconv.Itoa(pageSize)}}
 	// The upstream defaults to text chunks. FAQ sources contain faq chunks;
 	// choose the fixed type from verified document metadata, never client input.
@@ -238,10 +245,9 @@ func (p *portal) handleEmployeeKnowledgeDocument(w http.ResponseWriter, r *http.
 	} else {
 		query.Set("chunk_type", "text")
 	}
-	resp, err := p.managedRequest(r.Context(), key, http.MethodGet, "chunks/"+url.PathEscape(documentID), query, nil, "")
+	resp, err := p.managedRequest(ctx, key, http.MethodGet, "chunks/"+url.PathEscape(documentID), query, nil, "")
 	if err != nil {
-		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库资料内容暂不可用", "")
-		return
+		return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_UNAVAILABLE", "知识库资料内容暂不可用"}
 	}
 	var chunkPage struct {
 		Data  []managedChunk `json:"data"`
@@ -252,25 +258,19 @@ func (p *portal) handleEmployeeKnowledgeDocument(w http.ResponseWriter, r *http.
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&chunkPage)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || decodeErr != nil || chunkPage.Page != page || chunkPage.Size != pageSize {
-		p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料内容无法校验", "")
-		return
+		return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料内容无法校验"}
 	}
 	chunks := make([]employeeKnowledgeSourceChunk, 0, len(chunkPage.Data))
 	for _, chunk := range chunkPage.Data {
 		if chunk.ID == "" || chunk.KnowledgeID != doc.ID || chunk.KnowledgeBaseID != doc.KnowledgeBaseID || chunk.TenantID.String() != tenant {
-			p.managedWriteError(w, http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料内容归属校验失败", "")
-			return
+			return nil, &knowledgeReadFailure{http.StatusBadGateway, "KNOWLEDGE_UPSTREAM_INVALID", "知识库资料内容归属校验失败"}
 		}
 		chunks = append(chunks, employeeKnowledgeSourceChunk{ID: chunk.ID, SeqID: chunk.SeqID, ChunkType: chunk.ChunkType, Content: chunk.Content})
 	}
-	if err := p.auditKnowledgeRuntime(r.Context(), current, tenant, "employee_read_source", "document", doc.ID, doc.KnowledgeBaseID); err != nil {
-		p.managedWriteError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "无法记录知识库资料读取审计", "")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"document": employeeKnowledgeSourceDocument{ID: doc.ID, Title: doc.Name, FileName: doc.FileName, FileType: doc.FileType, Source: doc.Source, BaseID: doc.KnowledgeBaseID},
 		"chunks":   chunks, "total": chunkPage.Total, "page": chunkPage.Page, "page_size": chunkPage.Size,
-	})
+	}, nil
 }
 
 func (p *portal) handleEmployeeKnowledgeChunkImage(w http.ResponseWriter, r *http.Request, ident identity) {
