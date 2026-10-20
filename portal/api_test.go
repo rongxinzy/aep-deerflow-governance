@@ -269,7 +269,7 @@ func TestApplyWithModelSelection(t *testing.T) {
 		second := item.Spec.Runtime.Models[1]
 		assert.Equal(t, "openai", second.Provider)
 		assert.Equal(t, "http://higress-gateway.higress-system.svc.cluster.local/v1", second.BaseURL, "openai models route through the gateway /v1 (header-routed), never the raw endpoint")
-		assert.Equal(t, "Qwen3.6-35B-A3B", second.NativeModel)
+		assert.Equal(t, "bench-qwen", second.NativeModel, "the gateway requires the AEP model ID; ai-proxy maps it to the upstream model")
 		require.NotNil(t, second.Reasoning, "declared thinkingFormat must project onto the runtime reasoning block")
 		assert.Equal(t, "optional", second.Reasoning.Thinking)
 		assert.Equal(t, "preserve", second.Reasoning.History)
