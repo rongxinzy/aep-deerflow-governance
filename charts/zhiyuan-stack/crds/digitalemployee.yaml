@@ -354,6 +354,21 @@ spec:
                 - serverURL
                 - type
                 type: object
+              modelAccess:
+                description: |-
+                  ModelAccess explicitly links this employee to its own AEP agent account.
+                  Omitted keeps legacy model access; owner/defaultAEPUser are never inferred.
+                properties:
+                  agentId:
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                required:
+                - agentId
+                type: object
+                x-kubernetes-validations:
+                - message: replace the employee to change its AEP agent identity
+                  rule: self.agentId == oldSelf.agentId
               nodePort:
                 description: NodePort exposes the runtime; 0 means ClusterIP only.
                 format: int32
@@ -685,6 +700,56 @@ spec:
               message:
                 description: Message carries the last error detail when Phase == Error.
                 type: string
+              modelIdentity:
+                description: |-
+                  ModelIdentity is a credential-free observation of the owned SA. It is
+                  neither a model grant nor evidence of gateway authorization/adoption.
+                properties:
+                  agentId:
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  audience:
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  deploymentId:
+                    maxLength: 80
+                    minLength: 1
+                    type: string
+                  employeeUid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  serviceAccountName:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  serviceAccountUid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - agentId
+                - audience
+                - deploymentId
+                - employeeUid
+                - observedGeneration
+                - serviceAccountName
+                - serviceAccountUid
+                type: object
               observedGeneration:
                 format: int64
                 type: integer

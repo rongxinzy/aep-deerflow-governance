@@ -114,6 +114,9 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	// 1. Configuration the runtime would only reject at startup is rejected
 	// here first, so an unsatisfiable model credential surfaces on the CR
 	// instead of as a crash-looping pod.
+	if err := r.validateModelIdentityMapping(&employee); err != nil {
+		return ctrl.Result{}, r.fail(ctx, &employee, err)
+	}
 	if err := r.validateModelAPIKeyEnvs(ctx, &employee); err != nil {
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
@@ -167,7 +170,7 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
-	if err := r.Status().Update(ctx, &employee); err != nil {
+	if err := r.setStatus(ctx, &employee, v1alpha1.PhaseReady, ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	logger.Info("digital employee ready", "replicas", deployment.Status.ReadyReplicas, "runtimeAccount", employee.Status.RuntimeAccount)
