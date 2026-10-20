@@ -425,6 +425,19 @@ runtimeDefaults:
 
 # NetworkPolicy：chart 管理的命名空间默认拒绝入站，再按调用关系放行；
 # 数字员工运行时额外限制出站。enabled=false 整体不渲染（回退路径）。
+# 集群外（节点/主机进程）托管的模型服务，声明式接入。
+# 渲染 ClusterIP Service + EndpointSlice（外部 host）+ 运行时 egress 放行，
+# 供平台与运行时经 svc DNS 消费；模型记录由 hook Job 幂等 seed 进 AEP
+# 目录，后台「模型网关」页可继续增删改（chart 只负责初始 seed 与网络层）。
+modelServices:
+  enabled: false
+  items: []
+  # - name: qwen3-vl-4b
+  #   host: ""   # 模型服务主机（部署环境填写，勿提交真实内网 IP）
+  #   port: 8140
+  #   upstreamModel: qwen3-vl-4b
+  #   capabilities: ["text", "vision"]
+
 networkPolicy:
   enabled: true
   # AEP /internal 与 /aep/v1 同端口（control-service :8080），L3/L4 策略

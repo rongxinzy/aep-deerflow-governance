@@ -1,0 +1,21 @@
+{{- /*
+模型节点（集群外主机进程）出站放行。运行时在 aepInternalGuard=cilium 时
+由 L7 CNP 管控 egress；模型节点是集群外 CIDR，需显式 toCIDR 放行，否则
+跨节点直连被 Cilium 策略丢包。host 来自 modelServices.items（部署环境填写）。
+*/ -}}
+{{- if and .Values.modelServices.enabled .Values.networkPolicy.enabled (eq .Values.networkPolicy.aepInternalGuard "cilium") }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: de-runtime-model-services
+  namespace: {{ include "zhiyuan.ns" . }}
+spec:
+  endpointSelector:
+    {{- include "zhiyuan.np.runtimeSelector" . | nindent 4 }}
+  egress:
+    {{- range .Values.modelServices.items }}
+    - toCIDR: ["{{ .host }}/32"]
+      toPorts:
+        - ports: [{port: "{{ .port }}", protocol: TCP}]
+    {{- end }}
+{{- end }}
