@@ -1,0 +1,38 @@
+{{- if .Values.modelServices.enabled }}
+{{- $ns := include "zhiyuan.ns" . }}
+{{- range .Values.modelServices.items }}
+{{- $svc := printf "modelsrv-%s" .name }}
+{{- if not (and .name .host .port) }}
+{{- fail "modelServices.items[] requires name, host and port" }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/managed-by: Helm, app.kubernetes.io/instance: {{ $.Release.Name }}}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: {{ $svc }}-1
+  namespace: {{ $ns }}
+  labels:
+    kubernetes.io/service-name: {{ $svc }}
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+addressType: IPv4
+ports:
+  - port: {{ .port }}
+    protocol: TCP
+endpoints:
+  - addresses: ["{{ .host }}"]
+---
+{{- end }}
+{{- end }}
