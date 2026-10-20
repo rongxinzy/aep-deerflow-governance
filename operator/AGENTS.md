@@ -26,8 +26,10 @@ After changing `api/v1alpha1/digitalemployee_types.go`:
 ## Conventions
 
 - Reconcile logic lives in `internal/controller/`: lifecycle/finalizer/
-  secrets in `digitalemployee_controller.go`, child rendering in
-  `employee_reconcile.go` and `a2a_render.go`.
+  secrets in `digitalemployee_controller.go`, child orchestration in
+  `employee_reconcile.go`, configuration in `employee_config.go`, and workload
+  rendering in `employee_workload.go` and `a2a_render.go`. Native model runtime
+  configuration and its immutable routing hint live in `model_runtime*.go`.
 - Secret writes use `Data` (not `StringData`) so the fake client used by the
   specs behaves like the reconciler's own idempotency read-back.
 - The operator is namespace-scoped (`--namespace`), blast radius matches the
