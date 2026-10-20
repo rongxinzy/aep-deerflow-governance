@@ -102,6 +102,7 @@ func main() {
 		RuntimeDefaultResources: runtimeResources,
 		RuntimeSecurityContext:  runtimeSecurityContext,
 		ModelTokenAudience:      os.Getenv("MODEL_ACCESS_TOKEN_AUDIENCE"),
+		ModelGatewayURL:         os.Getenv("MODEL_ACCESS_GATEWAY_URL"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")

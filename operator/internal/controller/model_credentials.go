@@ -25,6 +25,9 @@ import (
 // the CR was already accepted, so it is reported on the CR instead — the
 // deployment-time rejection the runtime cannot express.
 func (r *DigitalEmployeeReconciler) validateModelAPIKeyEnvs(ctx context.Context, employee *v1alpha1.DigitalEmployee) error {
+	if r.nativeModelRuntime(employee) {
+		return r.validateModelRuntime(employee)
+	}
 	envs := modelAPIKeyEnvs(employee.Spec.Runtime)
 	if len(envs) == 0 {
 		return nil

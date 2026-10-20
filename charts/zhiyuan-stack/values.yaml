@@ -5,6 +5,10 @@
 # agent/employee/ServiceAccount mapping are ready. Empty preserves legacy mode.
 modelWorkloadIdentity:
   audience: ""
+  # Optional native model runtime; requires an explicit employee modelAccess
+  # mapping and an image containing DeerFlow's TokenFileChatOpenAI adapter.
+  # This is the trusted shared gateway /v1 endpoint, never a provider URL.
+  gatewayURL: ""
 
 global:
   # Image registry base for the zhiyuan-built images. ghcr.io is the

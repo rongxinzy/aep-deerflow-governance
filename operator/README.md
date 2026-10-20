@@ -7,7 +7,7 @@ that run one governed agent instance.
 ## Layout (kubebuilder v4)
 
 - `api/v1alpha1/` — CRD types (`digitalemployee_types.go`), generated deepcopy (`zz_generated.deepcopy.go`)
-- `internal/controller/` — reconciler: memory-user lifecycle (`digitalemployee_controller.go`), child rendering (`employee_reconcile.go`, `a2a_render.go`)
+- `internal/controller/` — reconciler: lifecycle (`digitalemployee_controller.go`), child orchestration (`employee_reconcile.go`), config (`employee_config.go`), workloads (`employee_workload.go`, `a2a_render.go`), native model client (`model_runtime*.go`)
 - `internal/openviking/` — OpenViking admin client (register/regenerate/delete user)
 - `cmd/main.go` — manager entrypoint (namespace-scoped cache, `--namespace digital-employees`)
 - `config/` — kustomize (CRD, RBAC, manager deployment)
@@ -86,9 +86,10 @@ stale generation and foreign ownership, validate deployment/account kind in AEP,
 and enforce immutable identity history. Removing/readding an optional field must
 not permit rebinding the same employee UID to another agent or resurrecting a
 retired SA UID. CR/status write access is privileged; never treat this declaration
-or a user-supplied header as authentication. This phase does not implement that
-writer, publish workload ModelAccessGrant CRs, configure Authorino, or make
-DeerFlow consume the file. These remain tracked in
+or a user-supplied header as authentication. Identity delivery alone does not
+implement that writer, publish workload ModelAccessGrant CRs or configure
+Authorino. Native model client configuration is a separate opt-in below; the
+remaining business and gateway integration stays tracked in
 [#131](https://github.com/rongxinzy/aep-deerflow-governance/issues/131),
 dependent on [AEP #337](https://github.com/rongxinzy/Agent-Enterprise-Protocol/issues/337)
 and [AEP #338](https://github.com/rongxinzy/Agent-Enterprise-Protocol/issues/338).
@@ -119,3 +120,47 @@ select `-ginkgo.focus='Employee explicit identity Kubernetes API'`. It verifies
 schema preservation, generation changes, immutable in-place agent mapping,
 real SA-UID replacement while Pending, observation removal and status write
 stability. It does not deploy a new operator image or prove runtime model access.
+
+## Native model client configuration (additional opt-in)
+
+To consume the projected identity in the main chat model client, configure the
+trusted operator `MODEL_ACCESS_GATEWAY_URL` (Helm:
+`modelWorkloadIdentity.gatewayURL`) as the shared model gateway's absolute
+`http(s)://host[:port]/v1` endpoint. The operator also requires the dedicated
+`MODEL_ACCESS_TOKEN_AUDIENCE` and the employee's explicit `spec.modelAccess`.
+Either missing opt-in preserves the existing model client configuration. The
+gateway option defaults to empty; it does not switch existing employees.
+
+The runtime image must include DeerFlow's
+`deerflow.models.token_file:TokenFileChatOpenAI` client
+([DeerFlow #34](https://github.com/rongxinzy/deer-flow/pull/34)). The operator
+renders `api_key_file` pointing to the projected file, removes `api_key`, and
+sets the trusted gateway endpoint. The client rereads the file per request so
+Kubernetes rotation remains visible. Do not enable this option with an image
+that lacks the token-file client, or a gateway that still expects a human model
+JWT. Never substitute the conversation owner's credentials.
+
+`spec.runtime.models` (or the legacy singular model field) selects stable AEP
+wire model IDs. Native mode rejects duplicate/invalid IDs, provider aliases,
+static API-key env declarations, destination overrides and non-OpenAI protocols.
+The existing per-user `ModelTools.GatewayURL` integration is also rejected in
+native mode: its image/speech/video tools require a separate workload-identity
+integration. Configuring a model here does not grant access. Effective roles,
+verified license state and the trusted workload publisher remain authoritative
+in AEP; changing roles does not automatically rewrite this runtime model list.
+
+Each model receives an `x-aep-access-binding` routing hint derived from the live
+owned ServiceAccount observation. It contains no credential or authorization;
+native TokenReview and published grants enforce access. The immutable tuple
+matches AEP's binding-key convention, covered by pinned vectors in
+`internal/controller/testdata/model-access-binding-v1.json`. ServiceAccount UID
+replacement changes the hint and the config checksum in the same reconcile,
+rolling the runtime consistently. Owner changes do not change this identity.
+
+Runtime enablement additionally requires the trusted AEP workload observer,
+licensed workload publication and native gateway enforcement. This configuration
+stage alone does not attest those deployments, cache adoption, independent quota
+or real-provider success. Full employee-to-provider acceptance remains in
+[#131](https://github.com/rongxinzy/aep-deerflow-governance/issues/131);
+`adoptionGate=false` until that acceptance completes. Authorino's accepted cold
+cache exception still applies per serving replica and after restart/eviction.
