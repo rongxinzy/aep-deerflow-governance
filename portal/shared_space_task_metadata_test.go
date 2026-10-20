@@ -39,7 +39,7 @@ func TestSharedMetadataReceiptRecovery(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			db, m, err := sqlmock.New()
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			defer func() { require.NoError(t, m.ExpectationsWereMet()) }()
 			p := &portal{db: db}
 			title, desc, priority := "title", "body", "high"
@@ -76,7 +76,7 @@ func TestSharedMetadataReceiptRecovery(t *testing.T) {
 			}
 			c, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			raw, ok, err := p.sharedMetadataReceipt(t.Context(), c, sharedSpace{ID: "space", CompanyID: "company", ProjectID: "project"}, "task", "actor", "hash", in)
 			if mode == "conflict" || mode == "unknown-mismatch" {
 				require.Error(t, err)
@@ -150,12 +150,13 @@ func TestSharedMetadataUncertainDispatch(t *testing.T) {
 			require.NoError(t, err)
 			err = p.sharedSetMetadata(httptest.NewRecorder(), sharedNativeRequest("PATCH", "/", string(raw)), sharedNativeIdentity)
 			require.Error(t, err)
-			if mode == "command-fence" {
+			switch mode {
+			case "command-fence":
 				require.Zero(t, gets)
 				require.Zero(t, patches)
-			} else if mode == "foreign-task" || mode == "native-read-fails" {
+			case "foreign-task", "native-read-fails":
 				require.Zero(t, patches)
-			} else {
+			default:
 				require.Equal(t, 1, patches)
 			}
 		})
@@ -177,7 +178,7 @@ func TestSharedMetadataCommandOwnership(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			db, m, err := sqlmock.New()
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			defer func() { require.NoError(t, m.ExpectationsWereMet()) }()
 			p := &portal{db: db}
 			title, desc, priority := "new", "body", "high"
