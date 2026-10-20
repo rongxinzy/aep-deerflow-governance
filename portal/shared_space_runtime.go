@@ -36,24 +36,27 @@ ALTER TABLE shared_space_runtime_bindings DROP CONSTRAINT IF EXISTS shared_space
 CREATE UNIQUE INDEX IF NOT EXISTS shared_runtime_active_task ON shared_space_runtime_bindings(space_id,task_id) WHERE binding_state='active';` + sharedHandoffSchema
 
 type runtimeBinding struct {
-	BindingState         string `json:"bindingState"`
-	AssignmentEpoch      int    `json:"assignmentEpoch"`
-	ParticipantID        string `json:"participantId"`
-	ParticipantVersion   int    `json:"participantVersion"`
-	ID                   string `json:"bindingId"`
-	SpaceID              string `json:"spaceId"`
-	TaskID               string `json:"taskId"`
-	Workspace            string `json:"-"`
-	WorkspaceUID         string `json:"-"`
-	Owner                string `json:"-"`
-	Companion            string `json:"-"`
-	SourceConversationID int64  `json:"sourceConversationId"`
-	PiTaskID             string `json:"piTaskId"`
-	Generation           int    `json:"generation"`
-	ExecutionID          string `json:"executionId"`
-	ExpectedVersion      int    `json:"expectedVersion"`
-	BindHash             string `json:"-"`
-	AssignmentHash       string `json:"-"`
+	WaitingDependencies  bool                `json:"waitingDependencies"`
+	WaitingReason        string              `json:"waitingReason"`
+	Dependencies         *sharedDependencies `json:"dependencies,omitempty"`
+	BindingState         string              `json:"bindingState"`
+	AssignmentEpoch      int                 `json:"assignmentEpoch"`
+	ParticipantID        string              `json:"participantId"`
+	ParticipantVersion   int                 `json:"participantVersion"`
+	ID                   string              `json:"bindingId"`
+	SpaceID              string              `json:"spaceId"`
+	TaskID               string              `json:"taskId"`
+	Workspace            string              `json:"-"`
+	WorkspaceUID         string              `json:"-"`
+	Owner                string              `json:"-"`
+	Companion            string              `json:"-"`
+	SourceConversationID int64               `json:"sourceConversationId"`
+	PiTaskID             string              `json:"piTaskId"`
+	Generation           int                 `json:"generation"`
+	ExecutionID          string              `json:"executionId"`
+	ExpectedVersion      int                 `json:"expectedVersion"`
+	BindHash             string              `json:"-"`
+	AssignmentHash       string              `json:"-"`
 }
 
 func runtimeLoad(ctx context.Context, q interface {
@@ -122,7 +125,7 @@ func (p *portal) sharedRuntimeEnqueue(ctx context.Context, tx *sql.Tx, space, ta
 	}
 	return runtimeEnqueue(ctx, tx, b, "return:"+result.ID+":"+stage, "return", map[string]any{"bindingId": b.ID, "generation": b.Generation, "executionId": b.ExecutionID, "conversationId": b.SourceConversationID, "resultId": result.ID, "revisionId": result.RevisionID, "stage": stage, "text": text})
 }
-func (p *portal) runtimeAuthorize(ctx context.Context, b runtimeBinding, ws *dev.PersonalWorkspace, i identity) error {
+func (p *portal) runtimeAuthorize(ctx context.Context, b runtimeBinding, ws *dev.PersonalWorkspace, i identity, observed ...*map[string]any) error {
 	epoch, e := p.sharedTaskEpoch(ctx, p.db, b.SpaceID, b.TaskID)
 	if e != nil {
 		return e
@@ -174,6 +177,9 @@ func (p *portal) runtimeAuthorize(ctx context.Context, b runtimeBinding, ws *dev
 	if err == nil && (runtimeAssignment(task) != b.AssignmentHash || task["assigneeAgentId"] != x.AgentID) {
 		return sharedFail(409, "任务负责人已变化")
 	}
+	if err == nil && len(observed) > 0 {
+		*observed[0] = task
+	}
 	return err
 }
 func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i identity, ws *dev.PersonalWorkspace, companion string) error {
@@ -212,7 +218,7 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 			}
 			s.Role = participant.Role
 			var tasks []map[string]any
-			if err = p.sharedPC(r.Context(), "GET", "/companies/"+url.PathEscape(s.CompanyID)+"/issues?projectId="+url.QueryEscape(s.ProjectID), nil, &tasks); err != nil {
+			if err = p.sharedPC(r.Context(), "GET", "/companies/"+url.PathEscape(s.CompanyID)+"/issues?includeBlockedBy=true&projectId="+url.QueryEscape(s.ProjectID), nil, &tasks); err != nil {
 				return err
 			}
 			safe := []map[string]any{}
@@ -224,6 +230,11 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 						return e
 					}
 					dto["assignment"] = assignment
+					deps, e := p.sharedReadDependencies(r.Context(), s, task)
+					if e != nil {
+						return e
+					}
+					dto["dependencyState"] = sharedDependencyState(deps)
 					safe = append(safe, dto)
 				}
 			}
@@ -299,6 +310,10 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if task["status"] == "done" || task["status"] == "cancelled" {
 			return sharedFail(409, "任务已结束")
 		}
+		deps, err := p.sharedReadDependencies(r.Context(), s, task)
+		if err != nil {
+			return err
+		}
 		if source, sourceErr := p.collaborationCall(r.Context(), ws, companion, "/api/conversations/"+fmt.Sprint(in.SourceConversationID), nil); sourceErr != nil || source["conversationId"] != float64(in.SourceConversationID) {
 			return sharedFail(409, "原对话无法确认")
 		}
@@ -318,6 +333,11 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 			}
 			if err = p.runtimeAuthorize(r.Context(), old, ws, i); err != nil {
 				return err
+			}
+			old.WaitingDependencies = !deps.Ready
+			old.WaitingReason = deps.WaitingReason
+			if len(deps.BlockedBy) > 0 {
+				old.Dependencies = &deps
 			}
 			writeJSON(w, 200, old)
 			return nil
@@ -374,7 +394,11 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if err != nil {
 			return err
 		}
-		claimInput := sharedAssignmentInput{RequestID: "runtime-claim:" + in.RequestID, ExpectedAssignmentToken: assignment.Token, ParticipantID: participant.ID}
+		assignmentAction, assignmentPrefix := "claim", "runtime-claim:"
+		if !deps.Ready {
+			assignmentAction, assignmentPrefix = "assign", "runtime-wait:"
+		}
+		claimInput := sharedAssignmentInput{RequestID: assignmentPrefix + in.RequestID, ExpectedAssignmentToken: assignment.Token, ParticipantID: participant.ID}
 		var actor, action, state string
 		var expected []byte
 		priorErr := c.QueryRowContext(r.Context(), `SELECT actor_id,action,state,expected FROM shared_space_commands WHERE space_id=$1 AND request_id=$2`, s.ID, claimInput.RequestID).Scan(&actor, &action, &state, &expected)
@@ -384,14 +408,14 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 				ParticipantID      string                `json:"participantId"`
 				ParticipantVersion int                   `json:"participantVersion"`
 			}
-			if json.Unmarshal(expected, &prior) != nil || actor != i.UserID || action != "claim" || state != "applied" || prior.ParticipantID != participant.ID || prior.ParticipantVersion != participant.Version || prior.Input.RequestID != claimInput.RequestID {
+			if json.Unmarshal(expected, &prior) != nil || actor != i.UserID || action != assignmentAction || state != "applied" || prior.ParticipantID != participant.ID || prior.ParticipantVersion != participant.Version || prior.Input.RequestID != claimInput.RequestID {
 				return sharedFail(423, "原领取操作待核验")
 			}
 			claimInput = prior.Input
 		} else if priorErr != sql.ErrNoRows {
 			return priorErr
 		}
-		if _, err = p.sharedAssignmentLocked(r.Context(), c, s, in.TaskID, i, claimInput, true); err != nil {
+		if _, err = p.sharedAssignmentLocked(r.Context(), c, s, in.TaskID, i, claimInput, deps.Ready); err != nil {
 			return err
 		}
 		for _, key := range []string{"executionRunId", "checkoutRunId"} {
@@ -404,7 +428,11 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 		if err != nil {
 			return err
 		}
-		if task["assigneeAgentId"] != participant.AgentID || task["status"] != "in_progress" || task["assigneeUserId"] != nil && task["assigneeUserId"] != "" {
+		expectedStatus := "in_progress"
+		if !deps.Ready {
+			expectedStatus = "todo"
+		}
+		if task["assigneeAgentId"] != participant.AgentID || task["status"] != expectedStatus || task["assigneeUserId"] != nil && task["assigneeUserId"] != "" {
 			return sharedFail(409, "领取后的任务承接者已变化")
 		}
 		for _, key := range []string{"executionRunId", "checkoutRunId"} {
@@ -413,6 +441,11 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 			}
 		}
 		b := runtimeBinding{BindingState: "active", AssignmentEpoch: epoch, ParticipantID: participant.ID, ParticipantVersion: participant.Version, ID: id, SpaceID: in.SpaceID, TaskID: in.TaskID, Workspace: ws.Name, WorkspaceUID: string(ws.UID), Owner: i.UserID, Companion: companion, SourceConversationID: in.SourceConversationID, Generation: 1, ExecutionID: collaborationID(id, "1"), ExpectedVersion: len(results), BindHash: hash, AssignmentHash: runtimeAssignment(task)}
+		b.WaitingDependencies = !deps.Ready
+		b.WaitingReason = deps.WaitingReason
+		if len(deps.BlockedBy) > 0 {
+			b.Dependencies = &deps
+		}
 		tx, err := c.BeginTx(r.Context(), nil)
 		if err != nil {
 			return err
@@ -457,10 +490,15 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 	if b.Companion != companion {
 		return sharedFail(403, "搭档不匹配")
 	}
-	if err = p.runtimeAuthorize(r.Context(), b, ws, i); err != nil {
+	var observed map[string]any
+	if err = p.runtimeAuthorize(r.Context(), b, ws, i, &observed); err != nil {
 		return err
 	}
 	if r.PathValue("action") == "space-status" && r.Method == "GET" {
+		b, err = p.runtimeDependencyWaiting(r.Context(), b, observed)
+		if err != nil {
+			return err
+		}
 		writeJSON(w, 200, b)
 		return nil
 	}
@@ -591,8 +629,22 @@ func (p *portal) processSharedRuntime(ctx context.Context) {
 			_, _ = c.ExecContext(ctx, `UPDATE shared_space_runtime_outbox SET state='blocked' WHERE command_id=$1`, id)
 			return
 		}
+		if action == "start" && current == "pending" {
+			if p.runtimeRecoverDependencyCheckout(ctx, c, space, b, task) != nil {
+				return
+			}
+		}
 		if runtimeCommandGate(ctx, c, b.SpaceID, b.TaskID) != nil {
 			return
+		}
+		if current == "pending" && action == "start" {
+			ready, preparedHash, prepareErr := p.runtimePrepareDependencies(ctx, c, space, b, task, id, payload)
+			if prepareErr != nil || !ready {
+				return
+			}
+			if preparedHash != "" {
+				hash = preparedHash
+			}
 		}
 	}
 	var receipt map[string]any

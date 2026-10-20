@@ -128,6 +128,7 @@ func TestSharedTaskDetailHandoffStateClosesAndRestoresCapabilities(t *testing.T)
 			}
 			h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 ORDER BY epoch`).
 				WithArgs("space", "task").WillReturnRows(history)
+			h.dbmock.ExpectQuery("SELECT EXISTS.*shared_space_runtime_bindings").WillReturnRows(sqlmock.NewRows([]string{"bound"}).AddRow(phase == "stop_pending"))
 
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.SetPathValue("space", "space")

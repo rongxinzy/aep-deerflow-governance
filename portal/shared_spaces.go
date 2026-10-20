@@ -176,6 +176,8 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks", wrap(p.sharedCreateTask))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/task-commands/{request}", wrap(p.sharedTaskCommand))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}", wrap(p.sharedTaskDetail))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedTaskDependencies))
+	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedSetDependencies))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedComments))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedAddComment))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/documents", wrap(p.sharedDocuments))
@@ -213,6 +215,9 @@ func (p *portal) sharedPC(ctx context.Context, method, path string, body any, ou
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		if res.StatusCode == http.StatusConflict {
 			return sharedFail(409, "任务服务内容已变化，请刷新后重试")
+		}
+		if res.StatusCode == http.StatusUnprocessableEntity {
+			return sharedFail(400, "任务服务拒绝此操作，请检查任务状态或依赖关系")
 		}
 		return sharedFail(502, "任务服务未确认操作")
 	}
@@ -515,7 +520,7 @@ func (p *portal) sharedTasks(w http.ResponseWriter, r *http.Request, i identity)
 		}
 		offset = n
 	}
-	query := url.Values{"projectId": {s.ProjectID}, "limit": {strconv.Itoa(limit + 1)}, "offset": {strconv.Itoa(offset)}}
+	query := url.Values{"projectId": {s.ProjectID}, "includeBlockedBy": {"true"}, "limit": {strconv.Itoa(limit + 1)}, "offset": {strconv.Itoa(offset)}}
 	if parent := r.URL.Query().Get("parentId"); parent != "" {
 		if _, err = p.sharedCheckTask(r.Context(), s, parent); err != nil {
 			return err
@@ -567,6 +572,13 @@ func (p *portal) sharedTasks(w http.ResponseWriter, r *http.Request, i identity)
 		if state := states[fmt.Sprint(item["id"])]; state != "" {
 			item["reviewState"] = state
 		}
+	}
+	for index, task := range tasks {
+		deps, e := p.sharedReadDependencies(r.Context(), s, task)
+		if e != nil {
+			return e
+		}
+		items[index]["dependencyState"] = sharedDependencyState(deps)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": items, "hasMore": hasMore, "nextOffset": offset + len(items), "board": map[string]any{"statuses": sharedTaskStatuses}})
 	return nil
@@ -692,7 +704,22 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	if !sharedCaps(s.Role)["createTask"] {
 		capabilities["commentUnavailableReason"] = "当前成员只能查看讨论"
 	}
-	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history})
+	deps, err := p.sharedReadDependencies(r.Context(), s, task)
+	if err != nil {
+		return err
+	}
+	editReason := "仅未运行、未绑定的任务可编辑依赖"
+	if len(deps.BlockedBy) > 0 || task["status"] == "backlog" || task["status"] == "todo" {
+		editReason, err = p.sharedDependencyEditReason(r.Context(), s, task)
+		if err != nil {
+			return err
+		}
+	}
+	capabilities["editDependencies"] = editReason == "" && !blocked && handoff == nil
+	capabilities["editDependenciesUnavailableReason"] = editReason
+	dto := sharedTaskDTO(task)
+	dto["dependencyState"] = sharedDependencyState(deps)
+	writeJSON(w, 200, map[string]any{"task": dto, "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history, "dependencies": deps})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {
