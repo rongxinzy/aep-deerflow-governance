@@ -1,0 +1,24 @@
+[
+  {
+    "Name": "employee",
+    "DeploymentID": "deployment-test",
+    "AgentID": "agent-test",
+    "Namespace": "digital-employees",
+    "EmployeeUID": "employee-uid",
+    "ServiceAccountName": "de-model-test",
+    "ServiceAccountUID": "sa-uid",
+    "Audience": "urn:zhiyuan:model-gateway:test",
+    "BindingKey": "8647c0ab77bd61cf1936ec3cdff55d46a55ccea6938dddc26ea860a078ef1006"
+  },
+  {
+    "Name": "escaped-identity",
+    "DeploymentID": "deployment-test",
+    "AgentID": "agent-用户\u003c\u0026\u003e",
+    "Namespace": "digital-employees",
+    "EmployeeUID": "employee-uid",
+    "ServiceAccountName": "de-model-test",
+    "ServiceAccountUID": "replacement-sa-uid",
+    "Audience": "urn:zhiyuan:model-gateway:test",
+    "BindingKey": "b518ce6b909c3aa50058b18dc061a02d15b785eb824218b9d6ae384d480198fd"
+  }
+]

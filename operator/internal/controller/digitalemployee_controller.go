@@ -86,6 +86,9 @@ type DigitalEmployeeReconciler struct {
 	// ModelTokenAudience opts into per-employee Kubernetes identity delivery.
 	// Empty preserves the existing runtime/model authentication path.
 	ModelTokenAudience string
+	// ModelGatewayURL opts explicitly mapped employees into token-file model
+	// clients. Empty keeps the prior runtime configuration unchanged.
+	ModelGatewayURL string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
@@ -115,6 +118,9 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 	// here first, so an unsatisfiable model credential surfaces on the CR
 	// instead of as a crash-looping pod.
 	if err := r.validateModelIdentityMapping(&employee); err != nil {
+		return ctrl.Result{}, r.fail(ctx, &employee, err)
+	}
+	if err := r.validateModelRuntime(&employee); err != nil {
 		return ctrl.Result{}, r.fail(ctx, &employee, err)
 	}
 	if err := r.validateModelAPIKeyEnvs(ctx, &employee); err != nil {
@@ -181,6 +187,9 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 func (r *DigitalEmployeeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if !validModelTokenAudience(r.ModelTokenAudience) {
 		return fmt.Errorf("invalid model token audience")
+	}
+	if !validModelGatewayURL(r.ModelGatewayURL) || r.ModelGatewayURL != "" && r.ModelTokenAudience == "" {
+		return fmt.Errorf("native model runtime requires a valid /v1 gateway URL and audience")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DigitalEmployee{}).
