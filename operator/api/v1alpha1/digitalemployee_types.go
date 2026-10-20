@@ -11,110 +11,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// RuntimeSpec selects the execution engine and the model route.
-type RuntimeSpec struct {
-	// Type of the execution engine. Only "deerflow" is implemented.
-	// +kubebuilder:validation:Enum=deerflow
-	Type string `json:"type"`
-
-	// Image is the container image for the runtime (must embed the
-	// governance middleware and MCP tooling).
-	Image string `json:"image"`
-
-	// Models lists the LLM routes the runtime may use, in priority order:
-	// the first entry is the default the runtime picks when a caller does
-	// not name one, later entries are selectable by name (DeerFlow resolves
-	// per-request and per-subagent model choices against this list — it is
-	// selection, not automatic failover). When empty the legacy singular
-	// fields below define the single model.
-	// +optional
-	Models []RuntimeModel `json:"models,omitempty"`
-
-	// Model is the wire model id routed by the Higress model gateway
-	// (e.g. bench-glm). Never a provider-native model name. Legacy form of
-	// Models[0]; kept for existing CRs.
-	Model string `json:"model"`
-
-	// ModelBaseURL is the model API base URL. Defaults to the in-cluster
-	// Higress gateway when empty. Legacy form of Models[0].baseURL.
-	// +optional
-	ModelBaseURL string `json:"modelBaseURL,omitempty"`
-
-	// Provider selects the model protocol family. "openai" (default) keeps
-	// the Higress-routed OpenAI-compatible path; "anthropic" speaks the
-	// Anthropic wire protocol — the AEP model registry serves it under a
-	// per-model path prefix (http://<gateway>/<model-id>).
-	// +optional
-	// +kubebuilder:validation:Enum=openai;anthropic
-	Provider string `json:"provider,omitempty"`
-
-	// NativeModel is the provider-native model id behind the wire name
-	// (Model stays the stable wire id agents and threads reference).
-	// Defaults to Model (Higress passthrough). Legacy form of
-	// Models[0].nativeModel.
-	// +optional
-	NativeModel string `json:"nativeModel,omitempty"`
-
-	// ApiKeyEnv names the credentials-Secret env var holding the provider
-	// API key. Defaults to DEER_BENCH_API_KEY. Legacy form of
-	// Models[0].apiKeyEnv.
-	// +optional
-	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
-}
-
-// RuntimeModel is one LLM route in the runtime's model list.
-type RuntimeModel struct {
-	// Name is the wire model id (AEP model id) agents and threads
-	// reference; also the selection key inside the runtime config.
-	Name string `json:"name"`
-
-	// Provider selects the protocol family: "openai" or "anthropic".
-	// +kubebuilder:validation:Enum=openai;anthropic
-	Provider string `json:"provider"`
-
-	// NativeModel is the provider-native model id sent upstream. Defaults
-	// to Name.
-	// +optional
-	NativeModel string `json:"nativeModel,omitempty"`
-
-	// BaseURL is the model API base URL. For anthropic models served by
-	// the AEP registry this is <gateway>/<model-id>.
-	// +optional
-	BaseURL string `json:"baseURL,omitempty"`
-
-	// ApiKeyEnv names the credentials-Secret env var holding the provider
-	// API key.
-	// +optional
-	ApiKeyEnv string `json:"apiKeyEnv,omitempty"`
-
-	// Reasoning declares the model's thinking behavior so the runtime does
-	// not have to infer it (DeerFlow turns thinking off for undeclared
-	// models even when the upstream emits reasoning_content). Derived from
-	// the AEP catalog's reasoningCompatibility.
-	// +optional
-	Reasoning *RuntimeReasoning `json:"reasoning,omitempty"`
-}
-
-// RuntimeReasoning is the declarative reasoning contract for one model,
-// mirroring DeerFlow's config-level reasoning block (thinking/history subset
-// the AEP catalog can express today).
-type RuntimeReasoning struct {
-	// Thinking policy: unsupported (never), optional (caller toggles,
-	// default on), required (always on). Mapped from a declared
-	// thinkingFormat.
-	// +kubebuilder:validation:Enum=unsupported;optional;required
-	// +optional
-	Thinking string `json:"thinking,omitempty"`
-
-	// History policy for reasoning across turns: preserve keeps
-	// reasoning_content on assistant messages (required by
-	// requiresReasoningContentOnAssistantMessages upstreams), clear drops
-	// it. Empty leaves the runtime default.
-	// +kubebuilder:validation:Enum=preserve;clear
-	// +optional
-	History string `json:"history,omitempty"`
-}
-
 // MemorySpec configures long-term memory persistence.
 type MemorySpec struct {
 	// Type of memory backend. Only "openviking" is implemented.
@@ -239,32 +135,6 @@ type SubjectRef struct {
 	Name string `json:"name"`
 }
 
-// GovernanceSpec carries AEP governance middleware parameters.
-type GovernanceSpec struct {
-	AEPBaseURL   string `json:"aepBaseURL"`
-	DeploymentID string `json:"deploymentID"`
-	// DeploymentName is the AEP deployment's verified display name.
-	// +optional
-	DeploymentName string `json:"deploymentName,omitempty"`
-	DefaultAEPUser string `json:"defaultAEPUser"`
-	// +optional
-	IdentitySource string `json:"identitySource,omitempty"`
-	// +optional
-	GovernedTools []string `json:"governedTools,omitempty"`
-	// +optional
-	TeamNames map[string]string `json:"teamNames,omitempty"`
-	// +optional
-	APIServiceCreds string `json:"apiServiceCreds,omitempty"`
-}
-
-// CredentialsRef names the platform Secret holding shared credentials
-// (DEER model key, WeKnora MCP bearer, OpenViking root key, AEP service
-// credentials). Secrets are never embedded in the CR.
-type CredentialsRef struct {
-	// Name of the Secret in the employee namespace.
-	Name string `json:"name"`
-}
-
 // A2ASpec exposes the employee over the AEP A2A delegation contract. When
 // enabled the operator renders a dedicated adapter instance fronting this
 // employee's runtime: peer digital employees may delegate tasks to it with
@@ -376,6 +246,10 @@ type DigitalEmployeeSpec struct {
 	Knowledge *KnowledgeSpec `json:"knowledge,omitempty"`
 
 	Governance GovernanceSpec `json:"governance"`
+	// ModelAccess explicitly links this employee to its own AEP agent account.
+	// Omitted keeps legacy model access; owner/defaultAEPUser are never inferred.
+	// +optional
+	ModelAccess *ModelAccessSpec `json:"modelAccess,omitempty"`
 
 	// Credentials references the shared platform secret.
 	Credentials CredentialsRef `json:"credentials"`
@@ -509,6 +383,10 @@ const (
 
 // DigitalEmployeeStatus defines the observed state of a digital employee.
 type DigitalEmployeeStatus struct {
+	// ModelIdentity is a credential-free observation of the owned SA. It is
+	// neither a model grant nor evidence of gateway authorization/adoption.
+	// +optional
+	ModelIdentity *ModelIdentityStatus `json:"modelIdentity,omitempty"`
 	// +optional
 	Phase DigitalEmployeePhase `json:"phase,omitempty"`
 	// +optional
