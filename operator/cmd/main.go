@@ -89,8 +89,8 @@ func main() {
 		WakeDBFn: func(ctx context.Context, namespace string) (string, error) {
 			return readSecretKey(ctx, mgr.GetClient(), namespace, wakeDBSecret, "PORTAL_DB_URL")
 		},
-		DefaultIdleSeconds:      int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
-		ChannelGatewayURL:       envOrDefault("CHANNEL_GATEWAY_URL", ""),
+		DefaultIdleSeconds: int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
+		ChannelGatewayURL:  envOrDefault("CHANNEL_GATEWAY_URL", ""),
 		ModelTools: controller.ModelToolsConfig{
 			GatewayURL: envOrDefault("MODEL_TOOLS_GATEWAY_URL", ""),
 			Image:      envOrDefault("MODEL_TOOLS_IMAGE", ""),

@@ -176,6 +176,7 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks", wrap(p.sharedCreateTask))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/task-commands/{request}", wrap(p.sharedTaskCommand))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}", wrap(p.sharedTaskDetail))
+	mux.HandleFunc("PATCH /api/v1/shared-spaces/{space}/tasks/{task}/metadata", wrap(p.sharedSetMetadata))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedTaskDependencies))
 	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedSetDependencies))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedComments))
@@ -717,9 +718,15 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	}
 	capabilities["editDependencies"] = editReason == "" && !blocked && handoff == nil
 	capabilities["editDependenciesUnavailableReason"] = editReason
+	metadataReason := strings.ReplaceAll(editReason, "依赖", "基本信息")
+	if metadataReason == "" && (blocked || handoff != nil) {
+		metadataReason = "任务存在待核验操作"
+	}
+	capabilities["editMetadata"] = metadataReason == ""
+	capabilities["editMetadataUnavailableReason"] = metadataReason
 	dto := sharedTaskDTO(task)
 	dto["dependencyState"] = sharedDependencyState(deps)
-	writeJSON(w, 200, map[string]any{"task": dto, "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history, "dependencies": deps})
+	writeJSON(w, 200, map[string]any{"task": dto, "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history, "dependencies": deps, "metadataToken": sharedMetadataToken(task)})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -156,11 +157,14 @@ func (p *portal) sharedReadDependencies(ctx context.Context, s sharedSpace, task
 	return deps, nil
 }
 func (p *portal) sharedDependencyEditReason(ctx context.Context, s sharedSpace, task map[string]any) (string, error) {
+	return p.sharedTaskEditReason(ctx, s, task, "依赖")
+}
+func (p *portal) sharedTaskEditReason(ctx context.Context, s sharedSpace, task map[string]any, field string) (string, error) {
 	if !sharedCaps(s.Role)["createTask"] {
-		return "当前成员只能查看依赖", nil
+		return fmt.Sprintf("当前成员只能查看%s", field), nil
 	}
 	if task["status"] != "backlog" && task["status"] != "todo" {
-		return "仅未运行的任务可编辑依赖", nil
+		return fmt.Sprintf("仅未运行的任务可编辑%s", field), nil
 	}
 	for _, key := range []string{"executionRunId", "checkoutRunId"} {
 		if task[key] != nil && task[key] != "" {
@@ -173,7 +177,7 @@ func (p *portal) sharedDependencyEditReason(ctx context.Context, s sharedSpace, 
 		return "", err
 	}
 	if bound {
-		return "任务已绑定搭档执行，不能编辑依赖", nil
+		return fmt.Sprintf("任务已绑定搭档执行，不能编辑%s", field), nil
 	}
 	return "", nil
 }
