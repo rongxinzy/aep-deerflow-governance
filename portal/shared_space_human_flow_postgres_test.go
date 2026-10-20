@@ -136,6 +136,9 @@ func TestSharedSpacesPostgresHumanHandoffResourcesAndReturn(t *testing.T) {
 
 func TestSharedSpacesPostgresColleagueStartsAndReturnsTaskToAgent(t *testing.T) {
 	f := newDependencyPGFixture(t)
+	// This scenario tests the normal acknowledged start. Lost-checkout recovery
+	// has a separate acceptance flow; the shared fixture defaults to losing it.
+	f.loseCheckout = false
 	owner := identity{UserID: "u-x", DeploymentID: "deployment-acme"}
 	colleague := identity{UserID: "u-owner", DeploymentID: "deployment-acme"}
 	mapping := func(w http.ResponseWriter, r *http.Request, i identity) error {
