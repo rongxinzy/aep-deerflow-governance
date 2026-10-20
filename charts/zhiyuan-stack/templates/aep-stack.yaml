@@ -97,9 +97,9 @@ data:
   AEP_GATEWAY_JWKS_URL: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080/.well-known/jwks.json" $ns | quote }}
   AEP_GATEWAY_LICENSE_STATUS_TOKEN: {{ .Values.aepStack.gatewayLicenseStatusToken | quote }}
   AEP_GATEWAY_LICENSE_STATUS_URL: {{ printf "http://aep-control-service.%s.svc.cluster.local:8080/internal/gateway/licenses" $ns | quote }}
-  AEP_GATEWAY_REQUEST_LIMIT: "2097152"
+  AEP_GATEWAY_REQUEST_LIMIT: "33554432"
   AEP_GATEWAY_REQUIRE_ENTITLEMENT: {{ .Values.aepStack.gatewayRequireEntitlement | quote }}
-  AEP_GATEWAY_UPSTREAM_HEADER_TIMEOUT: "15s"
+  AEP_GATEWAY_UPSTREAM_HEADER_TIMEOUT: "90s"
   AEP_GATEWAY_UPSTREAM_URL: {{ .Values.aepStack.gatewayUpstreamUrl | quote }}
   AEP_LOG_FORMAT: {{ .Values.aepStack.logFormat | quote }}
   AEP_LOG_LEVEL: {{ .Values.aepStack.logLevel | quote }}
