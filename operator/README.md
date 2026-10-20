@@ -62,10 +62,34 @@ SA is garbage-collected through the owner reference. Disabling the option
 removes the projection on the next runtime rollout; owned accounts remain until
 employee deletion. Never enable the option using the Kubernetes API audience.
 
-This phase delivers identity, **not model authorization**. It does not map the
-employee to an AEP `kind=agent` account, publish workload ModelAccessGrant CRs,
-configure Authorino TokenReview/caching, or make DeerFlow consume this file.
-Those are the next steps in [#131](https://github.com/rongxinzy/aep-deerflow-governance/issues/131),
+Identity delivery is **not model authorization**. To explicitly declare the
+employee's separate AEP `kind=agent` account, set `spec.modelAccess.agentId` and
+`spec.governance.deploymentId` with the dedicated operator audience enabled.
+Neither `spec.owner` nor `governance.defaultAEPUser` is a fallback agent identity.
+The optional field is omitted for legacy employees; no account is automatically
+created or assigned permissions. Existing resource assignments through effective
+roles remain authoritative in AEP.
+
+After checking live SA ownership, the operator publishes credential-free
+`status.modelIdentity`: observed generation, agent/deployment IDs, employee UID,
+SA name/UID and audience. It records identity observation even while the runtime
+is Pending; it does not attest runtime readiness, a valid token, an authorization
+grant or data-plane adoption. The whole status is compared before writing so
+an SA replacement persists even when phase/message do not change, without an
+unchanged-status watch loop. Removing the mapping or a reconciliation error
+clears the observation. Deletion must be checked directly, not inferred from a
+possibly retained status.
+
+Kubernetes rejects changing an existing `modelAccess.agentId` in place. A trusted
+AEP lifecycle writer must **also** reread the live CR and SA, reject deletion,
+stale generation and foreign ownership, validate deployment/account kind in AEP,
+and enforce immutable identity history. Removing/readding an optional field must
+not permit rebinding the same employee UID to another agent or resurrecting a
+retired SA UID. CR/status write access is privileged; never treat this declaration
+or a user-supplied header as authentication. This phase does not implement that
+writer, publish workload ModelAccessGrant CRs, configure Authorino, or make
+DeerFlow consume the file. These remain tracked in
+[#131](https://github.com/rongxinzy/aep-deerflow-governance/issues/131),
 dependent on [AEP #337](https://github.com/rongxinzy/Agent-Enterprise-Protocol/issues/337)
 and [AEP #338](https://github.com/rongxinzy/Agent-Enterprise-Protocol/issues/338).
 No human login session, provider API key or static platform model key is
@@ -87,3 +111,11 @@ projection and native TokenReview audience/SA-UID behavior without printing a
 bearer. TokenReview uses a separate in-memory Pod-bound TokenRequest; the
 mounted file is decoded only for non-secret claim facts. This is not an end to
 end employee model-request, cache-invalidation or quota test.
+
+The explicit mapping/status admission check also runs the typed full reconcile
+entry point against that disposable API. Install the KEDA `ScaledObject` and
+`TriggerAuthentication` CRDs (the normal employee lifecycle dependency), then
+select `-ginkgo.focus='Employee explicit identity Kubernetes API'`. It verifies
+schema preservation, generation changes, immutable in-place agent mapping,
+real SA-UID replacement while Pending, observation removal and status write
+stability. It does not deploy a new operator image or prove runtime model access.

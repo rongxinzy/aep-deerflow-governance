@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,11 +26,21 @@ func (r *DigitalEmployeeReconciler) fail(ctx context.Context, employee *v1alpha1
 }
 
 func (r *DigitalEmployeeReconciler) setStatus(ctx context.Context, employee *v1alpha1.DigitalEmployee, phase v1alpha1.DigitalEmployeePhase, message string) error {
-	if employee.Status.Phase == phase && employee.Status.Message == message && phase != v1alpha1.PhaseReady {
-		return nil
-	}
 	employee.Status.Phase = phase
 	employee.Status.Message = message
+	if phase == v1alpha1.PhaseError {
+		employee.Status.ModelIdentity = nil
+	}
+	// Identity may change while phase/message stay Pending (for example an SA
+	// recreation). Compare the entire stored status to persist that change and
+	// also avoid an endless status-watch loop on unchanged observations.
+	var current v1alpha1.DigitalEmployee
+	if err := r.Get(ctx, client.ObjectKeyFromObject(employee), &current); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.Status, employee.Status) {
+		return nil
+	}
 	return r.Status().Update(ctx, employee)
 }
 

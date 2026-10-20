@@ -28,7 +28,21 @@ const (
 // Empty disables identity delivery; an explicit audience is trusted operator
 // configuration, never an employee-supplied model authorization policy.
 func validModelTokenAudience(audience string) bool {
-	return len(audience) <= 256 && strings.IndexFunc(audience, unicode.IsSpace) == -1
+	return len(audience) <= 256 && strings.IndexFunc(audience, unicode.IsSpace) == -1 && strings.IndexFunc(audience, unicode.IsControl) == -1
+}
+
+func (r *DigitalEmployeeReconciler) validateModelIdentityMapping(employee *v1alpha1.DigitalEmployee) error {
+	if employee.Spec.ModelAccess == nil {
+		return nil
+	}
+	id, deployment := employee.Spec.ModelAccess.AgentID, employee.Spec.Governance.DeploymentID
+	valid := func(value string, max int) bool {
+		return value != "" && len(value) <= max && strings.IndexFunc(value, unicode.IsSpace) == -1 && strings.IndexFunc(value, unicode.IsControl) == -1
+	}
+	if !valid(id, 256) || !valid(deployment, 80) || r.ModelTokenAudience == "" || !validModelTokenAudience(r.ModelTokenAudience) {
+		return fmt.Errorf("explicit employee agent identity requires a valid deployment and configured model audience")
+	}
+	return nil
 }
 
 // Include the immutable CR UID, not its reusable name or its human owner. No
@@ -70,6 +84,10 @@ func (r *DigitalEmployeeReconciler) ensureModelAccount(ctx context.Context, empl
 // Identity delivery only: gateway access requires the trusted agent/employee/SA
 // UID mapping and native verifier, which this helper deliberately does not fake.
 func (r *DigitalEmployeeReconciler) prepareModelIdentity(ctx context.Context, employee *v1alpha1.DigitalEmployee, deployment *appsv1.Deployment) error {
+	employee.Status.ModelIdentity = nil
+	if err := r.validateModelIdentityMapping(employee); err != nil {
+		return err
+	}
 	if r.ModelTokenAudience == "" {
 		return nil
 	}
@@ -105,6 +123,13 @@ func (r *DigitalEmployeeReconciler) prepareModelIdentity(ctx context.Context, em
 		// Init and A2A containers do not receive this mount.
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: modelTokenVolume, MountPath: modelTokenDirectory, ReadOnly: true})
 		container.Env = append(container.Env, corev1.EnvVar{Name: "ZHIYUAN_MODEL_TOKEN_FILE", Value: modelTokenDirectory + "/token"})
+	}
+	if employee.Spec.ModelAccess != nil {
+		employee.Status.ModelIdentity = &v1alpha1.ModelIdentityStatus{
+			ObservedGeneration: employee.Generation, AgentID: employee.Spec.ModelAccess.AgentID,
+			DeploymentID: employee.Spec.Governance.DeploymentID, EmployeeUID: employee.UID,
+			ServiceAccountName: sa.Name, ServiceAccountUID: sa.UID, Audience: r.ModelTokenAudience,
+		}
 	}
 	return nil
 }
