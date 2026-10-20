@@ -27,6 +27,10 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 			payload := map[string]any{"executionId": b.ExecutionID}
 			if action == "return" {
 				payload["executionId"] = "old-execution"
+				payload["bindingId"] = b.ID
+				payload["conversationId"] = b.SourceConversationID
+				payload["resultId"] = "result"
+				payload["revisionId"] = "revision"
 			}
 			raw, _ := json.Marshal(payload)
 			if mode == "malformed-payload" {
@@ -64,7 +68,12 @@ func TestSharedRuntimeDeliveryAuthorizationAndRecovery(t *testing.T) {
 			defer pi.Close()
 			h.workspaceChatOverride = pi.URL
 			if mode != "malformed-payload" {
-				runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
+				if action == "return" {
+					h.dbmock.ExpectQuery("SELECT EXISTS\\(SELECT 1 FROM shared_space_result_bindings").WillReturnRows(sqlmock.NewRows([]string{"linked"}).AddRow(true))
+				}
+				if action != "return" {
+					runtimeExpectTaskEpoch(h, b.SpaceID, b.TaskID, b.AssignmentEpoch)
+				}
 				role := "editor"
 				if mode == "revoked" {
 					role = "viewer"

@@ -10,6 +10,7 @@ import (
 type sharedAssignment struct {
 	Token       string             `json:"token"`
 	Participant *sharedParticipant `json:"participant"`
+	Human       *sharedHuman       `json:"human"`
 	External    bool               `json:"external"`
 	Claimed     bool               `json:"claimed"`
 }
@@ -17,6 +18,7 @@ type sharedAssignmentInput struct {
 	RequestID               string `json:"requestId"`
 	ExpectedAssignmentToken string `json:"expectedAssignmentToken"`
 	ParticipantID           string `json:"participantId"`
+	MemberUserID            string `json:"memberUserId,omitempty"`
 }
 
 func (p *portal) sharedAssignmentDTO(ctx context.Context, s sharedSpace, t map[string]any, i identity) (a sharedAssignment, e error) {
@@ -32,6 +34,16 @@ func (p *portal) sharedAssignmentDTO(ctx context.Context, s sharedSpace, t map[s
 			a.External = false
 		} else if err != sql.ErrNoRows {
 			return a, err
+		}
+	}
+	if human != "" {
+		x, err := p.sharedHumanForNative(ctx, s, human)
+		if err != nil {
+			return a, err
+		}
+		if x != nil {
+			a.Human = x
+			a.External = false
 		}
 	}
 	var epoch int
@@ -64,6 +76,12 @@ func (p *portal) sharedAssignmentChange(w http.ResponseWriter, r *http.Request, 
 	return e
 }
 func (p *portal) sharedAssignmentLocked(ctx context.Context, c *sql.Conn, s sharedSpace, id string, i identity, b sharedAssignmentInput, claim bool) (any, error) {
+	if b.MemberUserID != "" {
+		if b.ParticipantID != "" {
+			return nil, sharedFail(400, "请选择一位承接者")
+		}
+		return p.sharedHumanAssignmentLocked(ctx, c, s, id, i, b, claim)
+	}
 	if b.RequestID == "" || b.ParticipantID == "" || b.ExpectedAssignmentToken == "" {
 		return nil, sharedFail(400, "领取或指派内容不完整")
 	}

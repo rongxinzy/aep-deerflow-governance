@@ -269,13 +269,17 @@ func (p *portal) sharedAttachmentContent(w http.ResponseWriter, r *http.Request,
 	if _, err = p.sharedCheckTask(r.Context(), s, task); err != nil {
 		return err
 	}
+	return p.sharedAttachmentContentInSpace(w, r, s, task, r.PathValue("attachment"))
+}
+
+func (p *portal) sharedAttachmentContentInSpace(w http.ResponseWriter, r *http.Request, s sharedSpace, task, attachment string) error {
 	attachments, err := p.sharedReadAttachments(r.Context(), task)
 	if err != nil {
 		return err
 	}
 	found := false
 	for _, a := range attachments {
-		if a.ID == r.PathValue("attachment") {
+		if a.ID == attachment {
 			found = true
 			break
 		}
@@ -283,7 +287,7 @@ func (p *portal) sharedAttachmentContent(w http.ResponseWriter, r *http.Request,
 	if !found {
 		return sharedFail(404, "附件不属于当前任务")
 	}
-	path := "/attachments/" + url.PathEscape(r.PathValue("attachment")) + "/content"
+	path := "/attachments/" + url.PathEscape(attachment) + "/content"
 	if r.URL.Query().Get("download") == "1" {
 		path += "?download=true"
 	}

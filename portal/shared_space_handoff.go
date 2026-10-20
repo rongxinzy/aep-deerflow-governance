@@ -14,6 +14,11 @@ import (
 const sharedHandoffSchema = `
 CREATE TABLE IF NOT EXISTS shared_space_task_epochs(space_id TEXT NOT NULL REFERENCES shared_spaces(id),task_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(space_id,task_id));
 CREATE TABLE IF NOT EXISTS shared_space_handoffs(space_id TEXT NOT NULL REFERENCES shared_spaces(id),task_id TEXT NOT NULL,request_id TEXT NOT NULL,actor_id TEXT NOT NULL,target_participant_id TEXT NOT NULL DEFAULT '',target_agent_id TEXT NOT NULL DEFAULT '',target_version INTEGER NOT NULL DEFAULT 0,source_agent_id TEXT NOT NULL DEFAULT '',source_participant_id TEXT NOT NULL DEFAULT '',source_name TEXT NOT NULL DEFAULT '',target_name TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL,phase TEXT NOT NULL,binding_id TEXT NOT NULL DEFAULT '',epoch INTEGER NOT NULL,payload_hash TEXT NOT NULL,stop_payload JSONB NOT NULL,next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(space_id,request_id));
+ALTER TABLE shared_space_handoffs ADD COLUMN IF NOT EXISTS source_binding_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE shared_space_handoffs ADD COLUMN IF NOT EXISTS source_user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE shared_space_handoffs ADD COLUMN IF NOT EXISTS source_native_user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE shared_space_handoffs ADD COLUMN IF NOT EXISTS target_user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE shared_space_handoffs ADD COLUMN IF NOT EXISTS target_native_user_id TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS shared_space_handoff_pending ON shared_space_handoffs(space_id,task_id) WHERE phase<>'applied';
 CREATE TABLE IF NOT EXISTS shared_space_result_bindings(result_id TEXT PRIMARY KEY REFERENCES shared_space_results(id),binding_id TEXT NOT NULL REFERENCES shared_space_runtime_bindings(id));
 INSERT INTO shared_space_result_bindings(result_id,binding_id)
@@ -23,28 +28,33 @@ ON CONFLICT(result_id) DO NOTHING;
 `
 
 type sharedHandoff struct {
-	SourceAgentID string `json:"-"`
-	FromID        string `json:"-"`
-	SourceName    string `json:"-"`
-	TargetName    string `json:"-"`
-	RequestID     string `json:"requestId"`
-	Phase         string `json:"phase"`
-	TargetID      string `json:"targetParticipantId"`
-	Reason        string `json:"reason"`
-	TaskID        string `json:"-"`
-	Actor         string `json:"-"`
-	AgentID       string `json:"-"`
-	TargetVersion int    `json:"-"`
-	BindingID     string `json:"-"`
-	Epoch         int    `json:"-"`
-	Hash          string `json:"-"`
-	Stop          []byte `json:"-"`
+	SourceBindingID    string `json:"-"`
+	SourceUserID       string `json:"-"`
+	SourceNativeUserID string `json:"-"`
+	TargetUserID       string `json:"targetMemberUserId,omitempty"`
+	TargetNativeUserID string `json:"-"`
+	SourceAgentID      string `json:"-"`
+	FromID             string `json:"-"`
+	SourceName         string `json:"-"`
+	TargetName         string `json:"-"`
+	RequestID          string `json:"requestId"`
+	Phase              string `json:"phase"`
+	TargetID           string `json:"targetParticipantId"`
+	Reason             string `json:"reason"`
+	TaskID             string `json:"-"`
+	Actor              string `json:"-"`
+	AgentID            string `json:"-"`
+	TargetVersion      int    `json:"-"`
+	BindingID          string `json:"-"`
+	Epoch              int    `json:"-"`
+	Hash               string `json:"-"`
+	Stop               []byte `json:"-"`
 }
 
-const handoffSelect = `SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=$1`
+const handoffSelect = `SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=$1`
 
 func handoffScan(q interface{ Scan(...any) error }) (h sharedHandoff, e error) {
-	e = q.Scan(&h.RequestID, &h.Phase, &h.TargetID, &h.Reason, &h.TaskID, &h.Actor, &h.AgentID, &h.TargetVersion, &h.BindingID, &h.Epoch, &h.Hash, &h.Stop, &h.FromID, &h.SourceName, &h.TargetName, &h.SourceAgentID)
+	e = q.Scan(&h.RequestID, &h.Phase, &h.TargetID, &h.Reason, &h.TaskID, &h.Actor, &h.AgentID, &h.TargetVersion, &h.BindingID, &h.Epoch, &h.Hash, &h.Stop, &h.FromID, &h.SourceName, &h.TargetName, &h.SourceAgentID, &h.SourceUserID, &h.SourceNativeUserID, &h.TargetUserID, &h.TargetNativeUserID, &h.SourceBindingID)
 	return
 }
 func (p *portal) sharedTaskEpoch(ctx context.Context, q interface {
@@ -81,6 +91,7 @@ func (p *portal) sharedHandoffTask(w http.ResponseWriter, r *http.Request, i ide
 		RequestID     string  `json:"requestId"`
 		Token         string  `json:"expectedAssignmentToken"`
 		ParticipantID *string `json:"participantId"`
+		MemberUserID  string  `json:"memberUserId,omitempty"`
 		Reason        string  `json:"reason"`
 	}
 	if e := sharedDecode(w, r, &in); e != nil {
@@ -119,10 +130,10 @@ func (p *portal) sharedHandoffTask(w http.ResponseWriter, r *http.Request, i ide
 	if a.Token != in.Token {
 		return sharedFail(409, "任务负责人版本已变化")
 	}
-	if a.External || a.Participant == nil {
+	if a.External || a.Participant == nil && a.Human == nil {
 		return sharedFail(409, "任务没有可交接的空间Agent承接者")
 	}
-	if s.Role != "owner" && (!sharedCaps(s.Role)["submit"] || !a.Participant.CanClaim) {
+	if s.Role != "owner" && (!sharedCaps(s.Role)["submit"] || (a.Participant == nil || !a.Participant.CanClaim) && (a.Human == nil || a.Human.UserID != i.UserID)) {
 		return sharedFail(403, "仅空间负责人或当前Agent管理成员可交接")
 	}
 	if task["status"] == "in_review" || task["status"] == "done" || task["status"] == "cancelled" {
@@ -143,9 +154,31 @@ func (p *portal) sharedHandoffTask(w http.ResponseWriter, r *http.Request, i ide
 	if e = runtimeCommandGate(r.Context(), c, s.ID, r.PathValue("task")); e != nil {
 		return e
 	}
-	h := sharedHandoff{RequestID: in.RequestID, Phase: "stop_pending", TaskID: r.PathValue("task"), Actor: i.UserID, Reason: in.Reason, Hash: hash, FromID: a.Participant.ID, SourceName: a.Participant.Name, SourceAgentID: a.Participant.AgentID}
+	h := sharedHandoff{RequestID: in.RequestID, Phase: "stop_pending", TaskID: r.PathValue("task"), Actor: i.UserID, Reason: in.Reason, Hash: hash}
+	if a.Participant != nil {
+		h.FromID, h.SourceName, h.SourceAgentID = a.Participant.ID, a.Participant.Name, a.Participant.AgentID
+	}
+	if a.Human != nil {
+		h.SourceUserID, h.SourceNativeUserID, h.SourceName = a.Human.UserID, a.Human.NativeUserID, a.Human.DisplayName
+	}
+	if in.MemberUserID != "" {
+		if in.ParticipantID != nil {
+			return sharedFail(400, "请选择一位承接者")
+		}
+		if in.MemberUserID == h.SourceUserID {
+			return sharedFail(409, "请选择其他承接者或交还任务")
+		}
+		human, err := p.sharedHumanForUser(r.Context(), s, in.MemberUserID)
+		if err != nil {
+			return err
+		}
+		if human == nil {
+			return sharedFail(409, "请先关联当前企业的协作人员身份")
+		}
+		h.TargetUserID, h.TargetNativeUserID, h.TargetName = human.UserID, human.NativeUserID, human.DisplayName
+	}
 	if in.ParticipantID != nil {
-		if *in.ParticipantID == a.Participant.ID {
+		if a.Participant != nil && *in.ParticipantID == a.Participant.ID {
 			return sharedFail(409, "请选择其他承接者或交还任务")
 		}
 		x, e := participantScan(c.QueryRowContext(r.Context(), participantSelect+` AND id=$2`, s.ID, *in.ParticipantID))
@@ -167,6 +200,15 @@ func (p *portal) sharedHandoffTask(w http.ResponseWriter, r *http.Request, i ide
 		return e
 	}
 	h.BindingID = bindingID
+	if h.TargetUserID != "" {
+		h.SourceBindingID = bindingID
+		if h.SourceUserID != "" {
+			h.SourceBindingID, e = sharedHumanReturnSource(r.Context(), c, s.ID, h.TaskID, h.SourceUserID)
+			if e != nil {
+				return e
+			}
+		}
+	}
 	stop := map[string]any{}
 	if bindingID != "" {
 		b, e := runtimeLoad(r.Context(), c, bindingID)
@@ -198,7 +240,7 @@ func (p *portal) sharedHandoffTask(w http.ResponseWriter, r *http.Request, i ide
 	}
 	raw, _ := json.Marshal(stop)
 	h.Stop = raw
-	if _, e = tx.ExecContext(r.Context(), `INSERT INTO shared_space_handoffs(space_id,task_id,request_id,actor_id,target_participant_id,target_agent_id,target_version,reason,phase,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, s.ID, h.TaskID, h.RequestID, h.Actor, h.TargetID, h.AgentID, h.TargetVersion, h.Reason, h.Phase, h.BindingID, h.Epoch, h.Hash, string(raw), h.FromID, h.SourceName, h.TargetName, h.SourceAgentID); e != nil {
+	if _, e = tx.ExecContext(r.Context(), `INSERT INTO shared_space_handoffs(space_id,task_id,request_id,actor_id,target_participant_id,target_agent_id,target_version,reason,phase,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`, s.ID, h.TaskID, h.RequestID, h.Actor, h.TargetID, h.AgentID, h.TargetVersion, h.Reason, h.Phase, h.BindingID, h.Epoch, h.Hash, string(raw), h.FromID, h.SourceName, h.TargetName, h.SourceAgentID, h.SourceUserID, h.SourceNativeUserID, h.TargetUserID, h.TargetNativeUserID, h.SourceBindingID); e != nil {
 		return e
 	}
 	if e = tx.Commit(); e != nil {
@@ -291,7 +333,7 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 		if e != nil {
 			return
 		}
-		if actorSpace.Role != "owner" {
+		if actorSpace.Role != "owner" && h.SourceUserID != h.Actor {
 			x, e := participantScan(c.QueryRowContext(ctx, participantSelect+` AND id=$2`, s.ID, h.FromID))
 			if e != nil {
 				return
@@ -302,6 +344,12 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 			}
 		}
 
+		if h.TargetUserID != "" {
+			human, e := p.sharedHumanForUser(ctx, s, h.TargetUserID)
+			if e != nil || human == nil || human.NativeUserID != h.TargetNativeUserID {
+				return
+			}
+		}
 		if h.TargetID != "" {
 			x, e := participantScan(c.QueryRowContext(ctx, participantSelect+` AND id=$2`, s.ID, h.TargetID))
 			if e != nil {
@@ -316,7 +364,9 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 		if e != nil {
 			return
 		}
-		if task["assigneeAgentId"] != h.SourceAgentID || task["assigneeUserId"] != nil && task["assigneeUserId"] != "" {
+		agent, _ := task["assigneeAgentId"].(string)
+		human, _ := task["assigneeUserId"].(string)
+		if agent != h.SourceAgentID || human != h.SourceNativeUserID {
 			return
 		}
 		for _, k := range []string{"executionRunId", "checkoutRunId"} {
@@ -335,9 +385,15 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 		if h.AgentID != "" {
 			target = h.AgentID
 		}
-		_ = p.sharedPC(ctx, "PATCH", "/issues/"+url.PathEscape(h.TaskID), map[string]any{"assigneeAgentId": target, "assigneeUserId": nil, "status": "todo"}, &ignored)
+		_ = p.sharedPC(ctx, "PATCH", "/issues/"+url.PathEscape(h.TaskID), map[string]any{"assigneeAgentId": target, "assigneeUserId": sharedOptionalString(h.TargetNativeUserID), "status": "todo"}, &ignored)
 	}
 	if h.Phase == "patch_unknown" {
+		if h.TargetUserID != "" {
+			human, e := p.sharedHumanForUser(ctx, s, h.TargetUserID)
+			if e != nil || human == nil || human.NativeUserID != h.TargetNativeUserID {
+				return
+			}
+		}
 		if h.TargetID != "" {
 			x, e := participantScan(c.QueryRowContext(ctx, participantSelect+` AND id=$2`, s.ID, h.TargetID))
 			if e != nil {
@@ -359,7 +415,7 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 		}
 		agent, _ := task["assigneeAgentId"].(string)
 		human, _ := task["assigneeUserId"].(string)
-		if agent != h.AgentID || human != "" || task["status"] != "todo" {
+		if agent != h.AgentID || human != h.TargetNativeUserID || task["status"] != "todo" {
 			return
 		}
 		tx, e := c.BeginTx(ctx, nil)
@@ -419,9 +475,22 @@ func (h sharedHandoff) MarshalJSON() ([]byte, error) {
 	if h.FromID != "" {
 		from = map[string]any{"id": h.FromID, "name": h.SourceName}
 	}
+	if h.TargetUserID != "" {
+		to = map[string]any{"kind": "human", "userId": h.TargetUserID, "name": h.TargetName}
+	}
+	if h.SourceUserID != "" {
+		from = map[string]any{"kind": "human", "userId": h.SourceUserID, "name": h.SourceName}
+	}
 	status := "unknown"
 	if h.Phase == "applied" {
 		status = "applied"
 	}
-	return json.Marshal(map[string]any{"requestId": h.RequestID, "phase": h.publicPhase(), "status": status, "targetParticipantId": target, "reason": h.Reason, "from": from, "to": to})
+	return json.Marshal(map[string]any{"requestId": h.RequestID, "phase": h.publicPhase(), "status": status, "targetParticipantId": target, "targetMemberUserId": h.TargetUserID, "reason": h.Reason, "from": from, "to": to})
+}
+
+func sharedOptionalString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

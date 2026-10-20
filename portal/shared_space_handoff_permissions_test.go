@@ -26,7 +26,7 @@ func handoffExpectMember(mock sqlmock.Sqlmock, role string) {
 }
 
 func handoffExpectReplayMiss(mock sqlmock.Sqlmock, request string) {
-	mock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
+	mock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
 		WithArgs("space", request).WillReturnRows(sqlmock.NewRows([]string{"request_id"}))
 }
 
