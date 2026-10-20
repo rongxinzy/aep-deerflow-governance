@@ -24,7 +24,7 @@ images:
   operator: { repository: rongxinzy/de-operator, tag: "0.23.0" }
   portal: { repository: rongxinzy/de-portal, tag: "0.26.0" }
   chatUI: { repository: rongxinzy/deerflow-chat-ui, tag: "0.1.10" }
-  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.15.0" }
+  adminConsole: { repository: rongxinzy/de-admin-console, tag: "0.16.0" }
   # runtime images are big and version rarely; the lineage lives on ghcr
   runtime: { repository: rongxinzy/deerflow-gov, tag: "v30" }
   openviking: { repository: "harbor.zhiyuan.local:30443/zhiyuan/openviking", tag: "0.4.21" }
