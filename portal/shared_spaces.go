@@ -177,6 +177,9 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/task-commands/{request}", wrap(p.sharedTaskCommand))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}", wrap(p.sharedTaskDetail))
 	mux.HandleFunc("PATCH /api/v1/shared-spaces/{space}/tasks/{task}/metadata", wrap(p.sharedSetMetadata))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/labels", wrap(p.sharedLabels))
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/labels", wrap(p.sharedCreateLabel))
+	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/tasks/{task}/labels", wrap(p.sharedSetTaskLabels))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedTaskDependencies))
 	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/tasks/{task}/dependencies", wrap(p.sharedSetDependencies))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedComments))
@@ -522,6 +525,23 @@ func (p *portal) sharedTasks(w http.ResponseWriter, r *http.Request, i identity)
 		offset = n
 	}
 	query := url.Values{"projectId": {s.ProjectID}, "includeBlockedBy": {"true"}, "limit": {strconv.Itoa(limit + 1)}, "offset": {strconv.Itoa(offset)}}
+	if labelID := r.URL.Query().Get("labelId"); labelID != "" {
+		labels, e := p.sharedReadLabels(r.Context(), s)
+		if e != nil {
+			return e
+		}
+		found := false
+		for _, label := range labels {
+			if label.ID == labelID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return sharedFail(400, "请选择本企业目录中的标签")
+		}
+		query.Set("labelId", labelID)
+	}
 	if parent := r.URL.Query().Get("parentId"); parent != "" {
 		if _, err = p.sharedCheckTask(r.Context(), s, parent); err != nil {
 			return err
@@ -718,6 +738,12 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	}
 	capabilities["editDependencies"] = editReason == "" && !blocked && handoff == nil
 	capabilities["editDependenciesUnavailableReason"] = editReason
+	labelsReason := sharedLabelsEditReason(s.Role, task)
+	if labelsReason == "" && (blocked || handoff != nil) {
+		labelsReason = "任务存在待核验操作"
+	}
+	capabilities["editLabels"] = labelsReason == ""
+	capabilities["editLabelsUnavailableReason"] = labelsReason
 	metadataReason := strings.ReplaceAll(editReason, "依赖", "基本信息")
 	if metadataReason == "" && (blocked || handoff != nil) {
 		metadataReason = "任务存在待核验操作"
@@ -726,7 +752,7 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	capabilities["editMetadataUnavailableReason"] = metadataReason
 	dto := sharedTaskDTO(task)
 	dto["dependencyState"] = sharedDependencyState(deps)
-	writeJSON(w, 200, map[string]any{"task": dto, "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history, "dependencies": deps, "metadataToken": sharedMetadataToken(task)})
+	writeJSON(w, 200, map[string]any{"task": dto, "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history, "dependencies": deps, "metadataToken": sharedMetadataToken(task), "labelsToken": sharedLabelsToken(task)})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {
@@ -1075,6 +1101,7 @@ func sharedTaskDTO(task map[string]any) map[string]any {
 			out[key] = value
 		}
 	}
+	out["labels"], out["labelIds"] = sharedTaskLabelValues(task)
 	return out
 }
 func sharedTaskListDTO(tasks []map[string]any) []map[string]any {

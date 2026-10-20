@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +39,12 @@ type dependencyPGFixture struct {
 	dependencyPatches int
 	metadataPatches   int
 	loseMetadata      bool
+	labels            []sharedCompanyLabel
+	labelPosts        int
+	labelPatches      int
+	loseLabelPost     bool
+	loseLabelPatch    bool
+	lastLabelQuery    string
 }
 
 func newDependencyPGFixture(t *testing.T) *dependencyPGFixture {
@@ -85,6 +93,18 @@ func (f *dependencyPGFixture) task(id string, relations bool) map[string]any {
 	for k, v := range f.tasks[id] {
 		out[k] = v
 	}
+	if f.labels != nil {
+		_, ids := sharedTaskLabelValues(out)
+		labels := []sharedLabel{}
+		for _, label := range f.labels {
+			for _, id := range ids {
+				if label.ID == id {
+					labels = append(labels, label.sharedLabel)
+				}
+			}
+		}
+		out["labels"] = labels
+	}
 	if relations {
 		refs := []any{}
 		for _, source := range f.ids[id] {
@@ -99,6 +119,24 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if r.URL.Path == "/companies/company/labels" {
+		if r.Method == "POST" {
+			var in sharedLabelCreation
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&in))
+			f.labelPosts++
+			label := sharedCompanyLabel{sharedLabel: sharedLabel{ID: fmt.Sprintf("label-%d", f.labelPosts), Name: in.Name, Color: in.Color}, CompanyID: "company"}
+			f.labels = append(f.labels, label)
+			if f.loseLabelPost {
+				f.loseLabelPost = false
+				w.WriteHeader(503)
+				return
+			}
+			writeJSON(w, 201, label)
+			return
+		}
+		writeJSON(w, 200, f.labels)
+		return
+	}
 	if r.URL.Path == "/companies/company/issues" {
 		if r.Method == "POST" {
 			var body map[string]any
@@ -112,10 +150,41 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 		}
 		require.Equal(t, "true", r.URL.Query().Get("includeBlockedBy"))
 		out := []map[string]any{}
-		for id, task := range f.tasks {
-			if task["projectId"] == r.URL.Query().Get("projectId") {
-				out = append(out, f.task(id, r.URL.Query().Get("includeBlockedBy") == "true"))
+		keys := []string{}
+		for id := range f.tasks {
+			keys = append(keys, id)
+		}
+		sort.Strings(keys)
+		for _, id := range keys {
+			task := f.tasks[id]
+			if task["projectId"] != r.URL.Query().Get("projectId") {
+				continue
 			}
+			if q := r.URL.Query().Get("q"); q != "" && !strings.Contains(fmt.Sprint(task["title"]), q) {
+				continue
+			}
+			if labelID := r.URL.Query().Get("labelId"); labelID != "" {
+				f.lastLabelQuery = r.URL.RawQuery
+				_, ids := sharedTaskLabelValues(task)
+				found := false
+				for _, v := range ids {
+					if v == labelID {
+						found = true
+					}
+				}
+				if !found {
+					continue
+				}
+			}
+			out = append(out, f.task(id, true))
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset > len(out) {
+			offset = len(out)
+		}
+		out = out[offset:]
+		if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 && len(out) > limit {
+			out = out[:limit]
 		}
 		writeJSON(w, 200, out)
 		return
@@ -148,6 +217,10 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 					return
 				}
 			}
+			if _, ok := body["labelIds"]; ok {
+				require.Len(t, body, 1)
+				f.labelPatches++
+			}
 			if _, ok := body["title"]; ok {
 				require.Len(t, body, 3)
 				f.metadataPatches++
@@ -156,6 +229,11 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 				f.tasks[id][k] = v
 			}
 			f.tasks[id]["updatedAt"] = fmt.Sprint(time.Now().UnixNano())
+			if f.loseLabelPatch {
+				f.loseLabelPatch = false
+				w.WriteHeader(503)
+				return
+			}
 			if f.loseMetadata {
 				f.loseMetadata = false
 				w.WriteHeader(503)
