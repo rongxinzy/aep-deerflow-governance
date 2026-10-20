@@ -91,6 +91,12 @@ func main() {
 		},
 		DefaultIdleSeconds:      int32(envIntOrDefault("HIBERNATION_IDLE_TIMEOUT_SECONDS", 1800)),
 		ChannelGatewayURL:       envOrDefault("CHANNEL_GATEWAY_URL", ""),
+		ModelTools: controller.ModelToolsConfig{
+			GatewayURL: envOrDefault("MODEL_TOOLS_GATEWAY_URL", ""),
+			Image:      envOrDefault("MODEL_TOOLS_IMAGE", ""),
+			Speech:     envOrDefault("MODEL_TOOLS_SPEECH", ""),
+			Video:      envOrDefault("MODEL_TOOLS_VIDEO", ""),
+		},
 		ConversationAdminDBURL:  envOrDefault("CONVERSATION_ADMIN_DB_URL", ""),
 		ConversationInitImage:   envOrDefault("CONVERSATION_INIT_IMAGE", "postgres:17.6-alpine"),
 		RuntimeDefaultResources: runtimeResources,

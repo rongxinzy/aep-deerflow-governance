@@ -577,6 +577,28 @@ var _ = Describe("DigitalEmployee hibernation P2", func() {
 		Expect(env["ASSET_SUBJECT_ID"]).To(Equal("wecom-helper"))
 	})
 
+	It("renders model tool env when the platform switchboard is configured", func(ctx context.Context) {
+		fx.modelTools = &ModelToolsConfig{
+			GatewayURL: "http://aep-gateway-authorizer.aep-system.svc.cluster.local:8090",
+			Image:      "flux-2-klein-4b",
+			Speech:     "cosyvoice3-tts",
+		}
+		defer func() { fx.modelTools = nil }()
+		_, err := reconcile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		deployment := &appsv1.Deployment{}
+		Expect(fx.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: deploymentName(employee)}, deployment)).To(Succeed())
+		env := map[string]string{}
+		for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		Expect(env["MODEL_TOOLS_ENABLED"]).To(Equal("1"))
+		Expect(env["MODEL_TOOLS_GATEWAY_URL"]).To(ContainSubstring("aep-gateway-authorizer"))
+		Expect(env["MODEL_TOOLS_IMAGE"]).To(Equal("flux-2-klein-4b"))
+		Expect(env["MODEL_TOOLS_SPEECH"]).To(Equal("cosyvoice3-tts"))
+		Expect(env).NotTo(HaveKey("MODEL_TOOLS_VIDEO"), "unconfigured capability must register no env")
+	})
+
 	It("stays tool-less when assets are explicitly disabled", func(ctx context.Context) {
 		employee.Spec.Assets = &v1alpha1.AssetsSpec{Enabled: false}
 		Expect(fx.client.Update(ctx, employee)).To(Succeed())

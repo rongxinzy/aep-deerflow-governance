@@ -39,6 +39,14 @@ const (
 )
 
 // DigitalEmployeeReconciler reconciles a DigitalEmployee object.
+// ModelToolsConfig is the platform-wide multimodal tool switchboard.
+type ModelToolsConfig struct {
+	GatewayURL string
+	Image      string
+	Speech     string
+	Video      string
+}
+
 type DigitalEmployeeReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -70,6 +78,11 @@ type DigitalEmployeeReconciler struct {
 	// RuntimeSecurityContext hardens every runtime container (and the
 	// db-init init container); nil keeps the legacy unhardened shape.
 	RuntimeSecurityContext *corev1.SecurityContext
+	// ModelTools carries the platform-wide multimodal tool configuration
+	// (gateway-authorizer URL plus the catalog model id per capability).
+	// When GatewayURL is set every runtime gets the model tools env; the
+	// per-call authorization stays per-user via M2M-issued model tokens.
+	ModelTools ModelToolsConfig
 	// ModelTokenAudience opts into per-employee Kubernetes identity delivery.
 	// Empty preserves the existing runtime/model authentication path.
 	ModelTokenAudience string

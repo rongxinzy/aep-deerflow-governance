@@ -43,6 +43,20 @@ spec:
             {{- if .Values.channelGateway.enabled }}
             - {name: CHANNEL_GATEWAY_URL, value: "http://de-channel-gateway.{{ include "zhiyuan.ns" . }}.svc.cluster.local:8899"}
             {{- end }}
+            {{- if .Values.modelTools.enabled }}
+            # 多模态模型工具开关板：网关地址 + 各能力的目录模型 id；
+            # 未配置的能力不注册工具。逐调用授权走 M2M model token。
+            - {name: MODEL_TOOLS_GATEWAY_URL, value: {{ .Values.modelTools.gatewayURL | quote }}}
+            {{- with .Values.modelTools.image }}
+            - {name: MODEL_TOOLS_IMAGE, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.modelTools.speech }}
+            - {name: MODEL_TOOLS_SPEECH, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.modelTools.video }}
+            - {name: MODEL_TOOLS_VIDEO, value: {{ . | quote }}}
+            {{- end }}
+            {{- end }}
             {{- if .Values.workspaceAgent.microvmNodes }}
             - {name: WORKSPACE_MICROVM_NODES, value: {{ join "," .Values.workspaceAgent.microvmNodes | quote }}}
             - {name: WORKSPACE_MICROVM_SUBNET, value: {{ .Values.workspaceAgent.microvmSubnet | quote }}}
