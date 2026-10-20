@@ -107,3 +107,27 @@ func TestSharedHumanMappingCreatesOnceAndRejectsRebinding(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedHumanCandidatesHideNativeDirectoryFromCollaborators(t *testing.T) {
+	h := newApplyHarness(t)
+	humanTestDirectory(t, h, `{"users":[{"principalId":"native-1","status":"active","user":{"id":"native-1","name":"任务人员","email":"fixture@example.test"}}]}`)
+	h.dbmock.ExpectQuery("SELECT s.id,s.deployment_id").WithArgs("space", "deployment-acme", "u-x").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment", "company", "project", "name", "role"}).AddRow("space", "deployment-acme", "company", "project", "空间", "editor"))
+	h.dbmock.ExpectQuery("SELECT user_id FROM shared_space_members").WithArgs("space").WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow("u-x"))
+	humanRole(h.dbmock, "u-x", "editor")
+	humanMappingRow(h.dbmock, "u-x", "native-1")
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("space", "space")
+	w := httptest.NewRecorder()
+	require.NoError(t, h.sharedHumanAssignees(w, r, identity{UserID: "u-x", DeploymentID: "deployment-acme"}))
+	var response struct {
+		Members      []sharedHumanCandidate `json:"members"`
+		NativeUsers  []sharedNativeHuman    `json:"nativeUsers"`
+		Capabilities map[string]bool        `json:"capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Empty(t, response.NativeUsers)
+	require.False(t, response.Capabilities["manageHumanMappings"])
+	require.True(t, response.Members[0].CanClaim)
+	require.True(t, response.Members[0].CanAssign)
+	require.NoError(t, h.dbmock.ExpectationsWereMet())
+}
