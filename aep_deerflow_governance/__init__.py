@@ -29,6 +29,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage, ToolMessage
 
 from .asset_tools import ASSET_REQUESTER_ARG, SSH_EXEC_TOOL
+from .model_tools import MODEL_REQUESTER_ARG, MODEL_TOOL_NAMES
 
 _GOVERNANCE_TAG = "aep_governance_v1"
 
@@ -139,6 +140,15 @@ class _AepClient:
                     continue
                 raise
         raise RuntimeError("unreachable")
+
+    def issue_model_token(self, user_id: str) -> dict[str, Any]:
+        """M2M data-plane token for a resolved user (AEP #361).
+
+        Scopes are derived server-side from the target user's assignments;
+        the returned token never exceeds what the user could obtain by
+        logging in themselves.
+        """
+        return self._post("/aep/v1/admin/model-gateway/tokens", {"userId": user_id})
 
     def data_scope(self, user_id: str) -> dict[str, Any]:
         path = "/aep/v1/admin/data-scope/context?userId=" + urllib.parse.quote(user_id)
@@ -316,6 +326,14 @@ class AepGovernanceMiddleware(AgentMiddleware):
         if asset_tools:
             self.tools = list(self.tools) + list(asset_tools)
             print(f"[aep-governance] asset tools registered: {sorted(t.name for t in asset_tools)}", flush=True)
+        # Governed multimodal model tools: registered iff the operator
+        # rendered MODEL_TOOLS_ENABLED + MODEL_TOOLS_GATEWAY_URL. Calls carry
+        # a per-requester model token (M2M issuance) — never a shared key.
+        from .model_tools import build_model_tools
+        model_tools = build_model_tools(client=self.client)
+        if model_tools:
+            self.tools = list(self.tools) + list(model_tools)
+            print(f"[aep-governance] model tools registered: {sorted(t.name for t in model_tools)}", flush=True)
 
     # ------------------------------------------------------------ identity
     def resolve_aep_user(self, runtime: Any = None) -> str | None:
@@ -635,6 +653,34 @@ class AepGovernanceMiddleware(AgentMiddleware):
         cloned.tool_call = normalized
         return cloned
 
+    def _model_requester_request(self, request: Any) -> Any | ToolMessage:
+        """Inject the trusted requester into multimodal model tool calls.
+
+        Same trust model as the asset tools: the requester comes from the
+        run context, a model-supplied ``model_requester_user_id`` is
+        overwritten, and an unresolved requester fails closed — no gateway
+        call without an on-behalf-of identity.
+        """
+        call = getattr(request, "tool_call", None) or {}
+        runtime = getattr(request, "runtime", None)
+        requester = self.resolve_aep_user(runtime)
+        if not requester:
+            return ToolMessage(content="DENIED: model tools require a requester bound to an AEP account on this conversation.",
+                               tool_call_id=str(_tool_field(call, "id", "") or ""))
+        args = dict(_tool_field(call, "args", None) or {})
+        args[MODEL_REQUESTER_ARG] = str(requester)
+        normalized = dict(call) if isinstance(call, dict) else {
+            "name": _tool_field(call, "name", ""),
+            "id": _tool_field(call, "id", ""),
+        }
+        normalized["args"] = args
+        override = getattr(request, "override", None)
+        if callable(override):
+            return override(tool_call=normalized)
+        cloned = copy.copy(request)
+        cloned.tool_call = normalized
+        return cloned
+
     def _asset_context_request(self, request: Any) -> Any | ToolMessage:
         """Inject the trusted requester into asset tool calls.
 
@@ -795,6 +841,11 @@ class AepGovernanceMiddleware(AgentMiddleware):
             if isinstance(enriched, ToolMessage):
                 return enriched
             request = enriched
+        if name in MODEL_TOOL_NAMES:
+            enriched = self._model_requester_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
         return handler(request)
 
     async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> ToolMessage:
@@ -809,6 +860,11 @@ class AepGovernanceMiddleware(AgentMiddleware):
             request = enriched
         if name == SSH_EXEC_TOOL:
             enriched = self._asset_context_request(request)
+            if isinstance(enriched, ToolMessage):
+                return enriched
+            request = enriched
+        if name in MODEL_TOOL_NAMES:
+            enriched = self._model_requester_request(request)
             if isinstance(enriched, ToolMessage):
                 return enriched
             request = enriched

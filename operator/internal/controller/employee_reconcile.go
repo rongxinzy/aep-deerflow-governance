@@ -565,6 +565,23 @@ func (r *DigitalEmployeeReconciler) renderDeployment(employee *v1alpha1.DigitalE
 			corev1.EnvVar{Name: "ASSET_SUBJECT_ID", Value: employee.Name},
 		)
 	}
+	// Governed multimodal model tools: platform-wide switchboard from the
+	// operator env (chart values). Each capability registers only when its
+	// catalog model id is set; per-call authorization is per-user (M2M
+	// model token issued against the resolved requester).
+	if r.ModelTools.GatewayURL != "" {
+		environment = append(environment, corev1.EnvVar{Name: "MODEL_TOOLS_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "MODEL_TOOLS_GATEWAY_URL", Value: r.ModelTools.GatewayURL})
+		if r.ModelTools.Image != "" {
+			environment = append(environment, corev1.EnvVar{Name: "MODEL_TOOLS_IMAGE", Value: r.ModelTools.Image})
+		}
+		if r.ModelTools.Speech != "" {
+			environment = append(environment, corev1.EnvVar{Name: "MODEL_TOOLS_SPEECH", Value: r.ModelTools.Speech})
+		}
+		if r.ModelTools.Video != "" {
+			environment = append(environment, corev1.EnvVar{Name: "MODEL_TOOLS_VIDEO", Value: r.ModelTools.Video})
+		}
+	}
 	var secretRefs []corev1.LocalObjectReference
 	if spec.Credentials.Name != "" {
 		secretRefs = append(secretRefs, corev1.LocalObjectReference{Name: spec.Credentials.Name})

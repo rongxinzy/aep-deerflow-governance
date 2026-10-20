@@ -316,6 +316,7 @@ type fixture struct {
 	runtimeURL   string // overrides the runtime auth base (dead URL specs)
 	wakeDBURL    string // non-empty enables the hibernation wake-db source
 	gatewayURL   string // non-empty enables channel-gateway mode
+	modelTools   *ModelToolsConfig
 	convAdminURL string // non-empty enables per-employee conversation databases
 }
 
@@ -347,6 +348,9 @@ func (f *fixture) reconciler() *DigitalEmployeeReconciler {
 		r.WakeDBFn = func(context.Context, string) (string, error) { return f.wakeDBURL, nil }
 	}
 	r.ChannelGatewayURL = f.gatewayURL
+	if f.modelTools != nil {
+		r.ModelTools = *f.modelTools
+	}
 	r.ConversationAdminDBURL = f.convAdminURL
 	r.ConversationInitImage = "reg/postgres:17-alpine"
 	r.DefaultIdleSeconds = 1800

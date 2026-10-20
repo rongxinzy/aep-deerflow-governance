@@ -145,6 +145,15 @@ weknora:
 # each employee's caller credential (caller_credential: token/expires_at/
 # operations) that the gateway requires on /inbox, /ack and /send — see
 # channel-gateway/PROTOCOL.md.
+# 多模态模型工具（生图/语音合成/生视频）：operator 注入到每个数字员工
+# 运行时；逐调用授权 = 解析出的用户 + M2M model token（AEP #361）。
+modelTools:
+  enabled: false
+  gatewayURL: "http://aep-gateway-authorizer.aep-system.svc.cluster.local:8090"
+  image: ""
+  speech: ""
+  video: ""
+
 channelGateway:
   enabled: false
   image: { repository: "harbor.zhiyuan.local:30443/zhiyuan/de-channel-gateway", tag: "0.1.0" }
