@@ -95,6 +95,7 @@ func main() {
 		ConversationInitImage:   envOrDefault("CONVERSATION_INIT_IMAGE", "postgres:17.6-alpine"),
 		RuntimeDefaultResources: runtimeResources,
 		RuntimeSecurityContext:  runtimeSecurityContext,
+		ModelTokenAudience:      os.Getenv("MODEL_ACCESS_TOKEN_AUDIENCE"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "controller setup failed")

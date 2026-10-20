@@ -54,6 +54,28 @@ class HardeningChartTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return objects(result)
 
+    def test_model_workload_identity_is_opt_in(self):
+        for audience in ("", "urn:zhiyuan:model-gateway:test"):
+            with self.subTest(audience=audience):
+                docs = self.ok("modelWorkloadIdentity.audience=" + audience)
+                operator = find(docs, "Deployment", "de-operator")[0]
+                env = operator["spec"]["template"]["spec"]["containers"][0]["env"]
+                self.assertEqual(next(e["value"] for e in env if e["name"] == "MODEL_ACCESS_TOKEN_AUDIENCE"), audience)
+
+    def test_operator_identity_permissions_do_not_issue_tokens_or_bind_roles(self):
+        manifest = CHART.parents[1] / "operator/deploy/operator.yaml"
+        generated = CHART.parents[1] / "operator/config/rbac/role.yaml"
+        standalone = list(yaml.safe_load_all(manifest.read_text(encoding="utf-8")))
+        generated_docs = list(yaml.safe_load_all(generated.read_text(encoding="utf-8")))
+        for docs in (standalone, generated_docs, self.ok()):
+            roles = find(docs, "Role", "de-operator") or find(docs, "ClusterRole", "manager-role")
+            rules = roles[0]["rules"]
+            sa = [r for r in rules if "serviceaccounts" in r.get("resources", [])]
+            self.assertEqual(len(sa), 1)
+            self.assertEqual(set(sa[0]["verbs"]), {"get", "list", "watch", "create", "update", "patch"})
+            self.assertFalse(any("serviceaccounts/token" in r.get("resources", []) for r in rules))
+            self.assertFalse(any("rolebindings" in r.get("resources", []) for r in rules))
+
     def test_portal_can_read_runtime_deployments_without_mutating_them(self):
         standalone = CHART.parents[1] / "portal/deploy/portal.yaml"
         with standalone.open(encoding="utf-8") as source:

@@ -1,6 +1,11 @@
 # Defaults; per-environment overrides live in values-<env>.local.yaml files
 # that are gitignored (they carry credentials).
 
+# Identity delivery only; enable after the native model gateway and trusted
+# agent/employee/ServiceAccount mapping are ready. Empty preserves legacy mode.
+modelWorkloadIdentity:
+  audience: ""
+
 global:
   # Image registry base for the zhiyuan-built images. ghcr.io is the
   # version source (CI publishes there); the cicd cluster pulls from its

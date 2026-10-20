@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -69,6 +70,9 @@ type DigitalEmployeeReconciler struct {
 	// RuntimeSecurityContext hardens every runtime container (and the
 	// db-init init container); nil keeps the legacy unhardened shape.
 	RuntimeSecurityContext *corev1.SecurityContext
+	// ModelTokenAudience opts into per-employee Kubernetes identity delivery.
+	// Empty preserves the existing runtime/model authentication path.
+	ModelTokenAudience string
 }
 
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees,verbs=*
@@ -76,6 +80,7 @@ type DigitalEmployeeReconciler struct {
 // +kubebuilder:rbac:groups=digitalemployee.zhiyuan.io,resources=digitalemployees/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=*
 // +kubebuilder:rbac:groups=core,resources=configmaps;secrets;services;pods;events;persistentvolumeclaims,verbs=*
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects;triggerauthentications,verbs=*
 
 // Reconcile is part of the main kubernetes reconciliation loop.
@@ -158,12 +163,16 @@ func (r *DigitalEmployeeReconciler) Reconcile(ctx context.Context, request ctrl.
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *DigitalEmployeeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if !validModelTokenAudience(r.ModelTokenAudience) {
+		return fmt.Errorf("invalid model token audience")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DigitalEmployee{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		// Policy ConfigMap edits re-render every ScaledObject (idle
 		// windows, keep-warm pool) without waiting for a CR touch.
