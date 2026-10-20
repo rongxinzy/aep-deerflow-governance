@@ -166,6 +166,9 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/shared-space-invitations", wrap(p.sharedInvitations))
 	mux.HandleFunc("POST /api/v1/shared-space-invitations/{participant}/{invitationAction}", wrap(p.sharedAcceptInvitation))
 	mux.HandleFunc("GET /api/v1/shared-spaces", wrap(p.sharedList))
+	mux.HandleFunc("POST /api/v1/shared-spaces/create", wrap(p.sharedCreateSpace))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/project", wrap(p.sharedProject))
+	mux.HandleFunc("PATCH /api/v1/shared-spaces/{space}/project", wrap(p.sharedUpdateProject))
 	mux.HandleFunc("POST /api/v1/shared-spaces", wrap(p.sharedBind))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}", wrap(p.sharedDetail))
 	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/members/{user}", wrap(p.sharedSetMember))
@@ -173,6 +176,12 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks", wrap(p.sharedCreateTask))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/task-commands/{request}", wrap(p.sharedTaskCommand))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}", wrap(p.sharedTaskDetail))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedComments))
+	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/comments", wrap(p.sharedAddComment))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/documents", wrap(p.sharedDocuments))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/documents/{key}", wrap(p.sharedDocuments))
+	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/tasks/{task}/documents/{key}", wrap(p.sharedPutDocument))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/documents/{key}/revisions", wrap(p.sharedDocuments))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/tasks/{task}/results/{result}", wrap(p.sharedResultBody))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/results", wrap(p.sharedSubmit))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/results/{result}/review", wrap(p.sharedReviewResult))
@@ -202,6 +211,9 @@ func (p *portal) sharedPC(ctx context.Context, method, path string, body any, ou
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if res.StatusCode == http.StatusConflict {
+			return sharedFail(409, "任务服务内容已变化，请刷新后重试")
+		}
 		return sharedFail(502, "任务服务未确认操作")
 	}
 	if out == nil {
@@ -272,7 +284,11 @@ func (p *portal) sharedList(w http.ResponseWriter, r *http.Request, i identity) 
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	writeJSON(w, 200, map[string]any{"spaces": out})
+	reason := ""
+	if p.cfg.paperclipCompanyID == "" {
+		reason = "当前企业尚未配置协作空间创建"
+	}
+	writeJSON(w, 200, map[string]any{"spaces": out, "capabilities": map[string]any{"createSpace": reason == "", "createSpaceReason": reason}})
 	return nil
 }
 
@@ -386,7 +402,9 @@ func (p *portal) sharedDetail(w http.ResponseWriter, r *http.Request, i identity
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	writeJSON(w, 200, map[string]any{"space": s, "members": members, "capabilities": sharedCaps(s.Role)})
+	caps := sharedCaps(s.Role)
+	caps["editProject"] = s.Role == "owner"
+	writeJSON(w, 200, map[string]any{"space": s, "members": members, "capabilities": caps})
 	return nil
 }
 func (p *portal) sharedSetMember(w http.ResponseWriter, r *http.Request, i identity) error {
@@ -498,8 +516,20 @@ func (p *portal) sharedTasks(w http.ResponseWriter, r *http.Request, i identity)
 		offset = n
 	}
 	query := url.Values{"projectId": {s.ProjectID}, "limit": {strconv.Itoa(limit + 1)}, "offset": {strconv.Itoa(offset)}}
+	if parent := r.URL.Query().Get("parentId"); parent != "" {
+		if _, err = p.sharedCheckTask(r.Context(), s, parent); err != nil {
+			return err
+		}
+		query.Set("parentId", parent)
+	}
 	if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
 		query.Set("q", q)
+	}
+	if status := r.URL.Query().Get("status"); status != "" {
+		if !sharedTaskStatus(status) {
+			return sharedFail(400, "任务状态不正确")
+		}
+		query.Set("status", status)
 	}
 	tasks := []map[string]any{}
 	if err = p.sharedPC(r.Context(), "GET", "/companies/"+url.PathEscape(s.CompanyID)+"/issues?"+query.Encode(), nil, &tasks); err != nil {
@@ -538,7 +568,7 @@ func (p *portal) sharedTasks(w http.ResponseWriter, r *http.Request, i identity)
 			item["reviewState"] = state
 		}
 	}
-	writeJSON(w, 200, map[string]any{"tasks": items, "hasMore": hasMore, "nextOffset": offset + len(items)})
+	writeJSON(w, 200, map[string]any{"tasks": items, "hasMore": hasMore, "nextOffset": offset + len(items), "board": map[string]any{"statuses": sharedTaskStatuses}})
 	return nil
 }
 
@@ -614,6 +644,8 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 		return err
 	}
 	caps := sharedCaps(s.Role)
+	caps["comment"] = caps["createTask"] && sharedCanComment(task)
+	caps["editDocuments"] = caps["createTask"]
 	caps["review"] = false
 	if len(results) > 0 {
 		latest := results[len(results)-1]
@@ -652,7 +684,15 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	if agent, _ := task["assigneeAgentId"].(string); agent != "" {
 		caps["submit"] = caps["submit"] && assignment.Participant != nil && assignment.Participant.CanClaim
 	}
-	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": caps, "handoff": handoff, "handoffs": history})
+	capabilities := map[string]any{}
+	for key, value := range caps {
+		capabilities[key] = value
+	}
+	capabilities["commentUnavailableReason"] = sharedCommentUnavailableReason(task)
+	if !sharedCaps(s.Role)["createTask"] {
+		capabilities["commentUnavailableReason"] = "当前成员只能查看讨论"
+	}
+	writeJSON(w, 200, map[string]any{"task": sharedTaskDTO(task), "assignment": assignment, "results": results, "reviews": reviews, "commands": commands, "capabilities": capabilities, "handoff": handoff, "handoffs": history})
 	return nil
 }
 func (p *portal) sharedResultBody(w http.ResponseWriter, r *http.Request, i identity) error {
@@ -996,7 +1036,7 @@ func (p *portal) sharedReviewResult(w http.ResponseWriter, r *http.Request, i id
 // never leave the service, even when Paperclip adds new response fields.
 func sharedTaskDTO(task map[string]any) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"id", "identifier", "title", "description", "status", "priority", "assigneeAgentId", "assigneeUserId", "createdAt", "updatedAt"} {
+	for _, key := range []string{"id", "identifier", "title", "description", "status", "priority", "parentId", "assigneeAgentId", "assigneeUserId", "createdAt", "updatedAt"} {
 		if value, ok := task[key]; ok {
 			out[key] = value
 		}

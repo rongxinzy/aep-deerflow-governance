@@ -16,6 +16,7 @@ type sharedTaskCreation struct {
 	Description string `json:"description"`
 	Priority    string `json:"priority"`
 	RequestID   string `json:"requestId"`
+	ParentID    string `json:"parentId,omitempty"`
 }
 
 func (b *sharedTaskCreation) validate() error {
@@ -90,10 +91,18 @@ func (p *portal) sharedCreateTask(w http.ResponseWriter, r *http.Request, i iden
 		writeJSON(w, status, receipt)
 		return nil
 	}
+	if b.ParentID != "" {
+		if _, err = p.sharedCheckTask(r.Context(), s, b.ParentID); err != nil {
+			return err
+		}
+	}
 	// The per-request task placeholder prevents an uncertain create from fencing
 	// unrelated new tasks. The space lock still serializes ACL changes.
 	key := collaborationID("shared-task-create", s.ID, b.RequestID)
 	body := map[string]any{"title": b.Title, "description": b.Description, "priority": b.Priority, "projectId": s.ProjectID, "status": "backlog", "idempotencyKey": key, "allowDuplicate": true}
+	if b.ParentID != "" {
+		body["parentId"] = b.ParentID
+	}
 	if err = sharedStart(r.Context(), c, s.ID, "create:"+key, b.RequestID, i.UserID, "create_task", hash, map[string]any{"method": "POST", "path": "/companies/" + url.PathEscape(s.CompanyID) + "/issues", "body": body}); err != nil {
 		return err
 	}
@@ -104,7 +113,7 @@ func (p *portal) sharedCreateTask(w http.ResponseWriter, r *http.Request, i iden
 	var task map[string]any
 	err = p.sharedPC(r.Context(), "POST", "/companies/"+url.PathEscape(s.CompanyID)+"/issues", body, &task)
 	id, _ := task["id"].(string)
-	if err != nil || id == "" || task["companyId"] != s.CompanyID || task["projectId"] != s.ProjectID || task["status"] != "backlog" || task["title"] != b.Title || !sharedCreatedDescriptionMatches(task["description"], b.Description) || task["priority"] != b.Priority || (task["assigneeUserId"] != nil && task["assigneeUserId"] != "") || (task["assigneeAgentId"] != nil && task["assigneeAgentId"] != "") {
+	if err != nil || id == "" || task["companyId"] != s.CompanyID || task["projectId"] != s.ProjectID || task["status"] != "backlog" || task["title"] != b.Title || !sharedCreatedDescriptionMatches(task["description"], b.Description) || !sharedCreatedDescriptionMatches(task["parentId"], b.ParentID) || task["priority"] != b.Priority || (task["assigneeUserId"] != nil && task["assigneeUserId"] != "") || (task["assigneeAgentId"] != nil && task["assigneeAgentId"] != "") {
 		unknown()
 		return nil
 	}

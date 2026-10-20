@@ -138,22 +138,22 @@ func TestSharedTaskDetailHandoffStateClosesAndRestoresCapabilities(t *testing.T)
 			var response struct {
 				Handoff  *sharedHandoff  `json:"handoff"`
 				Handoffs []sharedHandoff `json:"handoffs"`
-				Caps     map[string]bool `json:"capabilities"`
+				Caps     map[string]any  `json:"capabilities"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response), w.Body.String())
 			if phase == "stop_pending" {
 				require.NotNil(t, response.Handoff)
-				require.False(t, response.Caps["submit"])
-				require.False(t, response.Caps["review"])
-				require.False(t, response.Caps["assign"])
-				require.False(t, response.Caps["claim"])
-				require.False(t, response.Caps["handoff"])
+				require.Equal(t, false, response.Caps["submit"])
+				require.Equal(t, false, response.Caps["review"])
+				require.Equal(t, false, response.Caps["assign"])
+				require.Equal(t, false, response.Caps["claim"])
+				require.Equal(t, false, response.Caps["handoff"])
 			} else {
 				require.Nil(t, response.Handoff)
-				require.True(t, response.Caps["submit"])
-				require.True(t, response.Caps["assign"])
-				require.True(t, response.Caps["claim"])
-				require.True(t, response.Caps["handoff"])
+				require.Equal(t, true, response.Caps["submit"])
+				require.Equal(t, true, response.Caps["assign"])
+				require.Equal(t, true, response.Caps["claim"])
+				require.Equal(t, true, response.Caps["handoff"])
 			}
 			require.Len(t, response.Handoffs, 1)
 			require.Equal(t, "handoff-read", response.Handoffs[0].RequestID)
