@@ -35,6 +35,8 @@ type dependencyPGFixture struct {
 	rejectCycle       bool
 	loseDependency    bool
 	dependencyPatches int
+	metadataPatches   int
+	loseMetadata      bool
 }
 
 func newDependencyPGFixture(t *testing.T) *dependencyPGFixture {
@@ -98,6 +100,16 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 	defer f.mu.Unlock()
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if r.URL.Path == "/companies/company/issues" {
+		if r.Method == "POST" {
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			body["id"] = "created"
+			body["companyId"] = "company"
+			body["updatedAt"] = "created"
+			f.tasks["created"] = body
+			writeJSON(w, 201, body)
+			return
+		}
 		require.Equal(t, "true", r.URL.Query().Get("includeBlockedBy"))
 		out := []map[string]any{}
 		for id, task := range f.tasks {
@@ -136,10 +148,19 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 					return
 				}
 			}
+			if _, ok := body["title"]; ok {
+				require.Len(t, body, 3)
+				f.metadataPatches++
+			}
 			for k, v := range body {
 				f.tasks[id][k] = v
 			}
 			f.tasks[id]["updatedAt"] = fmt.Sprint(time.Now().UnixNano())
+			if f.loseMetadata {
+				f.loseMetadata = false
+				w.WriteHeader(503)
+				return
+			}
 		}
 		writeJSON(w, 200, f.task(id, true))
 		return
