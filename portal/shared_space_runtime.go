@@ -94,10 +94,12 @@ func (p *portal) sharedRuntimeEnqueue(ctx context.Context, tx *sql.Tx, space, ta
 	if err != nil {
 		return err
 	}
-	if result.SubmittedBy != b.Owner {
+	if result.SubmittedBy != b.Owner && b.BindingState != "retired" {
 		return nil
 	}
-	if stage != "submitted" {
+	if stage == "human_submitted" {
+		stage = "submitted"
+	} else if stage != "submitted" {
 		var linked bool
 		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM shared_space_runtime_outbox WHERE command_id=$1 AND binding_id=$2)`, "return:"+result.ID+":submitted", b.ID).Scan(&linked); err != nil {
 			return err
@@ -106,7 +108,7 @@ func (p *portal) sharedRuntimeEnqueue(ctx context.Context, tx *sql.Tx, space, ta
 			return nil
 		}
 	}
-	if stage == "request_changes" {
+	if stage == "request_changes" && b.BindingState == "active" {
 		b.Generation++
 		b.ExecutionID = collaborationID(b.ID, fmt.Sprint(b.Generation))
 		b.ExpectedVersion = result.Version
@@ -494,6 +496,9 @@ func (p *portal) sharedRuntimeAgent(w http.ResponseWriter, r *http.Request, i id
 	if err = p.runtimeAuthorize(r.Context(), b, ws, i, &observed); err != nil {
 		return err
 	}
+	if sharedRuntimeResourceAction(r.PathValue("action")) && r.Method == "GET" {
+		return p.sharedRuntimeResource(w, r, b)
+	}
 	if r.PathValue("action") == "space-status" && r.Method == "GET" {
 		b, err = p.runtimeDependencyWaiting(r.Context(), b, observed)
 		if err != nil {
@@ -606,7 +611,15 @@ func (p *portal) processSharedRuntime(ctx context.Context) {
 		return
 	}
 	ident := identity{UserID: b.Owner, DeploymentID: p.cfg.aepDeploymentID}
-	if authErr := p.runtimeAuthorize(ctx, b, &ws, ident); authErr != nil {
+	authorize := p.runtimeAuthorize
+	if action == "return" {
+		if !p.sharedRuntimeReturnLinked(ctx, c, b, payload) {
+			_, _ = c.ExecContext(ctx, `UPDATE shared_space_runtime_outbox SET state='blocked' WHERE command_id=$1`, id)
+			return
+		}
+		authorize = p.runtimeReturnAuthorize
+	}
+	if authErr := authorize(ctx, b, &ws, ident); authErr != nil {
 		if rejected, ok := authErr.(*sharedError); ok && (rejected.code == 403 || rejected.code == 404 || rejected.code == 409) {
 			_, _ = c.ExecContext(ctx, `UPDATE shared_space_runtime_outbox SET state='blocked' WHERE command_id=$1`, id)
 		}

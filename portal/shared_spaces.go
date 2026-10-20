@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS shared_space_reviews (
  decision TEXT NOT NULL CHECK(decision IN ('request_changes','accept')), reason TEXT NOT NULL,
  actor_id TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(result_id)
 );
-` + sharedParticipantSchema
+` + sharedParticipantSchema + sharedHumanSchema
 
 type sharedSpace struct {
 	ID           string `json:"id"`
@@ -161,6 +161,8 @@ func (p *portal) registerSharedSpaces(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/tasks/{task}/{assignmentAction}", wrap(p.sharedAssignmentChange))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/participants", wrap(p.sharedParticipants))
 	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/agent-candidates", wrap(p.sharedAgentCandidates))
+	mux.HandleFunc("GET /api/v1/shared-spaces/{space}/human-assignees", wrap(p.sharedHumanAssignees))
+	mux.HandleFunc("PUT /api/v1/shared-spaces/{space}/members/{user}/paperclip-user", wrap(p.sharedHumanMapping))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/participants", wrap(p.sharedParticipantChange))
 	mux.HandleFunc("POST /api/v1/shared-spaces/{space}/participants/{participant}/{participantAction}", wrap(p.sharedParticipantChange))
 	mux.HandleFunc("GET /api/v1/shared-space-invitations", wrap(p.sharedInvitations))
@@ -696,8 +698,8 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	if err != nil {
 		return err
 	}
-	caps["assign"] = sharedCaps(s.Role)["submit"] && !blocked && !assignment.External && !assignment.Claimed && (task["status"] == "todo" || task["status"] == "backlog")
-	caps["claim"] = caps["assign"]
+	caps["assign"] = sharedCaps(s.Role)["submit"] && !blocked && !assignment.External && assignment.Human == nil && !assignment.Claimed && (task["status"] == "todo" || task["status"] == "backlog")
+	caps["claim"] = caps["assign"] || !blocked && assignment.Human != nil && assignment.Human.UserID == i.UserID && (task["status"] == "todo" || task["status"] == "backlog")
 	handoff, err := p.sharedHandoffDTO(r.Context(), s.ID, r.PathValue("task"))
 	if err != nil {
 		return err
@@ -706,7 +708,7 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 	if err != nil {
 		return err
 	}
-	caps["handoff"] = !blocked && handoff == nil && !assignment.External && assignment.Participant != nil && (s.Role == "owner" || assignment.Participant.CanClaim) && task["status"] != "done" && task["status"] != "cancelled" && task["status"] != "in_review"
+	caps["handoff"] = !blocked && handoff == nil && !assignment.External && (assignment.Participant != nil || assignment.Human != nil) && (s.Role == "owner" || assignment.Participant != nil && assignment.Participant.CanClaim || assignment.Human != nil && assignment.Human.UserID == i.UserID) && task["status"] != "done" && task["status"] != "cancelled" && task["status"] != "in_review"
 	if len(results) > 0 && results[len(results)-1].State != "changes_requested" {
 		caps["handoff"] = false
 	}
@@ -719,6 +721,9 @@ func (p *portal) sharedTaskDetail(w http.ResponseWriter, r *http.Request, i iden
 
 	if agent, _ := task["assigneeAgentId"].(string); agent != "" {
 		caps["submit"] = caps["submit"] && assignment.Participant != nil && assignment.Participant.CanClaim
+	}
+	if human, _ := task["assigneeUserId"].(string); human != "" {
+		caps["submit"] = caps["submit"] && assignment.Human != nil && assignment.Human.UserID == i.UserID
 	}
 	capabilities := map[string]any{}
 	for key, value := range caps {
@@ -908,6 +913,15 @@ func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, 
 			return 0, nil, sharedFail(403, "仅当前Agent管理者可代表提交")
 		}
 	}
+	if nativeUser, _ := task["assigneeUserId"].(string); nativeUser != "" {
+		human, e := p.sharedHumanForNative(ctx, s, nativeUser)
+		if e != nil {
+			return 0, nil, e
+		}
+		if human == nil || human.UserID != i.UserID {
+			return 0, nil, sharedFail(403, "仅当前人员承接者可提交成果")
+		}
+	}
 	if err = p.sharedHandoffGate(ctx, c, s.ID, taskID); err != nil {
 		return 0, nil, err
 	}
@@ -970,6 +984,10 @@ func (p *portal) sharedSubmitInput(ctx context.Context, spaceID, taskID string, 
 	}
 	if len(guards) > 0 {
 		if err = p.sharedRuntimeEnqueue(ctx, tx, s.ID, taskID, result, "submitted", ""); err != nil {
+			return 0, nil, err
+		}
+	} else if nativeUser, _ := task["assigneeUserId"].(string); nativeUser != "" {
+		if err = p.sharedHumanReturnEnqueue(ctx, tx, s.ID, taskID, result); err != nil {
 			return 0, nil, err
 		}
 	}

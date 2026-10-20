@@ -14,15 +14,15 @@ import (
 
 var handoffReadColumns = []string{
 	"request_id", "phase", "target_participant_id", "reason", "task_id", "actor_id", "target_agent_id", "target_version",
-	"binding_id", "epoch", "payload_hash", "stop_payload", "source_participant_id", "source_name", "target_name", "source_agent_id",
+	"binding_id", "epoch", "payload_hash", "stop_payload", "source_participant_id", "source_name", "target_name", "source_agent_id", "source_user_id", "source_native_user_id", "target_user_id", "target_native_user_id", "source_binding_id",
 }
 
 func handoffReadRow(request, phase, actor string, epoch int) []driver.Value {
-	return []driver.Value{request, phase, "target-participant", "handoff reason", "task", actor, "agent-b", 2, "", epoch, "hash-" + request, []byte(`{}`), "participant", "Agent A", "Agent B", "agent-a"}
+	return []driver.Value{request, phase, "target-participant", "handoff reason", "task", actor, "agent-b", 2, "", epoch, "hash-" + request, []byte(`{}`), "participant", "Agent A", "Agent B", "agent-a", "", "", "", "", ""}
 }
 
 func expectHandoffReadRow(mock sqlmock.Sqlmock, request, phase, actor string, epoch int) {
-	mock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
+	mock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
 		WithArgs("space", request).WillReturnRows(sqlmock.NewRows(handoffReadColumns).AddRow(handoffReadRow(request, phase, actor, epoch)...))
 }
 
@@ -113,10 +113,10 @@ func TestSharedTaskDetailHandoffStateClosesAndRestoresCapabilities(t *testing.T)
 			handoffExpectAssignmentParticipant(h.dbmock, "agent-a", true)
 			assignmentEpochRow(h.dbmock, "task", 5)
 			if phase == "stop_pending" {
-				h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 AND phase<>'applied'`).
+				h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 AND phase<>'applied'`).
 					WithArgs("space", "task").WillReturnRows(sqlmock.NewRows(handoffReadColumns).AddRow(handoffReadRow("handoff-read", phase, "u-owner", 5)...))
 			} else {
-				h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 AND phase<>'applied'`).
+				h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 AND phase<>'applied'`).
 					WithArgs("space", "task").WillReturnError(sql.ErrNoRows)
 			}
 			// History is intentionally the full set, including an applied handoff.
@@ -126,7 +126,7 @@ func TestSharedTaskDetailHandoffStateClosesAndRestoresCapabilities(t *testing.T)
 			} else {
 				history.AddRow(handoffReadRow("handoff-read", "applied", "u-owner", 5)...)
 			}
-			h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 ORDER BY epoch`).
+			h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND task_id=\$2 ORDER BY epoch`).
 				WithArgs("space", "task").WillReturnRows(history)
 			h.dbmock.ExpectQuery("SELECT EXISTS.*shared_space_runtime_bindings").WillReturnRows(sqlmock.NewRows([]string{"bound"}).AddRow(phase == "stop_pending"))
 

@@ -119,6 +119,10 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if r.URL.Path == "/companies/company/user-directory" {
+		writeJSON(w, 200, map[string]any{"users": []any{map[string]any{"principalId": "native-x", "status": "active", "user": map[string]any{"id": "native-x", "name": "用户甲"}}, map[string]any{"principalId": "native-owner", "status": "active", "user": map[string]any{"id": "native-owner", "name": "李四"}}}})
+		return
+	}
 	if r.URL.Path == "/companies/company/labels" {
 		if r.Method == "POST" {
 			var in sharedLabelCreation
@@ -187,6 +191,11 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 			out = out[:limit]
 		}
 		writeJSON(w, 200, out)
+		return
+	}
+	if r.URL.Path == "/attachments/file/content" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{0, 1, 2, 255})
 		return
 	}
 	if len(parts) < 2 || parts[0] != "issues" {
@@ -262,7 +271,21 @@ func (f *dependencyPGFixture) paperclip(t *testing.T, w http.ResponseWriter, r *
 			return
 		}
 		writeJSON(w, 200, f.task(id, true))
+	case "comments":
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		writeJSON(w, 201, map[string]any{"id": "comment-" + id, "issueId": id, "body": body["body"]})
+	case "attachments":
+		writeJSON(w, 200, []any{map[string]any{"id": "file", "issueId": id, "originalFilename": "资料.bin", "contentType": "application/octet-stream", "byteSize": 4}})
 	case "documents":
+		if len(parts) == 3 {
+			writeJSON(w, 200, []any{map[string]any{"id": "reference-" + id, "issueId": id, "companyId": "company", "key": "zhiyuan-reference-guide", "title": "共享资料", "body": "参考正文", "format": "markdown", "latestRevisionId": "ref-revision"}})
+			return
+		}
+		if parts[3] == "zhiyuan-reference-guide" {
+			writeJSON(w, 200, map[string]any{"id": "reference-" + id, "issueId": id, "companyId": "company", "key": "zhiyuan-reference-guide", "title": "共享资料", "body": "参考正文", "format": "markdown", "latestRevisionId": "ref-revision"})
+			return
+		}
 		if r.Method == "PUT" {
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
@@ -288,7 +311,7 @@ func (f *dependencyPGFixture) pi(t *testing.T, w http.ResponseWriter, r *http.Re
 			return
 		}
 		writeJSON(w, 200, receipt)
-	case "/assistant/internal/shared-space/start", "/assistant/internal/shared-space/return":
+	case "/assistant/internal/shared-space/start", "/assistant/internal/shared-space/return", "/assistant/internal/shared-space/stop":
 		var in struct {
 			CommandID string         `json:"commandId"`
 			Hash      string         `json:"payloadHash"`
@@ -307,6 +330,9 @@ func (f *dependencyPGFixture) pi(t *testing.T, w http.ResponseWriter, r *http.Re
 				w.WriteHeader(503)
 				return
 			}
+		} else if strings.HasSuffix(r.URL.Path, "/stop") {
+			receipt["bindingId"], receipt["executionId"], receipt["assignmentEpoch"], receipt["fenced"], receipt["schedulerStopped"] = in.Payload["bindingId"], in.Payload["executionId"], in.Payload["assignmentEpoch"], true, true
+			f.receipts[in.CommandID] = receipt
 		} else {
 			require.EqualValues(t, 42, in.Payload["conversationId"])
 			f.returns = append(f.returns, in.Payload)

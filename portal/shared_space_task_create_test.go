@@ -149,7 +149,7 @@ func TestSharedTaskCommandReadOnly(t *testing.T) {
 			}
 			m.ExpectQuery("SELECT s.id,s.deployment_id").WillReturnRows(sqlmock.NewRows([]string{"id", "deployment", "company", "project", "name", "role"}).AddRow("space", "dep", "company", "project", "空间", role))
 			if mode != "viewer" {
-				m.ExpectQuery("SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs").WithArgs("space", "req").WillReturnError(sql.ErrNoRows)
+				m.ExpectQuery("SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs").WithArgs("space", "req").WillReturnError(sql.ErrNoRows)
 				q := m.ExpectQuery("SELECT actor_id,action,payload_hash,state,receipt").WithArgs("space", "req")
 				if mode == "missing" {
 					q.WillReturnError(sql.ErrNoRows)

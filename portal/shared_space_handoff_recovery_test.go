@@ -143,9 +143,9 @@ func TestSharedHandoffRequestBoundariesAndIdempotency(t *testing.T) {
 		h := participantPermissionHarness(t)
 		handoffExpectLock(h.dbmock)
 		handoffExpectMember(h.dbmock, "owner")
-		h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
-			WithArgs("space", "handoff-replay").WillReturnRows(sqlmock.NewRows([]string{"request_id", "phase", "target_participant_id", "reason", "task_id", "actor_id", "target_agent_id", "target_version", "binding_id", "epoch", "payload_hash", "stop_payload", "source_participant_id", "source_name", "target_name", "source_agent_id"}).
-			AddRow("handoff-replay", "stop_unknown", "target", "original reason", "task", "u-owner", "agent-b", 1, "binding", 1, "original-payload-hash", []byte(`{}`), "source", "Agent A", "Agent B", "agent-a"))
+		h.dbmock.ExpectQuery(`SELECT request_id,phase,target_participant_id,reason,task_id,actor_id,target_agent_id,target_version,binding_id,epoch,payload_hash,stop_payload,source_participant_id,source_name,target_name,source_agent_id,source_user_id,source_native_user_id,target_user_id,target_native_user_id,source_binding_id FROM shared_space_handoffs WHERE space_id=\$1 AND request_id=\$2`).
+			WithArgs("space", "handoff-replay").WillReturnRows(sqlmock.NewRows([]string{"request_id", "phase", "target_participant_id", "reason", "task_id", "actor_id", "target_agent_id", "target_version", "binding_id", "epoch", "payload_hash", "stop_payload", "source_participant_id", "source_name", "target_name", "source_agent_id", "source_user_id", "source_native_user_id", "target_user_id", "target_native_user_id", "source_binding_id"}).
+			AddRow("handoff-replay", "stop_unknown", "target", "original reason", "task", "u-owner", "agent-b", 1, "binding", 1, "original-payload-hash", []byte(`{}`), "source", "Agent A", "Agent B", "agent-a", "", "", "", "", ""))
 		handoffExpectUnlock(h.dbmock)
 
 		body, err := json.Marshal(map[string]any{"requestId": "handoff-replay", "expectedAssignmentToken": "token", "participantId": "target", "reason": "changed reason"})
