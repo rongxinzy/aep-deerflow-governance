@@ -37,6 +37,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "pods", "events", "persistentvolumeclaims"]
     verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Leader election (--leader-elect) coordinates replicas via a Lease.
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects", "triggerauthentications"]

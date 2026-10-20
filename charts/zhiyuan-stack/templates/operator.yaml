@@ -22,6 +22,7 @@ spec:
           envFrom:
             - secretRef: {name: de-platform-creds}
           env:
+            - {name: MODEL_ACCESS_TOKEN_AUDIENCE, value: {{ .Values.modelWorkloadIdentity.audience | quote }}}
             - {name: HIBERNATION_DB_URL_SECRET, value: de-portal-db}
             # db-init 镜像走 Harbor（离线可安装），不依赖 operator 编译期的 docker.io 默认。
             - {name: CONVERSATION_INIT_IMAGE, value: {{ include "zhiyuan.image" (dict "registry" .Values.global.registry "repo" .Values.images.conversationInit.repository "tag" .Values.images.conversationInit.tag "digest" .Values.images.conversationInit.digest) | quote }}}

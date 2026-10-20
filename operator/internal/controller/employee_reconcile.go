@@ -78,6 +78,9 @@ func (r *DigitalEmployeeReconciler) ensureChildren(ctx context.Context, employee
 	if err != nil {
 		return err
 	}
+	if err := r.prepareModelIdentity(ctx, employee, deployment); err != nil {
+		return fmt.Errorf("model workload identity: %w", err)
+	}
 	if err := controllerutil.SetControllerReference(employee, deployment, r.Scheme); err != nil {
 		return err
 	}

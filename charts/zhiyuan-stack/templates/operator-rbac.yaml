@@ -69,6 +69,17 @@ rules:
   verbs:
   - '*'
 - apiGroups:
+  - ''
+  resources:
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+- apiGroups:
   - keda.sh
   resources:
   - scaledobjects
