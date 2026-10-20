@@ -97,3 +97,34 @@ func TestSharedHumanHandoffHistoryHidesNativePrincipal(t *testing.T) {
 	require.Contains(t, string(raw), "aep-b")
 	require.NotContains(t, string(raw), "native-")
 }
+
+// A durable handoff intent does not retain a member's revoked write authority.
+func TestSharedHandoffDowngradedViewerCannotPatch(t *testing.T) {
+	for _, source := range []string{"human", "agent"} {
+		t.Run(source, func(t *testing.T) {
+			h := newApplyHarness(t)
+			s := sharedSpace{ID: "space", DeploymentID: "deployment-acme", CompanyID: "company", ProjectID: "project", Role: "owner"}
+			handoff := sharedHandoff{RequestID: "pending-before-demotion", Actor: "u-x", TaskID: "task", Phase: "patch_pending", SourceAgentID: "agent", FromID: "participant", TargetUserID: "u-owner", TargetNativeUserID: "native-owner"}
+			if source == "human" {
+				handoff.SourceAgentID = ""
+				handoff.FromID = ""
+				handoff.SourceUserID = "u-x"
+				handoff.SourceNativeUserID = "native-x"
+			}
+			runtimeExpectMemberSpace(h, "viewer")
+			calls := 0
+			sharedNativeServer(t, h.portal, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				t.Errorf("downgraded viewer reached native board: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(500)
+			})
+			c, err := h.db.Conn(t.Context())
+			require.NoError(t, err)
+			defer func() { _ = c.Close() }()
+			h.processHandoffLocked(t.Context(), c, s, &handoff)
+			require.Equal(t, "patch_pending", handoff.Phase)
+			require.Zero(t, calls)
+			require.NoError(t, h.dbmock.ExpectationsWereMet())
+		})
+	}
+}

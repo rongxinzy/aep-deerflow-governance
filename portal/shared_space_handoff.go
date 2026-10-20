@@ -333,6 +333,9 @@ func (p *portal) processHandoffLocked(ctx context.Context, c *sql.Conn, s shared
 		if e != nil {
 			return
 		}
+		if actorSpace.Role != "owner" && !sharedCaps(actorSpace.Role)["submit"] {
+			return
+		}
 		if actorSpace.Role != "owner" && h.SourceUserID != h.Actor {
 			x, e := participantScan(c.QueryRowContext(ctx, participantSelect+` AND id=$2`, s.ID, h.FromID))
 			if e != nil {
