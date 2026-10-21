@@ -1,3 +1,10 @@
+> **本仓库已迁移至内网 GitLab：http://172.18.5.188:30089/rongxinzy/aep-deerflow-governance**（2026-10-21）。GitHub 侧不再更新，仅保留只读存档；克隆、提交与评审请走内网 GitLab。
+>
+> **This repository has moved to the intranet GitLab: http://172.18.5.188:30089/rongxinzy/aep-deerflow-governance** (2026-10-21). The GitHub copy is a read-only archive and is no longer updated.
+
+
+---
+
 # aep-deerflow-governance
 
 AEP 数字员工治理层 —— DeerFlow 运行时上的身份、数据范围与工具强制中间件，以及 k3s/K8s 部署清单。
